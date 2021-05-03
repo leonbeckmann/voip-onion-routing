@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "onion_bin",
+    "onion_lib",
+    "onion_tests",
+    "onion_examples"
+]
