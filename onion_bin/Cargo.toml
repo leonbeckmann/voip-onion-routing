@@ -1,10 +1,15 @@
 [package]
 name = "onion_bin"
 version = "0.1.0"
-authors = ["Leon <leon.beckmann@tum.de>"]
+description = "VoidPhone Project - Onion Module"
+authors = [
+    "Leon Beckmann <leon.beckmann@tum.de>",
+    "Florian Freund <florian.freund@tum.de>"
+]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 onion-lib = { path = "../onion_lib" }
+clap = "2"

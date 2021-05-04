@@ -22,9 +22,16 @@ In the root directory run:
 
 ## How to Use
 
+The module requires a Windows INI configuration file for configuring the Onion module
+(see *template.config*).
+
 In the root directory run:
 
-```cargo run```
+```cargo run -- -c <CONFIG_FILE_PATH>```
+
+For more information run:
+
+```cargo run -- --help```
 
 ## Tests and Examples
 
@@ -43,4 +50,4 @@ To run an example, run in the root directory:
 
 The logging level can be set via the environment variable *RUST_LOG*:
 
-`RUST_LOG=debug cargo run` 
+`RUST_LOG=debug cargo run -- -c <CONFIG_FILE_PATH>`
