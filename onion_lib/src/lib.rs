@@ -1,3 +1,7 @@
+
+mod config_parser;
+
+
 #[cfg(test)]
 mod tests {
     #[test]

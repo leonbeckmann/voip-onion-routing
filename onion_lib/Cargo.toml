@@ -7,3 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+log = "0.4.14"
+env_logger = "0.8.3"
+rust-ini = "0.17.0"     # for parsing ini configuration files
+openssl = "0.10.34"
+
+[dev-dependencies]
+tempdir = "0.3.7"       # used for creating temp dir for testing config-parser
