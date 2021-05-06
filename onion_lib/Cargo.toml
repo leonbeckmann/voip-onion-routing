@@ -13,7 +13,6 @@ edition = "2018"
 log = "0.4.14"
 env_logger = "0.8.3"
 rust-ini = "0.17.0"     # for parsing ini configuration files
-regex = "1.5.3"
 openssl = "0.10.34"
 
 [dev-dependencies]
