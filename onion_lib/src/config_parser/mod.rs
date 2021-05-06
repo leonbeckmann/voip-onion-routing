@@ -1,47 +1,39 @@
-
 extern crate ini;
 
-use std::fmt::Formatter;
-use std::path::Path;
 use ini::Ini;
-use openssl::rsa::Rsa;
-use std::fs;
 use openssl::pkey::Public;
-use std::net::{ToSocketAddrs, SocketAddr};
+use openssl::rsa::Rsa;
+use std::fmt::Formatter;
+use std::fs;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::Path;
 
 pub struct OnionConfiguration {
-    p2p_port: u16,
-    p2p_hostname: String,
-    host_key: Rsa<Public>,
-    hop_count: u8,
-    onion_api_address: SocketAddr,
-    rps_api_address: SocketAddr,
+    pub p2p_port: u16,
+    pub p2p_hostname: String,
+    pub host_key: Rsa<Public>,
+    pub hop_count: u8,
+    pub onion_api_address: SocketAddr,
+    pub rps_api_address: SocketAddr,
 }
 
 impl OnionConfiguration {
     pub fn parse_from_file<P: AsRef<Path>>(path: P) -> Result<OnionConfiguration, ParsingError> {
-
         // parse config file
         let config = match Ini::load_from_file(path) {
             Ok(config) => config,
-            Err(e) => {
-                return Err(ParsingError::from_string(e.to_string()))
-            }
+            Err(e) => return Err(ParsingError::from_string(e.to_string())),
         };
 
         // parse sections
         let onion_sec = match config.section(Some("onion")) {
-            None => {
-                return Err(ParsingError::from_str("Missing section: 'onion'"))
-            }
-            Some(section) => section
+            None => return Err(ParsingError::from_str("Missing section: 'onion'")),
+            Some(section) => section,
         };
 
         let rps_sec = match config.section(Some("rps")) {
-            None => {
-                return Err(ParsingError::from_str("Missing section: 'rps'"))
-            }
-            Some(section) => section
+            None => return Err(ParsingError::from_str("Missing section: 'rps'")),
+            Some(section) => section,
         };
 
         /* parse properties */
@@ -53,10 +45,8 @@ impl OnionConfiguration {
             }
             Some(port) => match port.parse() {
                 Ok(port) => port,
-                Err(_) => {
-                    return Err(ParsingError::from_str("Cannot parse 'p2p_port' to u16"))
-                }
-            }
+                Err(_) => return Err(ParsingError::from_str("Cannot parse 'p2p_port' to u16")),
+            },
         };
 
         // parse p2p_hostname
@@ -64,7 +54,7 @@ impl OnionConfiguration {
             None => {
                 return Err(ParsingError::from_str("Missing component: 'p2p_hostname'"));
             }
-            Some(hostname) => hostname.to_string()
+            Some(hostname) => hostname.to_string(),
         };
 
         // parse host_key
@@ -75,19 +65,21 @@ impl OnionConfiguration {
             Some(file) => match fs::read(file) {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    return Err(ParsingError::from_string(
-                        format!("Cannot access hostkey file: {}", e.to_string()))
-                    );
+                    return Err(ParsingError::from_string(format!(
+                        "Cannot access hostkey file: {}",
+                        e.to_string()
+                    )));
                 }
-            }
+            },
         };
 
         let host_key = match Rsa::public_key_from_pem(host_key_pem.as_ref()) {
             Ok(rsa) => rsa,
             Err(e) => {
-                return Err(ParsingError::from_string(
-                    format!("Cannot parse hostkey from pem: {}", e.to_string()))
-                )
+                return Err(ParsingError::from_string(format!(
+                    "Cannot parse hostkey from pem: {}",
+                    e.to_string()
+                )))
             }
         };
 
@@ -100,54 +92,58 @@ impl OnionConfiguration {
                 Ok(count) => {
                     // must be at least two
                     if count < 2 {
-                        return Err(ParsingError::from_str("hop_count must be at least 2"))
+                        return Err(ParsingError::from_str("hop_count must be at least 2"));
                     }
                     count
                 }
-                Err(_) => {
-                    return Err(ParsingError::from_str("Cannot parse 'hop_count' to u8"))
-                }
-            }
+                Err(_) => return Err(ParsingError::from_str("Cannot parse 'hop_count' to u8")),
+            },
         };
 
         // parse onion's api_address
         let onion_api_address = match onion_sec.get("api_address") {
             None => {
-                return Err(ParsingError::from_str("Missing component: onion's 'api_address'"));
+                return Err(ParsingError::from_str(
+                    "Missing component: onion's 'api_address'",
+                ));
             }
             Some(address) => match address.to_socket_addrs() {
                 Ok(mut iter) => match iter.next() {
                     None => {
                         return Err(ParsingError::from_str("Cannot parse onion's api_address"));
                     }
-                    Some(addr) => addr
-                }
+                    Some(addr) => addr,
+                },
                 Err(e) => {
-                    return Err(ParsingError::from_string(
-                        format!("Cannot parse onion's api_address: {}", e.to_string()))
-                    )
+                    return Err(ParsingError::from_string(format!(
+                        "Cannot parse onion's api_address: {}",
+                        e.to_string()
+                    )))
                 }
-            }
+            },
         };
 
         // parse RPS's api_address
         let rps_api_address = match rps_sec.get("api_address") {
             None => {
-                return Err(ParsingError::from_str("Missing component: rps's 'api_address'"));
+                return Err(ParsingError::from_str(
+                    "Missing component: rps's 'api_address'",
+                ));
             }
             Some(address) => match address.to_socket_addrs() {
                 Ok(mut iter) => match iter.next() {
                     None => {
                         return Err(ParsingError::from_str("Cannot parse rps's api_address"));
                     }
-                    Some(addr) => addr
-                }
+                    Some(addr) => addr,
+                },
                 Err(e) => {
-                    return Err(ParsingError::from_string(
-                        format!("Cannot parse rps's api_address: {}", e.to_string()))
-                    )
+                    return Err(ParsingError::from_string(format!(
+                        "Cannot parse rps's api_address: {}",
+                        e.to_string()
+                    )))
                 }
-            }
+            },
         };
 
         Ok(OnionConfiguration {
@@ -163,28 +159,30 @@ impl OnionConfiguration {
 
 #[derive(Debug)]
 pub struct ParsingError {
-    desc: String
+    desc: String,
 }
 
 impl std::error::Error for ParsingError {}
 
 impl ParsingError {
     fn from_string(desc: String) -> ParsingError {
-        ParsingError {
-            desc
-        }
+        ParsingError { desc }
     }
 
     fn from_str(desc: &'static str) -> ParsingError {
         ParsingError {
-            desc: desc.to_string()
+            desc: desc.to_string(),
         }
     }
 }
 
 impl std::fmt::Display for ParsingError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cannot parse configuration from windows ini: {}", self.desc)
+        write!(
+            f,
+            "Cannot parse configuration from windows ini: {}",
+            self.desc
+        )
     }
 }
 
@@ -193,12 +191,12 @@ mod tests {
 
     extern crate tempdir;
     use super::ini::Ini;
-    use openssl::rsa::Rsa;
-    use tempdir::TempDir;
     use crate::config_parser::OnionConfiguration;
+    use openssl::rsa::Rsa;
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
+    use tempdir::TempDir;
 
     fn create_config_file<P: AsRef<Path>>(
         onion: bool,
@@ -209,7 +207,7 @@ mod tests {
         onion_api_addr: Option<&str>,
         rps_api_addr: Option<&str>,
         hostkey: Option<&str>,
-        file_path: P
+        file_path: P,
     ) {
         let mut config = Ini::new();
         if onion {
@@ -217,21 +215,29 @@ mod tests {
                 config.with_section(Some("onion")).set("p2p_port", port);
             }
             if let Some(hostname) = p2p_hostname {
-                config.with_section(Some("onion")).set("p2p_hostname", hostname);
+                config
+                    .with_section(Some("onion"))
+                    .set("p2p_hostname", hostname);
             }
             if let Some(hop_count) = hop_count {
-                config.with_section(Some("onion")).set("hop_count", hop_count);
+                config
+                    .with_section(Some("onion"))
+                    .set("hop_count", hop_count);
             }
             if let Some(key) = hostkey {
                 config.with_section(Some("onion")).set("hostkey", key);
             }
             if let Some(api_addr) = onion_api_addr {
-                config.with_section(Some("onion")).set("api_address", api_addr);
+                config
+                    .with_section(Some("onion"))
+                    .set("api_address", api_addr);
             }
         }
         if rps {
             if let Some(api_addr) = rps_api_addr {
-                config.with_section(Some("rps")).set("api_address", api_addr);
+                config
+                    .with_section(Some("rps"))
+                    .set("api_address", api_addr);
             }
         }
 
@@ -240,7 +246,6 @@ mod tests {
 
     #[test]
     fn unit_config_parser() {
-
         // create tmp dir that will be automatically dropped afterwards
         let dir = TempDir::new("onion-test").unwrap();
 
@@ -277,68 +282,197 @@ mod tests {
         rsa_der.sync_all().unwrap();
 
         // create config files
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("127.0.0.1:1234"), Some("127.0.0.1:1235"),
-                           Some(host_key_file.to_str().unwrap()), &valid_config);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &valid_config,
+        );
 
-        create_config_file(false, false, None, None, None,
-                           None, None, None, &config_missing_section);
+        create_config_file(
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &config_missing_section,
+        );
 
-        create_config_file(true, true, None, Some("localhost"),
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_missing_port);
+        create_config_file(
+            true,
+            true,
+            None,
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_missing_port,
+        );
 
-        create_config_file(true, true, Some("2x"), Some("localhost"),
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_invalid_port);
+        create_config_file(
+            true,
+            true,
+            Some("2x"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_invalid_port,
+        );
 
-        create_config_file(true, true, Some("1234"), None,
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_missing_hostname);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            None,
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_missing_hostname,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           None, &config_missing_hostkey);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            None,
+            &config_missing_hostkey,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(invalid_host_key_file.to_str().unwrap()), &config_der_hostkey);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(invalid_host_key_file.to_str().unwrap()),
+            &config_der_hostkey,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(invalid_host_key_path.to_str().unwrap()), &config_invalid_hostkey_path);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(invalid_host_key_path.to_str().unwrap()),
+            &config_invalid_hostkey_path,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &valid_config);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &valid_config,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           None, Some("localhost:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_missing_hop_count);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            None,
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_missing_hop_count,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("1"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_invalid_hop_count);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("1"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_invalid_hop_count,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("localhost:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &valid_config);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &valid_config,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), None, Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_missing_onion_api_address);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            None,
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_missing_onion_api_address,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("localhost:1234"), None,
-                           Some(host_key_file.to_str().unwrap()), &config_missing_rps_api_address);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            None,
+            Some(host_key_file.to_str().unwrap()),
+            &config_missing_rps_api_address,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("127.0.0.1:123400"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_invalid_api_address);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("127.0.0.1:123400"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_invalid_api_address,
+        );
 
-        create_config_file(true, true, Some("1234"), Some("localhost"),
-                           Some("2"), Some("[::1]:1234"), Some("localhost:1235"),
-                           Some(host_key_file.to_str().unwrap()), &config_api_address_v6);
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("[::1]:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            &config_api_address_v6,
+        );
 
         // parse configurations
         let config = OnionConfiguration::parse_from_file(valid_config).unwrap();
@@ -362,11 +496,9 @@ mod tests {
         assert!(OnionConfiguration::parse_from_file(config_missing_rps_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_api_address).is_err());
 
-        let config =
-            OnionConfiguration::parse_from_file(config_api_address_v6).unwrap();
+        let config = OnionConfiguration::parse_from_file(config_api_address_v6).unwrap();
         assert_eq!(config.onion_api_address.port(), 1234);
         assert!(config.onion_api_address.is_ipv6());
-
 
         dir.close().unwrap();
     }

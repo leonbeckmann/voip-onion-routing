@@ -1,4 +1,3 @@
-
 extern crate onion_lib;
 
 #[test]
