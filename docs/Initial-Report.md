@@ -8,7 +8,7 @@
 ## Programming Language and Operating System
 Rust on Linux and Mac OS X
 
- * Designed for concurrent asynchronous programming
+* Designed for concurrent asynchronous programming
 * Secure language model
   * type safety
   * memory safety
