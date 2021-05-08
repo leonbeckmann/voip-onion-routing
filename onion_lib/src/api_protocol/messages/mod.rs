@@ -6,28 +6,20 @@ use std::net::IpAddr;
  * Direction: Incoming, Outgoing
  */
 pub(crate) struct OnionMessageHeader {
-    size: u16,
-    msg_type: u16,
+    pub size: u16,
+    pub msg_type: u16,
 }
 
 impl OnionMessageHeader {
-    pub(crate) fn _new(size: u16, msg_type: u16) -> OnionMessageHeader {
+    pub(crate) fn new(size: u16, msg_type: u16) -> OnionMessageHeader {
         OnionMessageHeader { size, msg_type }
-    }
-
-    pub(crate) fn size(&self) -> u16 {
-        self.size
-    }
-
-    pub(crate) fn msg_type(&self) -> u16 {
-        self.msg_type
     }
 
     pub(crate) const fn hdr_size() -> usize {
         4
     }
 
-    pub(crate) fn _to_be_vec(&self) -> Vec<u8> {
+    pub(crate) fn to_be_vec(&self) -> Vec<u8> {
         let mut v = vec![];
         v.append(&mut self.size.to_be_bytes().to_vec());
         v.append(&mut self.msg_type.to_be_bytes().to_vec());
@@ -51,9 +43,9 @@ impl From<&[u8; OnionMessageHeader::hdr_size()]> for OnionMessageHeader {
  */
 pub(crate) struct OnionTunnelBuild {
     _reserved_v: u16,
-    onion_port: u16,
-    ip: IpAddr,
-    host_key: Vec<u8>,
+    pub onion_port: u16,
+    pub ip: IpAddr,
+    pub host_key: Vec<u8>,
 }
 
 impl TryFrom<Vec<u8>> for Box<OnionTunnelBuild> {
@@ -124,7 +116,7 @@ pub(crate) struct OnionTunnelIncoming {
  * Direction: Incoming
  */
 pub(crate) struct OnionTunnelDestroy {
-    tunnel_id: u32,
+    pub tunnel_id: u32,
 }
 
 impl OnionTunnelDestroy {
@@ -154,8 +146,8 @@ impl TryFrom<Vec<u8>> for OnionTunnelDestroy {
  * Direction: Incoming, Outgoing
  */
 pub(crate) struct OnionTunnelData {
-    tunnel_id: u32,
-    data: Vec<u8>,
+    pub tunnel_id: u32,
+    pub data: Vec<u8>,
 }
 
 impl TryFrom<Vec<u8>> for Box<OnionTunnelData> {
@@ -190,7 +182,7 @@ pub(crate) struct OnionError {
  * Direction: Incoming
  */
 pub(crate) struct OnionCover {
-    cover_size: u16,
+    pub cover_size: u16,
     _reserved: u16,
 }
 
@@ -215,4 +207,10 @@ impl TryFrom<Vec<u8>> for OnionCover {
             })
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    // note that parsing of OnionTunnelBuild, OnionTunnelDestroy, OnionTunnelData and OnionCover is
+    // covered in the incoming event parsing in event module
 }

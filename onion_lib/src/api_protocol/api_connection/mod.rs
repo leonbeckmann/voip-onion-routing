@@ -22,7 +22,7 @@ impl Connection {
         let hdr = OnionMessageHeader::from(&buf);
 
         // read remaining message into buf without the hdr
-        let mut buf = vec![0u8; hdr.size() as usize - OnionMessageHeader::hdr_size()];
+        let mut buf = vec![0u8; hdr.size as usize - OnionMessageHeader::hdr_size()];
         self.stream.read_exact(&mut buf).await?;
 
         // parse to event via raw bytes from buf and onion header

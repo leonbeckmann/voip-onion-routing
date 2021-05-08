@@ -18,18 +18,18 @@ Rust on Linux and Mac OS X
   * Near C performance
 * The standard library has support for many commonly used cryptographic functions (e.g. sha256, aes-encryption, ...)
 * Cross platform support
-* Many built-in tools (dependeny management, building, testing, code formating)
+* Many built-in tools (dependency management, building, testing, code formatting)
 
 
 ## Build System
 * **Cargo**
 
 ## Quality Measures
-* Code formating: clippy, rustfmt
-* Rust test suite
+* Code formatting: clippy, rustfmt
+* Rust test suite (for unit and integration)
 * Test code coverage
 * LLVM address sanitizer (only if we use external non-Rust code)
-* Continous integration
+* Continuous integration
 * GitLab hooks: Block invalid commits
 * (Fuzzing)
 
