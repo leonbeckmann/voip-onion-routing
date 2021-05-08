@@ -11,8 +11,8 @@ pub(crate) struct OnionMessageHeader {
 }
 
 impl OnionMessageHeader {
-    pub(crate) fn new(size: u16, msg_type: u16) -> OnionMessageHeader {
-        OnionMessageHeader { size, msg_type }
+    pub(crate) fn new(size: u16, msg_type: u16) -> Self {
+        Self { size, msg_type }
     }
 
     pub(crate) const fn hdr_size() -> usize {
@@ -28,9 +28,9 @@ impl OnionMessageHeader {
     }
 }
 
-impl From<&[u8; OnionMessageHeader::hdr_size()]> for OnionMessageHeader {
-    fn from(raw: &[u8; OnionMessageHeader::hdr_size()]) -> Self {
-        OnionMessageHeader {
+impl From<&[u8; Self::hdr_size()]> for OnionMessageHeader {
+    fn from(raw: &[u8; Self::hdr_size()]) -> Self {
+        Self {
             size: u16::from_be_bytes(raw[0..2].try_into().unwrap()),
             msg_type: u16::from_be_bytes(raw[2..4].try_into().unwrap()),
         }
@@ -103,12 +103,42 @@ pub(crate) struct OnionTunnelReady {
     host_key: Vec<u8>,
 }
 
+impl OnionTunnelReady {
+    pub(crate) fn new(tunnel_id: u32, host_key: Vec<u8>) -> Self {
+        Self {
+            tunnel_id,
+            host_key,
+        }
+    }
+
+    pub(crate) fn to_be_vec(&self) -> Vec<u8> {
+        let mut v = vec![];
+        v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
+        v.extend(&self.host_key);
+        v.append(&mut vec![]);
+        v
+    }
+}
+
 /*
  * Onion Tunnel Incoming [tunnel_id: u32]
  * Direction: Outgoing
  */
 pub(crate) struct OnionTunnelIncoming {
     tunnel_id: u32,
+}
+
+impl OnionTunnelIncoming {
+    pub(crate) fn new(tunnel_id: u32) -> Self {
+        Self { tunnel_id }
+    }
+
+    pub(crate) fn to_be_vec(&self) -> Vec<u8> {
+        let mut v = vec![];
+        v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
+        v.append(&mut vec![]);
+        v
+    }
 }
 
 /*
@@ -134,7 +164,7 @@ impl TryFrom<Vec<u8>> for OnionTunnelDestroy {
                 "Cannot parse OnionTunnelDestroy: Invalid number of bytes",
             ))
         } else {
-            Ok(OnionTunnelDestroy {
+            Ok(Self {
                 tunnel_id: u32::from_be_bytes(raw[0..4].try_into().unwrap()),
             })
         }
@@ -167,6 +197,20 @@ impl TryFrom<Vec<u8>> for Box<OnionTunnelData> {
     }
 }
 
+impl OnionTunnelData {
+    pub(crate) fn new(tunnel_id: u32, data: Vec<u8>) -> Self {
+        Self { tunnel_id, data }
+    }
+
+    pub(crate) fn to_be_vec(&self) -> Vec<u8> {
+        let mut v = vec![];
+        v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
+        v.extend(&self.data);
+        v.append(&mut vec![]);
+        v
+    }
+}
+
 /*
  * Onion Tunnel Error [request_type: u16, reserved: u16, tunnel_id: u32]
  * Direction: Outgoing
@@ -175,6 +219,25 @@ pub(crate) struct OnionError {
     request_type: u16,
     _reserved: u16,
     tunnel_id: u32,
+}
+
+impl OnionError {
+    pub(crate) fn new(request_type: u16, tunnel_id: u32) -> Self {
+        Self {
+            request_type,
+            _reserved: 0,
+            tunnel_id,
+        }
+    }
+
+    pub(crate) fn to_be_vec(&self) -> Vec<u8> {
+        let mut v = vec![];
+        v.append(&mut self.request_type.to_be_bytes().to_vec());
+        v.append(&mut self._reserved.to_be_bytes().to_vec());
+        v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
+        v.append(&mut vec![]);
+        v
+    }
 }
 
 /*
@@ -201,7 +264,7 @@ impl TryFrom<Vec<u8>> for OnionCover {
                 "Cannot parse OnionCover: Invalid number of bytes",
             ))
         } else {
-            Ok(OnionCover {
+            Ok(Self {
                 cover_size: u16::from_be_bytes(raw[0..2].try_into().unwrap()),
                 _reserved: 0,
             })

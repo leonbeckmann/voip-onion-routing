@@ -51,6 +51,18 @@ pub(crate) enum OutgoingEvent {
     Error(OnionError),
 }
 
+#[allow(clippy::from_over_into)]
+impl Into<Vec<u8>> for OutgoingEvent {
+    fn into(self) -> Vec<u8> {
+        match self {
+            OutgoingEvent::TunnelReady(packet) => packet.to_be_vec(),
+            OutgoingEvent::TunnelIncoming(packet) => packet.to_be_vec(),
+            OutgoingEvent::TunnelData(packet) => packet.to_be_vec(),
+            OutgoingEvent::Error(packet) => packet.to_be_vec(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::api_protocol;
