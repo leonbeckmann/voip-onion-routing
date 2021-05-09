@@ -66,8 +66,10 @@ impl Into<Vec<u8>> for OutgoingEvent {
 #[cfg(test)]
 mod tests {
     use crate::api_protocol;
-    use crate::api_protocol::event::IncomingEvent;
-    use crate::api_protocol::messages::OnionMessageHeader;
+    use crate::api_protocol::event::{IncomingEvent, OutgoingEvent};
+    use crate::api_protocol::messages::{
+        OnionError, OnionMessageHeader, OnionTunnelData, OnionTunnelIncoming, OnionTunnelReady,
+    };
     use std::convert::TryFrom;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
@@ -191,5 +193,41 @@ mod tests {
         // invalid, too large
         let raw_3: Vec<u8> = vec![4, 1, 0, 0, 0];
         assert!(parse_event(raw_3, api_protocol::ONION_COVER).is_err());
+    }
+
+    #[test]
+    fn unit_onion_ready_serial() {
+        let e = OutgoingEvent::TunnelReady(Box::new(OnionTunnelReady::new(
+            1025,
+            "key".as_bytes().to_vec(),
+        )));
+        let v: Vec<u8> = e.into();
+        assert_eq!(v, vec![0, 0, 4, 1, 107, 101, 121]);
+    }
+
+    #[test]
+    fn unit_onion_incoming_serial() {
+        let e = OutgoingEvent::TunnelIncoming(OnionTunnelIncoming::new(1025));
+        let v: Vec<u8> = e.into();
+        assert_eq!(v, vec![0, 0, 4, 1]);
+    }
+
+    #[test]
+    fn unit_onion_data_serial() {
+        let e = OutgoingEvent::TunnelData(Box::new(OnionTunnelData::new(
+            1025,
+            "Data".as_bytes().to_vec(),
+        )));
+        let v: Vec<u8> = e.into();
+        assert_eq!(v, vec![0, 0, 4, 1, 68, 97, 116, 97]);
+    }
+
+    #[test]
+    fn unit_onion_error_serial() {
+        let e = OutgoingEvent::Error(OnionError::new(api_protocol::ONION_TUNNEL_BUILD, 1025));
+        let v: Vec<u8> = e.into();
+        let mut v2 = api_protocol::ONION_TUNNEL_BUILD.to_be_bytes().to_vec();
+        v2.extend(vec![0, 0, 0, 0, 4, 1]);
+        assert_eq!(v, v2);
     }
 }
