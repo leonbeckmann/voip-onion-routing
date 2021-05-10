@@ -1,5 +1,17 @@
 # VoidPhone Project - Onion Module
 
+#### Master Branch Status
+
+[![pipeline status](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/master/pipeline.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/master)
+
+[![coverage report](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/master/coverage.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/master)
+
+#### Develop Branch Status
+
+[![pipeline status](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/develop/pipeline.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/develop)
+
+[![coverage report](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/develop/coverage.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/develop)
+
 ## Building
 
 Install the latest stable release of the rust toolchain (e.g. via https://rustup.rs/).
