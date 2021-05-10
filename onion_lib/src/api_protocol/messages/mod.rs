@@ -98,6 +98,7 @@ impl TryFrom<Vec<u8>> for Box<OnionTunnelBuild> {
  * Onion Tunnel Ready [tunnel_id: u32, host_key: [u8]]
  * Direction: Outgoing
  */
+#[derive(Debug)]
 pub(crate) struct OnionTunnelReady {
     tunnel_id: u32,
     host_key: Vec<u8>,
@@ -124,6 +125,7 @@ impl OnionTunnelReady {
  * Onion Tunnel Incoming [tunnel_id: u32]
  * Direction: Outgoing
  */
+#[derive(Debug)]
 pub(crate) struct OnionTunnelIncoming {
     tunnel_id: u32,
 }
@@ -175,6 +177,7 @@ impl TryFrom<Vec<u8>> for OnionTunnelDestroy {
  * Onion Tunnel Data [tunnel_id: u32, data: Vec<u8>]
  * Direction: Incoming, Outgoing
  */
+#[derive(Debug)]
 pub(crate) struct OnionTunnelData {
     pub tunnel_id: u32,
     pub data: Vec<u8>,
@@ -215,6 +218,7 @@ impl OnionTunnelData {
  * Onion Tunnel Error [request_type: u16, reserved: u16, tunnel_id: u32]
  * Direction: Outgoing
  */
+#[derive(Debug)]
 pub(crate) struct OnionError {
     request_type: u16,
     _reserved: u16,

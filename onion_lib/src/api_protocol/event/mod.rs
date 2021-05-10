@@ -44,6 +44,7 @@ impl TryFrom<(Vec<u8>, OnionMessageHeader)> for IncomingEvent {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum OutgoingEvent {
     TunnelReady(Box<OnionTunnelReady>),
     TunnelIncoming(OnionTunnelIncoming),
