@@ -3,6 +3,7 @@ mod event;
 mod messages;
 
 use crate::api_protocol::event::{IncomingEvent, OutgoingEvent};
+use crate::api_protocol::messages::{OnionError, OnionTunnelReady};
 use crate::p2p_protocol::P2pInterface;
 use api_connection::Connection;
 use std::collections::HashMap;
@@ -27,37 +28,107 @@ async fn handle_incoming_event(
     p2p_interface: Weak<P2pInterface>,
     connection_id: u64,
 ) -> Option<OutgoingEvent> {
+    // first we have to upgrade the p2p interface reference to communicate with p2p layer
     match p2p_interface.upgrade() {
         Some(interface) => match e {
             IncomingEvent::TunnelBuild(onion_build) => {
-                interface
+                log::debug!(
+                    "TunnelBuild request from connection {:?}: {:?}",
+                    connection_id,
+                    onion_build
+                );
+                match interface
                     .build_tunnel(onion_build.ip, onion_build.onion_port, onion_build.host_key)
-                    .await;
-                // TODO respond with ready or error
-                None
+                    .await
+                {
+                    Ok((tunnel_id, host_key_der)) => Some(OutgoingEvent::TunnelReady(Box::new(
+                        OnionTunnelReady::new(tunnel_id, host_key_der),
+                    ))),
+                    Err(e) => {
+                        log::warn!(
+                            "Cannot build new onion tunnel from connection {:?}: {:?}",
+                            connection_id,
+                            e
+                        );
+                        // TODO is this how we should react when there is no tunnel id available yet?
+                        Some(OutgoingEvent::Error(OnionError::new(ONION_TUNNEL_BUILD, 0)))
+                    }
+                }
             }
+
             IncomingEvent::TunnelDestroy(onion_destroy) => {
-                interface.destroy_tunnel_ref(onion_destroy.tunnel_id, connection_id);
-                // TODO handle error
-                None
+                log::debug!(
+                    "TunnelDestroy request from connection {:?}: {:?}",
+                    connection_id,
+                    onion_destroy
+                );
+                match interface.destroy_tunnel_ref(onion_destroy.tunnel_id, connection_id) {
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::warn!(
+                            "Cannot destroy tunnel {:?} from connection {:?}: {:?}",
+                            onion_destroy.tunnel_id,
+                            connection_id,
+                            e
+                        );
+                        Some(OutgoingEvent::Error(OnionError::new(
+                            ONION_TUNNEL_DESTROY,
+                            onion_destroy.tunnel_id,
+                        )))
+                    }
+                }
             }
+
             IncomingEvent::TunnelData(onion_data) => {
-                interface
+                log::debug!(
+                    "TunnelData request from connection {:?}: {:?}",
+                    connection_id,
+                    onion_data
+                );
+                match interface
                     .send_data(onion_data.tunnel_id, onion_data.data)
-                    .await;
-                // TODO handle error
-                None
+                    .await
+                {
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::warn!(
+                            "Cannot send data to tunnel {:?} from connection {:?}: {:?}",
+                            onion_data.tunnel_id,
+                            connection_id,
+                            e
+                        );
+                        Some(OutgoingEvent::Error(OnionError::new(
+                            ONION_TUNNEL_DATA,
+                            onion_data.tunnel_id,
+                        )))
+                    }
+                }
             }
+
             IncomingEvent::Cover(onion_cover) => {
-                interface.send_cover_traffic(onion_cover.cover_size).await;
-                // TODO handle error
-                None
+                log::debug!(
+                    "OnionCover request from connection {:?}: {:?}",
+                    connection_id,
+                    onion_cover
+                );
+                match interface.send_cover_traffic(onion_cover.cover_size).await {
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::warn!(
+                            "Cannot send cover traffic from connection {:?}: {:?}",
+                            connection_id,
+                            e
+                        );
+                        // TODO is this how we should react when there is no tunnel id available yet?
+                        Some(OutgoingEvent::Error(OnionError::new(ONION_COVER, 0)))
+                    }
+                }
             }
         },
         None => {
             // interface not available, so the p2p listener has terminated
             // in this case we would also want to terminate the api protocol
-            //TODO
+            // TODO terminate api protocol such that the whole application will be terminated
             None
         }
     }
@@ -93,7 +164,13 @@ async fn handle_connection(
                     "Unsubscribe connection with id {:?} from all onion tunnels",
                     connection_id
                 );
-                i_face.unsubscribe(connection_id);
+                if let Err(e) = i_face.unsubscribe(connection_id) {
+                    log::error!(
+                        "Cannot unsubscribe connection with id {:?} from tunnels: {:?}",
+                        connection_id,
+                        e
+                    )
+                }
             }
             match connections.lock() {
                 Ok(mut connections) => {
