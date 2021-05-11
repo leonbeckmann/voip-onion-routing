@@ -1,12 +1,17 @@
 stages:
   - build
+  - deploy
 
 rust-latest:
   stage: build
   image: rust:latest
+  before_script:
+    - rustup component add rustfmt
+    - rustup component add clippy
   script:
-    - cargo build --verbose
-    - cargo test --verbose
+    - cargo fmt -- --check
+    - cargo clippy --all-features -- -D warnings
+    - cargo test --all-features --verbose
 
 rust-nightly:
   stage: build
@@ -15,3 +20,22 @@ rust-nightly:
     - cargo build --verbose
     - cargo test --verbose
   allow_failure: true
+
+
+rust-coverage:
+  stage: build
+  image: rust:latest
+  before_script:
+    - cargo install cargo-tarpaulin
+  script:
+    - cargo tarpaulin --all-features --out=Xml --out=Html --output-dir=coverage
+  after_script:
+    - mv coverage/tarpaulin-report.html coverage/index.html
+    - mkdir -p public
+    - mv coverage/ public/coverage/
+  artifacts:
+    paths:
+      - public/
+    reports:
+      cobertura: public/coverage/cobertura.xml
+  coverage: '/(\d+\.\d+)% coverage/'
