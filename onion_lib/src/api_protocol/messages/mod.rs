@@ -41,6 +41,7 @@ impl From<&[u8; Self::hdr_size()]> for OnionMessageHeader {
  * Onion Tunnel Build [reserved: u15, ip_version: u1, onion_port: u16, ip_addr: u32/u128, key: [u8]]
  * Direction: Incoming
  */
+#[derive(Debug)]
 pub(crate) struct OnionTunnelBuild {
     _reserved_v: u16,
     pub onion_port: u16,
@@ -147,6 +148,7 @@ impl OnionTunnelIncoming {
  * Onion Tunnel Destroy [tunnel_id: u32]
  * Direction: Incoming
  */
+#[derive(Debug)]
 pub(crate) struct OnionTunnelDestroy {
     pub tunnel_id: u32,
 }
@@ -248,6 +250,7 @@ impl OnionError {
  * Onion Tunnel Data [cover_size: 16, reserved: u16]
  * Direction: Incoming
  */
+#[derive(Debug)]
 pub(crate) struct OnionCover {
     pub cover_size: u16,
     _reserved: u16,

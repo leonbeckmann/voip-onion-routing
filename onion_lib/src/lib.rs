@@ -8,6 +8,7 @@ mod p2p_protocol;
 use std::path::Path;
 
 use config_parser::OnionConfiguration;
+use std::sync::Arc;
 
 pub fn run_peer<P: AsRef<Path>>(config_file: P) {
     // parse config file
@@ -22,8 +23,25 @@ pub fn run_peer<P: AsRef<Path>>(config_file: P) {
     // run async
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
+        let api_interface = Arc::new(api_protocol::ApiInterface::new());
+        let p2p_interface = Arc::new(p2p_protocol::P2pInterface::new());
+        let api_interface_ref = Arc::downgrade(&api_interface);
+        let p2p_interface_ref = Arc::downgrade(&p2p_interface);
+
+        let api_address = config.onion_api_address;
+
+        // run p2p listener
+        tokio::spawn(async move {
+            log::debug!("Run p2p listener ...");
+            if let Err(e) = p2p_interface.listen(config, api_interface_ref).await {
+                log::error!("Cannot start P2P listener: {}", e);
+                return;
+            }
+        });
+
         // run API connection listener
-        if let Err(e) = api_protocol::listen(&config.onion_api_address).await {
+        log::debug!("Run API listener ...");
+        if let Err(e) = api_interface.listen(api_address, p2p_interface_ref).await {
             log::error!("Cannot start API connection listener: {}", e);
             return;
         }

@@ -1,6 +1,7 @@
 use crate::api_protocol::messages::*;
 use std::convert::TryFrom;
 
+#[derive(Debug)]
 pub(crate) enum IncomingEvent {
     TunnelBuild(Box<OnionTunnelBuild>),
     TunnelDestroy(OnionTunnelDestroy),
