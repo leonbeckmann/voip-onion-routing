@@ -34,6 +34,8 @@ rust-coverage:
   image: rust:latest
   tags:
     - docker
+    # cargo-tarpaulin only works on linux with privileges to disable ASLR
+    - linux
   before_script:
     - cargo install cargo-tarpaulin
   script:
