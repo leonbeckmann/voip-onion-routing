@@ -41,6 +41,7 @@ rust-code-lint:
 rust-coverage:
   stage: build
   image: rust:latest
+  <<: *caching_rust
   tags:
     - docker
     # cargo-tarpaulin only works on linux with privileges to disable ASLR
