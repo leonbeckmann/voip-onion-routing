@@ -1,6 +1,6 @@
 mod api_connection;
 mod event;
-mod messages;
+pub mod messages;
 
 use crate::api_protocol::event::{IncomingEvent, OutgoingEvent};
 use crate::api_protocol::messages::{OnionError, OnionTunnelReady};
@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-pub(crate) const RPS_QUERY: u16 = 540;
-pub(crate) const RPS_PEER: u16 = 541;
+pub(crate) const _RPS_QUERY: u16 = 540;
+pub(crate) const _RPS_PEER: u16 = 541;
 
 pub(crate) const ONION_TUNNEL_BUILD: u16 = 560; // incoming for tunnel build in next round
 pub(crate) const ONION_TUNNEL_READY: u16 = 561; // outgoing response on build with new tunnel
@@ -41,9 +41,16 @@ async fn handle_incoming_event(
                     .build_tunnel(onion_build.ip, onion_build.onion_port, onion_build.host_key)
                     .await
                 {
-                    Ok((tunnel_id, host_key_der)) => Some(OutgoingEvent::TunnelReady(Box::new(
-                        OnionTunnelReady::new(tunnel_id, host_key_der),
-                    ))),
+                    Ok((tunnel_id, host_key_der)) => {
+                        log::debug!(
+                            "New onion tunnel was established with tunnel id {:?}",
+                            tunnel_id
+                        );
+                        Some(OutgoingEvent::TunnelReady(Box::new(OnionTunnelReady::new(
+                            tunnel_id,
+                            host_key_der,
+                        ))))
+                    }
                     Err(e) => {
                         log::warn!(
                             "Cannot build new onion tunnel from connection {:?}: {:?}",
@@ -129,6 +136,7 @@ async fn handle_incoming_event(
             // interface not available, so the p2p listener has terminated
             // in this case we would also want to terminate the api protocol
             // TODO terminate api protocol such that the whole application will be terminated
+            log::error!("P2P interface is not available anymore");
             None
         }
     }
@@ -147,6 +155,10 @@ async fn handle_connection(
     // register connection at registry
     match connections.lock() {
         Ok(mut connections) => {
+            log::debug!(
+                "Register connection {:?} in connections registry",
+                connection_id
+            );
             connections.insert(connection.internal_id, connection);
         }
         Err(e) => {
@@ -191,11 +203,6 @@ async fn handle_connection(
         let p2p_interface = p2p_interface.clone();
         match read_rx.recv().await {
             Some(event) => {
-                log::debug!(
-                    "Connection {:?} received incoming event from CM/CI layer: {:?}",
-                    connection_id,
-                    event
-                );
                 if let Some(e) =
                     handle_incoming_event(event, p2p_interface.clone(), connection_id).await
                 {
@@ -213,6 +220,7 @@ async fn handle_connection(
             }
             None => {
                 // connection has been closed
+                log::debug!("Connection with id {:?} has been closed", connection_id);
                 unregister_connection(connections, connection_id, p2p_interface.clone());
                 return;
             }

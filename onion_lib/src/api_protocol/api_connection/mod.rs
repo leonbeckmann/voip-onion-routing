@@ -41,7 +41,11 @@ async fn write_event(tx: &mut WriteHalf<TcpStream>, e: OutgoingEvent) -> anyhow:
         OutgoingEvent::Error(_) => super::ONION_ERROR,
     };
     let raw: Vec<u8> = e.into();
-    let hdr = OnionMessageHeader::new(raw.len() as u16, msg_type).to_be_vec();
+    let hdr = OnionMessageHeader::new(
+        (raw.len() + OnionMessageHeader::hdr_size()) as u16,
+        msg_type,
+    )
+    .to_be_vec();
 
     tx.write_all(&hdr).await?;
     tx.write_all(&raw).await?;
@@ -57,7 +61,7 @@ impl Connection {
         }
     }
 
-    pub(crate) async fn write_event(&self, e: OutgoingEvent) -> anyhow::Result<()> {
+    pub(crate) async fn _write_event(&self, e: OutgoingEvent) -> anyhow::Result<()> {
         self.write_tx.send(e).await?;
         Ok(())
     }

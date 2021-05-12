@@ -6,6 +6,8 @@ use crate::p2p_protocol::onion_tunnel::OnionTunnel;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, Weak};
+use std::thread::sleep;
+use std::time::Duration;
 use thiserror::Error;
 
 pub(crate) struct P2pInterface {

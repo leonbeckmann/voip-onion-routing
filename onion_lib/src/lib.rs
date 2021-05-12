@@ -1,19 +1,24 @@
 extern crate anyhow;
 extern crate tokio;
 
-mod api_protocol;
+pub mod api_protocol;
 mod config_parser;
 mod p2p_protocol;
 
 use std::path::Path;
 
 use config_parser::OnionConfiguration;
+use std::fmt::Debug;
 use std::sync::Arc;
 
-pub fn run_peer<P: AsRef<Path>>(config_file: P) {
+pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
     // parse config file
+    log::debug!("Parse config file from {:?}", config_file);
     let config = match OnionConfiguration::parse_from_file(config_file) {
-        Ok(config) => config,
+        Ok(config) => {
+            log::debug!("Peer configuration: {:?}", config);
+            config
+        }
         Err(e) => {
             log::error!("Cannot parse config file: {}", e);
             return;
@@ -32,7 +37,11 @@ pub fn run_peer<P: AsRef<Path>>(config_file: P) {
 
         // run p2p listener
         tokio::spawn(async move {
-            log::debug!("Run p2p listener ...");
+            log::info!(
+                "Run p2p listener ({}:{:?}) ...",
+                config.p2p_hostname,
+                config.p2p_port
+            );
             if let Err(e) = p2p_interface.listen(config, api_interface_ref).await {
                 log::error!("Cannot start P2P listener: {}", e);
                 return;
@@ -40,7 +49,7 @@ pub fn run_peer<P: AsRef<Path>>(config_file: P) {
         });
 
         // run API connection listener
-        log::debug!("Run API listener ...");
+        log::info!("Run API listener ({:?}) ...", api_address);
         if let Err(e) = api_interface.listen(api_address, p2p_interface_ref).await {
             log::error!("Cannot start API connection listener: {}", e);
             return;

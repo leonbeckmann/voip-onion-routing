@@ -11,6 +11,12 @@ edition = "2018"
 
 [dependencies]
 onion-lib = { path = "../onion_lib" }
+log = "0.4.14"
+env_logger = "0.8.3"
+anyhow = "1.0.40"
+tempdir = "0.3.7"
+openssl = "0.10.34"
+rust-ini = "0.17.0"
 
 [[test]]
 name = "integration"

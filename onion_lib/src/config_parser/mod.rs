@@ -8,6 +8,7 @@ use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 
+#[derive(Debug)]
 pub struct OnionConfiguration {
     pub p2p_port: u16,
     pub p2p_hostname: String,
@@ -198,6 +199,7 @@ mod tests {
     use std::path::Path;
     use tempdir::TempDir;
 
+    #[allow(clippy::too_many_arguments)]
     fn create_config_file<P: AsRef<Path>>(
         onion: bool,
         rps: bool,
