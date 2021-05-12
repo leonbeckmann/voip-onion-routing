@@ -12,7 +12,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use tempdir::TempDir;
 
-use onion_lib::api_protocol::messages::{OnionMessageHeader, OnionTunnelBuild, OnionTunnelReady};
+use onion_lib::api_protocol::messages::{OnionMessageHeader, OnionTunnelBuild, OnionTunnelReady, OnionTunnelDestroy, OnionError};
 use std::convert::TryFrom;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -20,9 +20,9 @@ use std::str::FromStr;
 const ONION_TUNNEL_BUILD: u16 = 560; // incoming for tunnel build in next round
 const ONION_TUNNEL_READY: u16 = 561; // outgoing response on build with new tunnel
 const _ONION_TUNNEL_INCOMING: u16 = 562; // outgoing to all api connection listeners
-const _ONION_TUNNEL_DESTROY: u16 = 563; // incoming Destroy a tunnel for this api connection, destroy if no listeners available anymore
+const ONION_TUNNEL_DESTROY: u16 = 563; // incoming Destroy a tunnel for this api connection, destroy if no listeners available anymore
 const _ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tunnel
-const _ONION_ERROR: u16 = 565; // by onion module on error to earlier request
+const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
 const _ONION_COVER: u16 = 566; // send cover traffic to random peer
 
 fn run_peer(
@@ -162,14 +162,28 @@ fn integration_test() {
     let _alice_host_key_der = alice_key.public_key_to_der().unwrap();
     let bob_host_key_der = bob_key.public_key_to_der().unwrap();
 
+    // destroy non-existent tunnel id
+    log::info!("Request TunnelDestroy for non-existent tunnel ID");
+    let tunnel_destroy = OnionTunnelDestroy::new(20).to_be_vec();
+    write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
+    let (hdr, data) = read_msg(&mut alice_api);
+    assert_eq!(hdr.msg_type, ONION_ERROR);
+    let error = OnionError::try_from(data).unwrap();
+    assert_eq!(error.tunnel_id, 20);
+    assert_eq!(error.request_type, ONION_TUNNEL_DESTROY);
+
+    // TODO build tunnel to non-existent peer
+
+    // TODO send data via non-existent tunnel
+
     // request new tunnel from alice to bob
     let bob_hostname = IpAddr::from_str("127.0.0.1").unwrap();
     let bob_port = 3001;
-
     log::info!("Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
     let tunnel_build = OnionTunnelBuild::new(bob_hostname, bob_port, bob_host_key_der).to_be_vec();
     write_msg(ONION_TUNNEL_BUILD, tunnel_build, &mut alice_api);
 
+    // expect TunnelReady response
     let (hdr, data) = read_msg(&mut alice_api);
     assert_eq!(hdr.msg_type, ONION_TUNNEL_READY);
     let ready = Box::<OnionTunnelReady>::try_from(data).unwrap();
@@ -178,4 +192,16 @@ fn integration_test() {
         "Alice received TUNNEL_READY with tunnel ID {:?}",
         alice_to_bob_tunnel
     );
+
+    // TODO expect Incoming message on Bob's API
+
+    // TODO send data from Alice to Bob
+
+    // TODO expect incoming data in Bob's API
+
+    // TODO send data from Bob to Alice
+
+    // TODO expect incoming data in Alice's API
+
+    // TODO destroy the connection
 }
