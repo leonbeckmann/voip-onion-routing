@@ -9,8 +9,9 @@ use std::path::Path;
 
 use config_parser::OnionConfiguration;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
+#[allow(clippy::mutex_atomic)]
 pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
     // parse config file
     log::debug!("Parse config file from {:?}", config_file);
@@ -35,6 +36,11 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
 
         let api_address = config.onion_api_address;
 
+        // we need a condvar to terminate the runtime when one of the protocols fails at any point
+        let close_cond = Arc::new((Mutex::new(false), Condvar::new()));
+        let close_cond_api = close_cond.clone();
+        let close_cond_p2p = close_cond.clone();
+
         // run p2p listener
         tokio::spawn(async move {
             log::info!(
@@ -44,15 +50,34 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
             );
             if let Err(e) = p2p_interface.listen(config, api_interface_ref).await {
                 log::error!("Cannot start P2P listener: {}", e);
-                return;
             }
+
+            // shutdown peer
+            let (lock, c_var) = &*close_cond_p2p;
+            let mut is_closed = lock.lock().unwrap();
+            *is_closed = true;
+            c_var.notify_one();
         });
 
         // run API connection listener
-        log::info!("Run API listener ({:?}) ...", api_address);
-        if let Err(e) = api_interface.listen(api_address, p2p_interface_ref).await {
-            log::error!("Cannot start API connection listener: {}", e);
-            return;
+        tokio::spawn(async move {
+            log::info!("Run API listener ({:?}) ...", api_address);
+            if let Err(e) = api_interface.listen(api_address, p2p_interface_ref).await {
+                log::error!("Cannot start API connection listener: {}", e);
+            }
+
+            // shutdown peer
+            let (lock, c_var) = &*close_cond_api;
+            let mut is_closed = lock.lock().unwrap();
+            *is_closed = true;
+            c_var.notify_one();
+        });
+
+        // block threat without using CPU time
+        let (lock, c_var) = &*close_cond;
+        let mut is_closed = lock.lock().unwrap();
+        while !*is_closed {
+            is_closed = c_var.wait(is_closed).unwrap();
         }
     });
 }

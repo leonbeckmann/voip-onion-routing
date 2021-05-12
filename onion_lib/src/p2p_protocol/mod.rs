@@ -6,9 +6,10 @@ use crate::p2p_protocol::onion_tunnel::OnionTunnel;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, Weak};
-use std::thread::sleep;
-use std::time::Duration;
 use thiserror::Error;
+use tokio::net::UdpSocket;
+
+const PACKET_SIZE: usize = 1024;
 
 pub(crate) struct P2pInterface {
     // TODO is there a way for a more well-distributed key?
@@ -24,11 +25,38 @@ impl P2pInterface {
 
     pub(crate) async fn listen(
         &self,
-        _config: OnionConfiguration,
+        config: OnionConfiguration,
         _api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<()> {
-        // TODO implement logic
-        Ok(())
+        // run the UDP listener
+        // used within an Arc to clone the socket for each onion tunnel
+        let socket = Arc::new(
+            UdpSocket::bind(format!("{}:{:?}", config.p2p_hostname, config.p2p_port)).await?,
+        );
+
+        let mut buf = [0u8; PACKET_SIZE];
+        loop {
+            match socket.recv_from(&mut buf).await {
+                Ok((size, _addr)) => {
+                    if size == PACKET_SIZE {
+                        log::debug!("Received valid UDP packet from {:?}", _addr);
+                        let _socket = socket.clone();
+                        // TODO handle packet
+                    } else {
+                        // reject packet of invalid size
+                        log::warn!(
+                            "Reject received UDP packet from {:?} with cause of packet size",
+                            _addr
+                        );
+                    }
+                }
+                Err(e) => {
+                    // TODO do we always want to quit here?
+                    log::error!("Cannot read from UDP socket {}", e);
+                    return Err(anyhow::Error::from(e));
+                }
+            };
+        }
     }
 
     /*
@@ -106,4 +134,25 @@ pub enum P2pError {
     OnionTunnelLockFailed,
     #[error("Onion tunnel with ID '{0}' is not existent")]
     InvalidTunnelId(u32),
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::UdpSocket;
+
+    #[test]
+    fn unit_test() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let socket = UdpSocket::bind("127.0.0.1:2000").await.unwrap();
+            let client = UdpSocket::bind("127.0.0.1:2001").await.unwrap();
+
+            client.connect("127.0.0.1:2000").await.unwrap();
+            client.send("Data".as_bytes()).await.unwrap();
+
+            let mut buf = [0u8; 3];
+            let (size, addr) = socket.recv_from(&mut buf).await.unwrap();
+            println!("{:?}", size);
+        });
+    }
 }

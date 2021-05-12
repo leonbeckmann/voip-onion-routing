@@ -134,8 +134,7 @@ async fn handle_incoming_event(
         },
         None => {
             // interface not available, so the p2p listener has terminated
-            // in this case we would also want to terminate the api protocol
-            // TODO terminate api protocol such that the whole application will be terminated
+            // calling functions will ensure termination when this is happening
             log::error!("P2P interface is not available anymore");
             None
         }
@@ -276,8 +275,9 @@ impl ApiInterface {
                     });
                 }
                 Err(e) => {
-                    // TODO when is this error happening? Do we have to return here?
-                    log::warn!("Error occurred during accepting new TCP client: {}", e);
+                    // TODO when is this error happening? Do we always have to quit here?
+                    log::error!("Error occurred during accepting new TCP client: {}", e);
+                    return Err(anyhow::Error::from(e));
                 }
             };
         }

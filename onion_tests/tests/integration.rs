@@ -95,7 +95,6 @@ fn write_msg(msg_type: u16, data: Vec<u8>, stream: &mut TcpStream) {
 
 #[test]
 fn integration_test() {
-
     // enable logging
     env::set_var("RUST_LOG", "debug");
     env_logger::init();
@@ -171,12 +170,12 @@ fn integration_test() {
     let tunnel_build = OnionTunnelBuild::new(bob_hostname, bob_port, bob_host_key_der).to_be_vec();
     write_msg(ONION_TUNNEL_BUILD, tunnel_build, &mut alice_api);
 
-    /*let (hdr, data) = read_msg(&mut alice_api);
+    let (hdr, data) = read_msg(&mut alice_api);
     assert_eq!(hdr.msg_type, ONION_TUNNEL_READY);
     let ready = Box::<OnionTunnelReady>::try_from(data).unwrap();
     let alice_to_bob_tunnel = ready.tunnel_id;
     log::info!(
         "Alice received TUNNEL_READY with tunnel ID {:?}",
         alice_to_bob_tunnel
-    );*/
+    );
 }
