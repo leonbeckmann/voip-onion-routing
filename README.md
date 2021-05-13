@@ -1,5 +1,9 @@
 # VoidPhone Project - Onion Module
 
+Onion Module of the VoidPhone Project is responsible for providing a layer for constructing anonymous onion tunnels within a peer-to-peer network.
+
+Tested on Linux and MacOsX.
+
 #### Master Branch Status
 
 [![pipeline status](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/master/pipeline.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/master)
@@ -14,16 +18,36 @@
 
 ## Building
 
+#### Rust Toolchain
 Install the latest stable release of the rust toolchain (e.g. via https://rustup.rs/).
 
-In the root directory run:
+#### Protobuf Compiler
+The OnionModule uses protobuf messages for communication between peer, which is why protobuf compiler must be installed.
 
-```cargo build```
+On **Linux** it can be installed via get-apt:  `apt-get install protobuf-compiler`
+
+On **MacOS** it can be installed via homebrew: `brew install protobuf`
+
+
+#### Project build
+
+In the root directory run: `cargo build`
 
 ## How to Use
 
 The module requires a Windows INI configuration file for configuring the Onion module
-(see *template.config*).
+(see *template.config*). All the attributes are mandatory:
+
+| Attribute    | Section | Value                                 | Description |
+| :---------   | :-----: | :---:                                 | :---------- |
+| hostkey      | global  | str                                   | Path to peer's public hostkey in PEM format |
+| p2p_port     | onion   | u16                                   | P2P port of peer |
+| p2p_hostname | onion   | hostname, ipv4, ipv6                  | Peer's p2p address for onion layer |
+| hop_count    | onion   | u8                                    | Number of intermediate hops per tunnel, >= 2 |
+| api_address  | onion   | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for Onion layer |
+| api_address  | rps     | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for RPS layer |
+
+
 
 In the root directory run:
 
