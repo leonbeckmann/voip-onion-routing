@@ -30,10 +30,14 @@ rust-code-lint:
   image: rust:latest
   tags:
     - docker
+    - linux
   before_script:
+    - apt-get update -yq && apt-get install -y protobuf-compiler && protoc --version
     - rustup component add rustfmt
     - rustup component add clippy
   script:
+    # we need a build since otherwise protobuf modules will not be available
+    - cargo build --all-features --verbose
     - cargo fmt --all -- --check
     - cargo clippy --all-targets --all-features -- -D warnings
   allow_failure: true
@@ -47,9 +51,10 @@ rust-coverage:
     # cargo-tarpaulin only works on linux with privileges to disable ASLR
     - linux
   before_script:
+    - apt-get update -yq && apt-get install -y protobuf-compiler && protoc --version
     - cargo install cargo-tarpaulin
   script:
-    - cargo tarpaulin --all-features --out=Xml --out=Html --output-dir=coverage
+    - cargo tarpaulin --exclude-files "onion_lib/src/p2p_protocol/messages/*" "onion_bin/*" --all-features --out=Xml --out=Html --output-dir=coverage
   after_script:
     - mv coverage/tarpaulin-report.html coverage/index.html
     - mkdir -p public
@@ -62,6 +67,8 @@ rust-coverage:
   coverage: '/(\d+\.\d+)% coverage/'
 
 rust-latest-linux:
+  before_script:
+    - apt-get update -yq && apt-get install -y protobuf-compiler && protoc --version
   <<: *rust_latest
   <<: *caching_rust
   tags:
@@ -73,8 +80,11 @@ rust-latest-darwin:
   tags:
     - docker
     - darwin
+  allow_failure: true
 
 rust-nightly-linux:
+  before_script:
+    - apt-get update -yq && apt-get install -y protobuf-compiler && protoc --version
   <<: *rust_nightly
   <<: *caching_rust
   tags:

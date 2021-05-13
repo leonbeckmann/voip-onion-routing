@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+// P2P Onion Tunnel frame
+message TunnelFrame {
+
+  oneof message {
+    TunnelHello tunnelHello = 1;
+    TunnelData tunnelData = 2;
+    TunnelClose tunnelClose = 3;
+  }
+}
+
+message TunnelHello {
+
+}
+
+message TunnelData {
+
+}
+
+message TunnelClose {
+
+}

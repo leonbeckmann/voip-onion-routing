@@ -2,3 +2,4 @@
 Cargo.lock
 .idea
 /.target
+p2p_messages.rs

@@ -1,4 +1,5 @@
 mod onion_tunnel;
+mod messages;
 
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;

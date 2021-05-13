@@ -93,7 +93,10 @@ The first goal of our project is the design and implementation of the API protoc
   * Handle responses to our requests from the p2p_interface and create API responses for the CM/CI layer regarding the spec.
 
 The next goal is to implement the p2p_protocol environment (asynchronously), such that we have a fully working setup but without secure channels between the source and the destination peers:
-* Run the p2p UDP listener
+* Run the p2p UDP listener socket
+* Provide a very basic protobuf message format with Hello, Data and Close frame
+* Build a very basic FSM for the Onion Tunnels
+* OnionTunnel management
 * Handle incoming p2p connections
 * Handle incoming API requests such as OnionTunnelBuild or OnionTunnelData
 * Communication with the API protocol interface
