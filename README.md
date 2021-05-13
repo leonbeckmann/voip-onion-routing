@@ -18,10 +18,10 @@ Tested on Linux and MacOsX.
 
 ## Building
 
-#### Rust Toolchain
+### Rust Toolchain
 Install the latest stable release of the rust toolchain (e.g. via https://rustup.rs/).
 
-#### Protobuf Compiler
+### Protobuf Compiler
 The OnionModule uses protobuf messages for communication between peer, which is why protobuf compiler must be installed.
 
 On **Linux** it can be installed via get-apt:  `apt-get install protobuf-compiler`
@@ -29,11 +29,13 @@ On **Linux** it can be installed via get-apt:  `apt-get install protobuf-compile
 On **MacOS** it can be installed via homebrew: `brew install protobuf`
 
 
-#### Project build
+### Project build
 
 In the root directory run: `cargo build`
 
 ## How to Use
+
+### Configuration
 
 The module requires a Windows INI configuration file for configuring the Onion module
 (see *template.config*). All the attributes are mandatory:
@@ -47,7 +49,23 @@ The module requires a Windows INI configuration file for configuring the Onion m
 | api_address  | onion   | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for Onion layer |
 | api_address  | rps     | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for RPS layer |
 
+This could look like the following:
+```
+; An INI configuration file for configuring the Onion Module
 
+hostkey = /etc/peer1_pub_key.pem
+
+[onion]
+p2p_port = 2000
+p2p_hostname = localhost
+hop_count = 3           
+api_address = localhost:2001
+
+[rps]
+api_address = localhost:2002
+```
+
+### Run the Application
 
 In the root directory run:
 

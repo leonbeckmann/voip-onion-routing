@@ -37,6 +37,7 @@ impl OnionConfiguration {
             Some(section) => section,
         };
 
+        let global_sec = config.general_section();
         /* parse properties */
 
         // parse p2p_port
@@ -59,7 +60,7 @@ impl OnionConfiguration {
         };
 
         // parse host_key
-        let host_key_pem = match onion_sec.get("hostkey") {
+        let host_key_pem = match global_sec.get("hostkey") {
             None => {
                 return Err(ParsingError::from_str("Missing component: 'hostkey'"));
             }
@@ -212,6 +213,12 @@ mod tests {
         file_path: P,
     ) {
         let mut config = Ini::new();
+        if let Some(key) = hostkey {
+            config.with_general_section().set("hostkey", key);
+        } else {
+            // we have to add a dummy value within the general_section, otherwise the library function panics
+            config.with_general_section().set("dummy", "dummy");
+        }
         if onion {
             if let Some(port) = p2p_port {
                 config.with_section(Some("onion")).set("p2p_port", port);
@@ -225,9 +232,6 @@ mod tests {
                 config
                     .with_section(Some("onion"))
                     .set("hop_count", hop_count);
-            }
-            if let Some(key) = hostkey {
-                config.with_section(Some("onion")).set("hostkey", key);
             }
             if let Some(api_addr) = onion_api_addr {
                 config
@@ -497,7 +501,6 @@ mod tests {
         assert!(OnionConfiguration::parse_from_file(config_missing_onion_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_rps_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_api_address).is_err());
-
         let config = OnionConfiguration::parse_from_file(config_api_address_v6).unwrap();
         assert_eq!(config.onion_api_address.port(), 1234);
         assert!(config.onion_api_address.is_ipv6());

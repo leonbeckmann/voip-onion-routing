@@ -12,7 +12,9 @@ use std::thread::sleep;
 use std::time::Duration;
 use tempdir::TempDir;
 
-use onion_lib::api_protocol::messages::{OnionMessageHeader, OnionTunnelBuild, OnionTunnelReady, OnionTunnelDestroy, OnionError};
+use onion_lib::api_protocol::messages::{
+    OnionError, OnionMessageHeader, OnionTunnelBuild, OnionTunnelDestroy, OnionTunnelReady,
+};
 use std::convert::TryFrom;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -41,11 +43,13 @@ fn run_peer(
     // write to config file
     let mut config = Ini::new();
     config
+        .with_general_section()
+        .set("hostkey", key_file.to_str().unwrap());
+    config
         .with_section(Some("onion"))
         .set("p2p_port", p2p_port)
         .set("p2p_hostname", "127.0.0.1")
         .set("hop_count", "2")
-        .set("hostkey", key_file.to_str().unwrap())
         .set("api_address", onion_api_addr);
     config
         .with_section(Some("rps"))

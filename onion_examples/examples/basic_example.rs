@@ -30,11 +30,13 @@ fn main() {
     // write to config file
     let mut config = Ini::new();
     config
+        .with_general_section()
+        .set("hostkey", key_file.to_str().unwrap());
+    config
         .with_section(Some("onion"))
         .set("p2p_port", "2222")
         .set("p2p_hostname", "localhost")
         .set("hop_count", "2")
-        .set("hostkey", key_file.to_str().unwrap())
         .set("api_address", "localhost:2223");
     config
         .with_section(Some("rps"))
