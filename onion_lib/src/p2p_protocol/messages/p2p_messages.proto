@@ -15,7 +15,7 @@ message TunnelHello {
 }
 
 message TunnelData {
-
+//  bytes data = 1;
 }
 
 message TunnelClose {

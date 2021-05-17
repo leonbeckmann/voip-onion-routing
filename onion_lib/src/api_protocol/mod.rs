@@ -38,7 +38,10 @@ async fn handle_incoming_event(
                     onion_build
                 );
                 match interface
-                    .build_tunnel(onion_build.ip, onion_build.onion_port, onion_build.host_key)
+                    .build_tunnel(
+                        (onion_build.ip, onion_build.onion_port).into(),
+                        onion_build.host_key,
+                    )
                     .await
                 {
                     Ok((tunnel_id, host_key_der)) => {
@@ -69,7 +72,10 @@ async fn handle_incoming_event(
                     connection_id,
                     onion_destroy
                 );
-                match interface.destroy_tunnel_ref(onion_destroy.tunnel_id, connection_id) {
+                match interface
+                    .destroy_tunnel_ref(onion_destroy.tunnel_id, connection_id)
+                    .await
+                {
                     Ok(_) => None,
                     Err(e) => {
                         log::warn!(
@@ -166,36 +172,37 @@ async fn handle_connection(
         }
     }
 
-    let unregister_connection =
-        |connections: Arc<Mutex<HashMap<u64, Connection>>>,
-         connection_id: u64,
-         p2p_interface: Weak<P2pInterface>| {
-            if let Some(i_face) = p2p_interface.upgrade() {
+    async fn unregister_connection(
+        connections: Arc<Mutex<HashMap<u64, Connection>>>,
+        connection_id: u64,
+        p2p_interface: Weak<P2pInterface>,
+    ) {
+        if let Some(i_face) = p2p_interface.upgrade() {
+            log::debug!(
+                "Unsubscribe connection with id {:?} from all onion tunnels",
+                connection_id
+            );
+            if let Err(e) = i_face.unsubscribe(connection_id).await {
+                log::error!(
+                    "Cannot unsubscribe connection with id {:?} from tunnels: {:?}",
+                    connection_id,
+                    e
+                )
+            }
+        }
+        match connections.lock() {
+            Ok(mut connections) => {
                 log::debug!(
-                    "Unsubscribe connection with id {:?} from all onion tunnels",
+                    "Unregister connection with id {:?} from connections",
                     connection_id
                 );
-                if let Err(e) = i_face.unsubscribe(connection_id) {
-                    log::error!(
-                        "Cannot unsubscribe connection with id {:?} from tunnels: {:?}",
-                        connection_id,
-                        e
-                    )
-                }
+                connections.remove(&connection_id);
             }
-            match connections.lock() {
-                Ok(mut connections) => {
-                    log::debug!(
-                        "Unregister connection with id {:?} from connections",
-                        connection_id
-                    );
-                    connections.remove(&connection_id);
-                }
-                Err(e) => {
-                    log::error!("Cannot acquire connections lock: {}", e);
-                }
+            Err(e) => {
+                log::error!("Cannot acquire connections lock: {}", e);
             }
-        };
+        }
+    };
 
     // read async events on this connection
     loop {
@@ -212,7 +219,8 @@ async fn handle_connection(
                     );
                     if write_tx.send(e).await.is_err() {
                         // connection has been closed
-                        unregister_connection(connections, connection_id, p2p_interface.clone());
+                        unregister_connection(connections, connection_id, p2p_interface.clone())
+                            .await;
                         return;
                     }
                 }
@@ -220,7 +228,7 @@ async fn handle_connection(
             None => {
                 // connection has been closed
                 log::debug!("Connection with id {:?} has been closed", connection_id);
-                unregister_connection(connections, connection_id, p2p_interface.clone());
+                unregister_connection(connections, connection_id, p2p_interface.clone()).await;
                 return;
             }
         };

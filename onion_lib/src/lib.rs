@@ -1,5 +1,4 @@
-extern crate anyhow;
-extern crate tokio;
+use tokio;
 
 pub mod api_protocol;
 mod config_parser;
@@ -29,8 +28,13 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
     // run async
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
+        let p2p_interface_res = p2p_protocol::P2pInterface::new(config.clone()).await;
+        if let Err(e) = p2p_interface_res {
+            log::error!("Cannot start P2P interface: {}", e);
+            return;
+        }
         let api_interface = Arc::new(api_protocol::ApiInterface::new());
-        let p2p_interface = Arc::new(p2p_protocol::P2pInterface::new());
+        let p2p_interface = Arc::new(p2p_interface_res.unwrap());
         let api_interface_ref = Arc::downgrade(&api_interface);
         let p2p_interface_ref = Arc::downgrade(&p2p_interface);
 
@@ -48,7 +52,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
                 config.p2p_hostname,
                 config.p2p_port
             );
-            if let Err(e) = p2p_interface.listen(config, api_interface_ref).await {
+            if let Err(e) = p2p_interface.listen(api_interface_ref).await {
                 log::error!("Cannot start P2P listener: {}", e);
             }
 

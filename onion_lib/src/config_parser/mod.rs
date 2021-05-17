@@ -8,7 +8,7 @@ use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OnionConfiguration {
     pub p2p_port: u16,
     pub p2p_hostname: String,
