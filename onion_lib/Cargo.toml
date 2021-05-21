@@ -17,8 +17,10 @@ thiserror = "1.0.24"
 rust-ini = "0.17.0"     # for parsing ini configuration files
 openssl = "0.10.34"
 tokio = { version = "1.5.0", features = ["full"] }
+bytes = "1.0.1"
 protobuf = {version = "2.23.0", features = ["with-bytes"]}
 async-trait = "0.1.50"
+rand = "0.8.3"
 
 [build-dependencies]
 protoc-rust = "2.23.0"
