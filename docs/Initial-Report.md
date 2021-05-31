@@ -8,9 +8,9 @@
 ## Programming Language and Operating System
 **Rust on Linux and Mac OS X**
 
-Our host systems run Linux andd MacOsX. To avoid development on virtual machines, our goal is to provide working solutions of the OnionModule for both, Linux and MacOsX. 
+Our host systems run Linux andd Mac OS X. To avoid development on virtual machines, our goal is to provide working solutions of the Onion module for both, Linux and Mac OS X.
 
-We have selected RUST as our programming language. Beside the fact that both of us are already familar with programming in RUST, there are further reasons why we think RUST is a good choice for programming network protocols:
+We have selected Rust as our programming language. Beside the fact that both of us are already familar with programming in Rust, there are further reasons why we think Rust is a good choice for programming network protocols:
 
 * Rust is designed for concurrent **asynchronous programming** (we use the tokio library here)
 * **Secure language model** (this is a big advantage in contrast to e.g. C)
@@ -53,9 +53,7 @@ We have selected RUST as our programming language. Beside the fact that both of 
 ## License
 For selecting the best fitting license for our software project, we first have to check the licences of our used libraries to avoid and licence issues with that: here all our libraries are either released via MIT License or Apache Licence 2.0.
 
-...
-
-Apache License 2.0
+For a high compability with all those libraries we choose Apache License 2.0 for our project.
 
 ## Programming Experience
 
@@ -63,24 +61,33 @@ Apache License 2.0
 During the last two years, I was part of a team at the Fraunhofer AISEC for developing a
 secure remote-attestation protocol in Java and Rust. I have mainly been responsible for
 implementing the protocol and its drivers, document the protocol, writing
-some test cases and I was also part of design choices and discussions on how to construct 
-the finite state machine of the protocol. 
+some test cases and I was also part of design choices and discussions on how to construct
+the finite state machine of the protocol.
 
 Further, my study program is/was mainly focused on IT-Security topics. Besides lectures like
 NetSec or IT-Sec, I was enrolled in the Rootkit programming lab course, where we have developed
 Linux LKM-based kernel rootkits and countermeasures. As a final project, we tried to recalculate
-the TLS master secret by sniffing the TLS traffic and hooking the Linux's CSPRNG, such that 
+the TLS master secret by sniffing the TLS traffic and hooking the Linux's CSPRNG, such that
 Openssl will create predictable EC Diffie-Hellman parameters for ECDHE. (programming language C)
 
 My Bachelor Thesis was about (quantum-secure) cryptography in the case of Proxy-ReEncryption schemes,
 during which I learned a lot more about cryptography.
 
 #### Florian
-TODO
+Since 3,5 years, I am working at a IT-Security company. There I have to work on DevOps tasks and
+code analysis mostly in Python and C/C++. In a personal project I am working on a framework for
+transparent access to guest memory in a KVM environment. For the virtual or physical memory access
+a RPC protocol is used. It's written in Rust and utilizes most of the libraries mentioned above.
+Other personal projects include reverse engineering of binary program with focus on data extraction
+and behavior manipulation.
+
+My electives during studying are mostly offered by the IT-Security chair including IT-Security,
+network security, practical course web security, practical course binary exploitation and others.
 
 ## Plannings and Planned Workload Distribution
 
 The first goal of our project is the design and implementation of the API protocol in combination with a working setup:
+
 * Setup project and environment for quality control
 * Parsing the config file
 * Running a peer from command line with thee config file path
@@ -93,6 +100,7 @@ The first goal of our project is the design and implementation of the API protoc
   * Handle responses to our requests from the p2p_interface and create API responses for the CM/CI layer regarding the spec.
 
 The next goal is to implement the p2p_protocol environment (asynchronously), such that we have a fully working setup but without secure channels between the source and the destination peers:
+
 * Run the p2p UDP listener socket
 * Provide a very basic protobuf message format with Hello, Data and Close frame
 * Build a very basic FSM for the Onion Tunnels
@@ -107,6 +115,7 @@ from source to dest without any intermediate peers.
 
 The next step is to design the p2p protocol. We will split the p2p_protocol into two unique protocols: the main p2p_protocol is responsible for routing, sending messages and cover traffic, handling all the events from the API layer and incoming messages, ...
 The other protocol is the security protocol, which is used for creating a secure channel between the source and the destination peer. So there is one state machine for the security protocol per connection and one overall p2p_protocol.
+
 * Define message types using protobuf
 * Define event handling for main p2p_protocol
 * Specify the security protocol and its finite state machine
@@ -115,5 +124,13 @@ The other protocol is the security protocol, which is used for creating a secure
 
 During all the steps we will write test cases during the module developments. Last steps will be the Documentations in the Wiki and final improvements.
 
-TODO workload
+## Workload Distribution
 
+* The workload should be distributed between the team members evenly
+* Rough schedule:
+    * Implement API protocol (finished 15.05.2021)
+    * Unencrypted tunnels: Establish tunnel and transmit data between peers (until 02.06.2021)
+    * Establish and destroy encrypted tunnels (until 01.07.2021)
+    * Submit midterm report (until 12.07.2021)
+    * More testing, optimizations and write documentation (until 01.08.2021)
+    * Finalize submission until mid September 2021
