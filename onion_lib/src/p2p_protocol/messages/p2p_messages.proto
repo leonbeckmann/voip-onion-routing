@@ -11,12 +11,12 @@ message TunnelFrame {
 }
 
 message TunnelHello {
-  repeated uint64 next_packet_ids = 1;
+  repeated uint32 next_packet_ids = 1;
   string target = 2;
 }
 
 message TunnelData {
-  repeated uint64 next_packet_ids = 1;
+  repeated uint32 next_packet_ids = 1;
   bytes data = 2;
 }
 

@@ -11,11 +11,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 // TODO: Configuration option
-const PACKET_SIZE: usize = 1024;
+pub(crate) const PACKET_SIZE: usize = 1024;
 
 pub type TunnelId = u32;
 pub type ConnectionId = u64;
-type PacketId = u64;
+type PacketId = u32;
 
 pub(crate) struct P2pInterface {
     // TODO is there a way for a more well-distributed key?

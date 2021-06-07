@@ -136,12 +136,15 @@ impl TunnelStateMachine {
 
     async fn incoming_packet_id(&mut self, next_packet_ids: &[PacketId]) {
         for next_packet_id in next_packet_ids {
-            if ! self.incoming_next_packet_ids.contains(&next_packet_id) {
-                self.incoming_next_packet_ids.push_back(next_packet_id.to_owned());
+            if !self.incoming_next_packet_ids.contains(&next_packet_id) {
+                self.incoming_next_packet_ids
+                    .push_back(next_packet_id.to_owned());
                 let mut packet_ids = self.packet_ids.lock().await;
 
                 // The key should not be present
-                debug_assert!(packet_ids.insert(next_packet_id.to_owned(), self.tunnel_id).is_none());
+                debug_assert!(packet_ids
+                    .insert(next_packet_id.to_owned(), self.tunnel_id)
+                    .is_none());
             }
         }
         // Move acceptance window forward if packets got lost
