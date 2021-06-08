@@ -1,7 +1,7 @@
 use crate::p2p_protocol::messages::p2p_messages::{
     ApplicationData, EncryptedHandshakeData, HandshakeData,
 };
-use crate::p2p_protocol::onion_tunnel::{IntermediateHop, TunnelResult};
+use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, IntermediateHop, TunnelResult};
 use crate::p2p_protocol::{FrameId, TunnelId};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -9,16 +9,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{oneshot, Mutex};
-
-// TODO unregister the tunnel from the registry when receiving a closure
 
 pub(super) struct InitiatorStateMachine {
     tunnel_result_tx: Option<oneshot::Sender<TunnelResult>>, // signal the listener completion
 }
 
 impl InitiatorStateMachine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         _hops: Vec<IntermediateHop>,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
@@ -27,6 +26,7 @@ impl InitiatorStateMachine {
         _target: SocketAddr,
         _target_host_key: Vec<u8>,
         _tunnel_id: TunnelId,
+        _listener_tx: Sender<IncomingEventMessage>,
     ) -> Self {
         InitiatorStateMachine {
             tunnel_result_tx: Some(tunnel_result_tx),
@@ -42,6 +42,7 @@ impl TargetStateMachine {
         _socket: Arc<UdpSocket>,
         _source: SocketAddr,
         _tunnel_id: TunnelId,
+        _listener_tx: Sender<IncomingEventMessage>,
     ) -> Self {
         TargetStateMachine {}
     }

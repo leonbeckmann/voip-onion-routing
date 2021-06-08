@@ -26,14 +26,17 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
     // run async
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let p2p_interface_res = p2p_protocol::P2pInterface::new(config.clone()).await;
-        if let Err(e) = p2p_interface_res {
-            log::error!("Cannot start P2P interface: {}", e);
-            return;
-        }
         let api_interface = Arc::new(api_protocol::ApiInterface::new());
-        let p2p_interface = Arc::new(p2p_interface_res.unwrap());
         let api_interface_ref = Arc::downgrade(&api_interface);
+
+        let p2p_interface =
+            match p2p_protocol::P2pInterface::new(config.clone(), api_interface_ref).await {
+                Ok(iface) => Arc::new(iface),
+                Err(e) => {
+                    log::error!("Cannot start P2P interface: {}", e);
+                    return;
+                }
+            };
         let p2p_interface_ref = Arc::downgrade(&p2p_interface);
 
         let api_address = config.onion_api_address;
@@ -50,8 +53,8 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
                 config.p2p_hostname,
                 config.p2p_port
             );
-            if let Err(e) = p2p_interface.listen(api_interface_ref).await {
-                log::error!("P2P listener has failed: {}", e);
+            if let Err(e) = p2p_interface.listen().await {
+                log::error!("P2P listener has failed: {:?}", e);
             }
 
             // shutdown peer

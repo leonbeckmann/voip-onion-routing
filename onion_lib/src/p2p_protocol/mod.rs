@@ -28,10 +28,14 @@ pub(crate) struct P2pInterface {
     frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
     socket: Arc<UdpSocket>,
     config: OnionConfiguration,
+    api_interface: Weak<ApiInterface>,
 }
 
 impl P2pInterface {
-    pub(crate) async fn new(config: OnionConfiguration) -> anyhow::Result<Self> {
+    pub(crate) async fn new(
+        config: OnionConfiguration,
+        api_interface: Weak<ApiInterface>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             onion_tunnels: Arc::new(Mutex::new(HashMap::new())),
             frame_ids: Arc::new(Mutex::new(HashMap::new())),
@@ -39,10 +43,11 @@ impl P2pInterface {
                 UdpSocket::bind(format!("{}:{:?}", config.p2p_hostname, config.p2p_port)).await?,
             ),
             config,
+            api_interface,
         })
     }
 
-    pub(crate) async fn listen(&self, api_interface: Weak<ApiInterface>) -> Result<(), P2pError> {
+    pub(crate) async fn listen(&self) -> Result<(), P2pError> {
         // Allow to receive more than expected to detect messages exceeding the fixed size.
         // Otherwise recv_from would silently discards exceeding bytes.
         let mut buf = [0u8; PACKET_SIZE + 1];
@@ -76,7 +81,7 @@ impl P2pInterface {
                                     // frame id zero is the initial handshake message (client_hello)
 
                                     // get listener connections as hashset
-                                    let iface = match api_interface.upgrade() {
+                                    let iface = match self.api_interface.upgrade() {
                                         None => {
                                             // interface not available, so the api listener has terminated
                                             // calling functions will ensure termination when this is happening
@@ -94,6 +99,7 @@ impl P2pInterface {
                                         self.socket.clone(),
                                         addr,
                                         self.onion_tunnels.clone(),
+                                        self.api_interface.clone(),
                                     )
                                     .await;
 
@@ -186,6 +192,7 @@ impl P2pInterface {
             self.config.hop_count,
             self.config.rps_api_address,
             tx,
+            self.api_interface.clone(),
         )
         .await;
 

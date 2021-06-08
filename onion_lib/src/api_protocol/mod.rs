@@ -3,10 +3,12 @@ mod event;
 pub mod messages;
 
 use crate::api_protocol::event::{IncomingEvent, OutgoingEvent};
-use crate::api_protocol::messages::{OnionError, OnionTunnelReady};
+use crate::api_protocol::messages::{
+    OnionError, OnionTunnelData, OnionTunnelIncoming, OnionTunnelReady,
+};
 use crate::p2p_protocol::P2pInterface;
 use api_connection::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use tokio::net::TcpListener;
@@ -21,10 +23,13 @@ pub(crate) const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv da
 pub(crate) const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
 pub(crate) const ONION_COVER: u16 = 566; // send cover traffic to random peer
 
+type TunnelId = u32;
+type ConnectionId = u64;
+
 async fn handle_incoming_event(
     e: IncomingEvent,
     p2p_interface: Weak<P2pInterface>,
-    connection_id: u64,
+    connection_id: ConnectionId,
 ) -> Option<OutgoingEvent> {
     // first we have to upgrade the p2p interface reference to communicate with p2p layer
     match p2p_interface.upgrade() {
@@ -150,7 +155,7 @@ async fn handle_connection(
     connection: Connection,
     write_tx: Sender<OutgoingEvent>,
     mut read_rx: Receiver<IncomingEvent>,
-    connections: Arc<Mutex<HashMap<u64, Connection>>>,
+    connections: Arc<Mutex<HashMap<ConnectionId, Connection>>>,
     p2p_interface: Weak<P2pInterface>,
 ) {
     let connection_id = connection.internal_id;
@@ -166,8 +171,8 @@ async fn handle_connection(
     connections_guard.insert(connection.internal_id, connection);
 
     async fn unregister_connection(
-        connections: Arc<Mutex<HashMap<u64, Connection>>>,
-        connection_id: u64,
+        connections: Arc<Mutex<HashMap<ConnectionId, Connection>>>,
+        connection_id: ConnectionId,
         p2p_interface: Weak<P2pInterface>,
     ) {
         if let Some(i_face) = p2p_interface.upgrade() {
@@ -218,12 +223,10 @@ async fn handle_connection(
 
 pub(crate) struct ApiInterface {
     // TODO is there a way for a well-distributed key?
-    pub connections: Arc<Mutex<HashMap<u64, Connection>>>,
+    pub connections: Arc<Mutex<HashMap<ConnectionId, Connection>>>,
 }
 
 impl ApiInterface {
-    //TODO add api for p2p protocol
-
     pub fn new() -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
@@ -271,6 +274,54 @@ impl ApiInterface {
                     return Err(anyhow::Error::from(e));
                 }
             };
+        }
+    }
+
+    /*
+     *  Received incoming tunnel, send to CM/CI
+     */
+    pub async fn incoming_tunnel(
+        &self,
+        tunnel_id: TunnelId,
+        listeners: Arc<Mutex<HashSet<ConnectionId>>>,
+    ) {
+        let connections = self.connections.lock().await;
+        let listeners = listeners.lock().await;
+        for key in listeners.iter() {
+            if let Some(connection) = connections.get(key) {
+                // we will not catch errors here due to connection closure, this will be recognized
+                // and handled in the connection handler
+                let _ = connection
+                    .write_event(OutgoingEvent::TunnelIncoming(OnionTunnelIncoming::new(
+                        tunnel_id,
+                    )))
+                    .await;
+            }
+        }
+    }
+
+    /*
+     *  Received incoming data, send to CM/CI
+     */
+    pub async fn incoming_data(
+        &self,
+        data: Vec<u8>,
+        tunnel_id: TunnelId,
+        listeners: Arc<Mutex<HashSet<ConnectionId>>>,
+    ) {
+        let connections = self.connections.lock().await;
+        let listeners = listeners.lock().await;
+        for key in listeners.iter() {
+            if let Some(connection) = connections.get(key) {
+                // we will not catch errors here due to connection closure, this will be recognized
+                // and handled in the connection handler
+                let _ = connection
+                    .write_event(OutgoingEvent::TunnelData(Box::new(OnionTunnelData::new(
+                        tunnel_id,
+                        data.clone(),
+                    ))))
+                    .await;
+            }
         }
     }
 }

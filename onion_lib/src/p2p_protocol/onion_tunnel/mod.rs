@@ -5,15 +5,20 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc::Sender, oneshot, Mutex};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    oneshot, Mutex,
+};
 
 use crate::p2p_protocol::{ConnectionId, P2pError};
 
 use super::{FrameId, TunnelId};
+use crate::api_protocol::ApiInterface;
 use crate::p2p_protocol::onion_tunnel::fsm::{
     FiniteStateMachine, FsmEvent, InitiatorStateMachine, ProtocolError, TargetStateMachine,
 };
 use std::collections::HashSet;
+use std::sync::Weak;
 
 pub(crate) const _RPS_QUERY: u16 = 540;
 pub(crate) const _RPS_PEER: u16 = 541;
@@ -28,13 +33,23 @@ pub enum TunnelResult {
     Failure(ProtocolError),
 }
 
+/*
+ *  An enum send by the FSM to the tunnel via an mpsc channel. IncomingData will be passed to the
+ *  user. IncomingTunnelCompletion signals the tunnel mgmt layer that the tunnel is connected and
+ *  the API should be notified now via the IncomingTunnel message.
+ */
+enum IncomingEventMessage {
+    IncomingTunnelCompletion,
+    IncomingData(Vec<u8>),
+}
+
 type IntermediateHop = (SocketAddr, Vec<u8>);
 
 pub(crate) struct OnionTunnel {
-    listeners: Mutex<HashSet<ConnectionId>>, // all the api connection listeners
-    event_tx: Sender<FsmEvent>,              // sending events to the fsm
-    tunnel_id: TunnelId,                     // unique tunnel id
-    tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // tunnel registry for managing tunnel
+    listeners: Arc<Mutex<HashSet<ConnectionId>>>, // all the api connection listeners
+    event_tx: Sender<FsmEvent>,                   // sending events to the fsm
+    tunnel_id: TunnelId,                          // unique tunnel id
+    tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // tunnel registry for tunnel mgmt
 }
 
 // TODO private keys
@@ -44,16 +59,65 @@ impl OnionTunnel {
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
         event_tx: Sender<FsmEvent>,
         tunnel_id: TunnelId,
+        mut mgmt_rx: Receiver<IncomingEventMessage>,
+        api_interface: Weak<ApiInterface>,
     ) {
         // clone the sender for init
         let event_tx_clone = event_tx.clone();
 
+        let listeners = Arc::new(Mutex::new(listeners));
         let tunnel = OnionTunnel {
-            listeners: Mutex::new(listeners),
+            listeners: listeners.clone(),
             event_tx,
             tunnel_id,
             tunnel_registry: tunnel_registry.clone(),
         };
+
+        // start management task that manages tunnel cleanup and listener notification
+        let id_clone = tunnel_id;
+        let registry_clone = tunnel_registry.clone();
+        tokio::spawn(async move {
+            loop {
+                match mgmt_rx.recv().await {
+                    None => {
+                        log::debug!(
+                            "Tunnel with id {:?} has received a closure from the FSM.",
+                            id_clone
+                        );
+                        log::debug!("Unregister tunnel and shutdown management layer");
+                        let mut registry = registry_clone.lock().await;
+                        let _ = registry.remove(&id_clone);
+                        return;
+                    }
+
+                    // communicate with api interface
+                    Some(m) => {
+                        if let Some(iface) = api_interface.upgrade() {
+                            match m {
+                                IncomingEventMessage::IncomingTunnelCompletion => {
+                                    log::debug!(
+                                        "Received IncomingTunnelCompletion at tunnel {:?}",
+                                        id_clone
+                                    );
+                                    iface.incoming_tunnel(id_clone, listeners.clone()).await;
+                                }
+
+                                IncomingEventMessage::IncomingData(data) => {
+                                    log::debug!("Received IncomingData at {:?}", id_clone);
+                                    iface.incoming_data(data, id_clone, listeners.clone()).await;
+                                }
+                            }
+                        } else {
+                            // this will always lead to a shutdown of the main thread
+                            log::error!(
+                                "API interface not available anymore. Shutdown tunnel mgmt"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        });
 
         // start fsm
         if let Err(_e) = event_tx_clone.send(FsmEvent::Init).await {
@@ -79,12 +143,16 @@ impl OnionTunnel {
         _hop_count: u8,
         _rps_api_address: SocketAddr,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
+        api_interface: Weak<ApiInterface>,
     ) -> TunnelId {
         // TODO select intermediate hops via rps module and hop count
         let hops: Vec<IntermediateHop> = vec![];
 
         // create a channel for handing events to the fsm
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+
+        // create a channel for handing events (data, tunnel completion, closure) to the tunnel
+        let (mgmt_tx, mgmt_rx) = tokio::sync::mpsc::channel(32);
 
         // create new tunnel id
         let tunnel_id = get_id();
@@ -98,6 +166,7 @@ impl OnionTunnel {
             target,
             target_host_key,
             tunnel_id,
+            mgmt_tx,
         );
 
         // run the fsm
@@ -109,7 +178,15 @@ impl OnionTunnel {
         let mut listeners = HashSet::new();
         listeners.insert(listener);
 
-        Self::new_tunnel(listeners, tunnel_registry, event_tx, tunnel_id).await;
+        Self::new_tunnel(
+            listeners,
+            tunnel_registry,
+            event_tx,
+            tunnel_id,
+            mgmt_rx,
+            api_interface,
+        )
+        .await;
         tunnel_id
     }
 
@@ -122,22 +199,34 @@ impl OnionTunnel {
         socket: Arc<UdpSocket>,
         source: SocketAddr,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+        api_interface: Weak<ApiInterface>,
     ) -> TunnelId {
         // create a channel for handing events to the fsm
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+
+        // create a channel for handing events (data, tunnel completion, closure) to the tunnel
+        let (mgmt_tx, mgmt_rx) = tokio::sync::mpsc::channel(32);
 
         // create new tunnel id
         let tunnel_id = get_id();
 
         // create target FSM
-        let mut fsm = TargetStateMachine::new(frame_ids, socket, source, tunnel_id);
+        let mut fsm = TargetStateMachine::new(frame_ids, socket, source, tunnel_id, mgmt_tx);
 
         // run the fsm
         tokio::spawn(async move {
             fsm.handle_events(event_rx).await;
         });
 
-        Self::new_tunnel(listeners, tunnel_registry, event_tx, tunnel_id).await;
+        Self::new_tunnel(
+            listeners,
+            tunnel_registry,
+            event_tx,
+            tunnel_id,
+            mgmt_rx,
+            api_interface,
+        )
+        .await;
         tunnel_id
     }
 

@@ -61,7 +61,7 @@ impl Connection {
         }
     }
 
-    pub(crate) async fn _write_event(&self, e: OutgoingEvent) -> anyhow::Result<()> {
+    pub(crate) async fn write_event(&self, e: OutgoingEvent) -> anyhow::Result<()> {
         self.write_tx.send(e).await?;
         Ok(())
     }
