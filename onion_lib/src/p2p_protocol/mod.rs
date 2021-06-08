@@ -264,8 +264,6 @@ pub enum P2pError {
     IOError(std::io::Error),
     #[error("Onion tunnel event invalid")]
     _InvalidTunnelEvent,
-    #[error("Onion tunnel with ID '{0}': Timeout waiting for packet")]
-    _SocketResponseTimeout(u32),
     #[error("Error decoding protobuf message: {0}")]
     ProtobufError(protobuf::error::ProtobufError),
     #[error("Invalid protobuf frame content: {0}")]

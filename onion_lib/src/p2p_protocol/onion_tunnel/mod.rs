@@ -167,6 +167,7 @@ impl OnionTunnel {
             target_host_key,
             tunnel_id,
             mgmt_tx,
+            event_tx.clone(),
         );
 
         // run the fsm
@@ -211,7 +212,14 @@ impl OnionTunnel {
         let tunnel_id = get_id();
 
         // create target FSM
-        let mut fsm = TargetStateMachine::new(frame_ids, socket, source, tunnel_id, mgmt_tx);
+        let mut fsm = TargetStateMachine::new(
+            frame_ids,
+            socket,
+            source,
+            tunnel_id,
+            mgmt_tx,
+            event_tx.clone(),
+        );
 
         // run the fsm
         tokio::spawn(async move {

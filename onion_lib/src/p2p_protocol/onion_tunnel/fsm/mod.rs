@@ -1,5 +1,11 @@
+mod application_fsm;
+mod handshake_fsm;
+
 use crate::p2p_protocol::messages::p2p_messages::{
     ApplicationData, EncryptedHandshakeData, HandshakeData,
+};
+use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
+    Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
 use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, IntermediateHop, TunnelResult};
 use crate::p2p_protocol::{FrameId, TunnelId};
@@ -14,8 +20,10 @@ use tokio::sync::{oneshot, Mutex};
 
 pub(super) struct InitiatorStateMachine {
     tunnel_result_tx: Option<oneshot::Sender<TunnelResult>>, // signal the listener completion
+    event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
 }
 
+// TODO fill fsm
 impl InitiatorStateMachine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -27,38 +35,71 @@ impl InitiatorStateMachine {
         _target_host_key: Vec<u8>,
         _tunnel_id: TunnelId,
         _listener_tx: Sender<IncomingEventMessage>,
+        event_tx: Sender<FsmEvent>,
     ) -> Self {
         InitiatorStateMachine {
             tunnel_result_tx: Some(tunnel_result_tx),
+            event_tx,
         }
     }
 }
 
-pub(super) struct TargetStateMachine {}
+pub(super) struct TargetStateMachine {
+    listener_tx: Sender<IncomingEventMessage>,
+    event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
+}
 
+// TODO fill fsm
 impl TargetStateMachine {
     pub fn new(
         _frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
         _socket: Arc<UdpSocket>,
         _source: SocketAddr,
         _tunnel_id: TunnelId,
-        _listener_tx: Sender<IncomingEventMessage>,
+        listener_tx: Sender<IncomingEventMessage>,
+        event_tx: Sender<FsmEvent>,
     ) -> Self {
-        TargetStateMachine {}
+        TargetStateMachine {
+            listener_tx,
+            event_tx,
+        }
     }
 }
 
 #[async_trait]
 pub(super) trait FiniteStateMachine {
     async fn action_init(&mut self) -> Result<State, ProtocolError>;
-    async fn action_handshake_data(&mut self, data: HandshakeData) -> Result<State, ProtocolError>;
+
+    async fn action_handshake_data(
+        &mut self,
+        tx: SenderWrapper,
+        data: HandshakeData,
+    ) -> Result<State, ProtocolError> {
+        log::debug!("Delegate handshake data to the handshake protocol");
+        match tx.event_tx.send(HandshakeEvent::HandshakeData(data)).await {
+            Ok(_) => {
+                // stay in connecting
+                Ok(State::Connecting(tx))
+            }
+            Err(_) => {
+                // error occurred, handshake protocol not available anymore
+                Err(ProtocolError::HandshakeSendFailure)
+            }
+        }
+    }
+
     async fn action_enc_handshake_data(
         &mut self,
+        tx: SenderWrapper,
         data: EncryptedHandshakeData,
     ) -> Result<State, ProtocolError>;
     async fn action_app_data(&mut self, data: ApplicationData) -> Result<State, ProtocolError>;
     async fn action_close(&mut self) -> Result<State, ProtocolError>;
     async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError>;
+    async fn action_handshake_result(
+        &mut self,
+        res: Result<(), ProtocolError>,
+    ) -> Result<State, ProtocolError>;
 
     const INIT_STATE: State = State::Closed;
 
@@ -87,7 +128,7 @@ pub(super) trait FiniteStateMachine {
                     }
                 },
 
-                State::Connecting => match event {
+                State::Connecting(tx) => match event {
                     FsmEvent::Init => {
                         log::warn!("Received init event for initialized FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
@@ -97,14 +138,15 @@ pub(super) trait FiniteStateMachine {
                         log::warn!("Received send event for non-connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::Handshake(data) => self.action_handshake_data(data).await,
+                    FsmEvent::Handshake(data) => self.action_handshake_data(tx, data).await,
                     FsmEvent::EncryptedHandshake(data) => {
-                        self.action_enc_handshake_data(data).await
+                        self.action_enc_handshake_data(tx, data).await
                     }
                     FsmEvent::ApplicationData(_) => {
                         log::warn!("Received application data for not-connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
                     }
+                    FsmEvent::HandshakeResult(res) => self.action_handshake_result(res).await,
                 },
 
                 State::Connected => match event {
@@ -123,6 +165,10 @@ pub(super) trait FiniteStateMachine {
                         Err(ProtocolError::UnexpectedMessageType)
                     }
                     FsmEvent::ApplicationData(data) => self.action_app_data(data).await,
+                    FsmEvent::HandshakeResult(_) => {
+                        log::warn!("Received handshake result for connected FSM.");
+                        Err(ProtocolError::UnexpectedMessageType)
+                    }
                 },
 
                 State::Terminated => {
@@ -154,27 +200,39 @@ pub(super) trait FiniteStateMachine {
 #[async_trait]
 impl FiniteStateMachine for InitiatorStateMachine {
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
-        // TODO implement
-        let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
-        let _ = tunnel_result_tx.send(TunnelResult::Connected);
-        Ok(State::Connected)
-    }
+        // start the handshake fsm in state 'start'
+        log::debug!("Initialize the handshake protocol as an initiator");
+        let handshake_fsm = HandshakeStateMachine::<Client>::new();
 
-    async fn action_handshake_data(
-        &mut self,
-        _data: HandshakeData,
-    ) -> Result<State, ProtocolError> {
-        unimplemented!()
+        // create a channel for communicating with the handshake protocol
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+        let tx_clone = event_tx.clone();
+
+        // run the handshake state machine async
+        let fsm_event_tx = self.event_tx.clone();
+        tokio::spawn(async move { handshake_fsm.run(event_rx, fsm_event_tx).await });
+
+        // start via init
+        if tx_clone.send(HandshakeEvent::Init).await.is_err() {
+            Err(ProtocolError::HandshakeSendFailure)
+        } else {
+            Ok(State::Connecting(SenderWrapper { event_tx }))
+        }
     }
 
     async fn action_enc_handshake_data(
         &mut self,
+        _tx: SenderWrapper,
         _data: EncryptedHandshakeData,
     ) -> Result<State, ProtocolError> {
+        // TODO decrypt message
+        // TODO parse protobuf message
+        // TODO delegate to handshake fsm
         unimplemented!()
     }
 
     async fn action_app_data(&mut self, _data: ApplicationData) -> Result<State, ProtocolError> {
+        // TODO implement
         unimplemented!()
     }
 
@@ -184,32 +242,60 @@ impl FiniteStateMachine for InitiatorStateMachine {
     }
 
     async fn action_send(&mut self, _data: Vec<u8>) -> Result<State, ProtocolError> {
+        // TODO implement
         unimplemented!()
+    }
+
+    async fn action_handshake_result(
+        &mut self,
+        res: Result<(), ProtocolError>,
+    ) -> Result<State, ProtocolError> {
+        let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
+        match res {
+            Ok(_) => {
+                log::debug!("Handshake was successful");
+                let _ = tunnel_result_tx.send(TunnelResult::Connected);
+                Ok(State::Connected)
+            }
+            Err(e) => {
+                log::warn!("Handshake failure");
+                let _ = tunnel_result_tx.send(TunnelResult::Failure(e.clone()));
+                Err(e)
+            }
+        }
     }
 }
 
 #[async_trait]
 impl FiniteStateMachine for TargetStateMachine {
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
-        // TODO implement
-        Ok(State::Connected)
-    }
+        // start the handshake fsm in state 'WaitForClientHello'
+        log::debug!("Initialize the handshake protocol as a non-initiator");
+        let handshake_fsm = HandshakeStateMachine::<Server>::new();
 
-    async fn action_handshake_data(
-        &mut self,
-        _data: HandshakeData,
-    ) -> Result<State, ProtocolError> {
-        unimplemented!()
+        // create a channel for communicating with the handshake protocol
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+
+        // run the handshake state machine async
+        let fsm_event_tx = self.event_tx.clone();
+        tokio::spawn(async move { handshake_fsm.run(event_rx, fsm_event_tx).await });
+
+        Ok(State::Connecting(SenderWrapper { event_tx }))
     }
 
     async fn action_enc_handshake_data(
         &mut self,
+        _tx: SenderWrapper,
         _data: EncryptedHandshakeData,
     ) -> Result<State, ProtocolError> {
+        // TODO decrypt message
+        // TODO parse protobuf message
+        // TODO delegate to handshake fsm
         unimplemented!()
     }
 
     async fn action_app_data(&mut self, _data: ApplicationData) -> Result<State, ProtocolError> {
+        // TODO implement
         unimplemented!()
     }
 
@@ -219,20 +305,57 @@ impl FiniteStateMachine for TargetStateMachine {
     }
 
     async fn action_send(&mut self, _data: Vec<u8>) -> Result<State, ProtocolError> {
+        // TODO implement
         unimplemented!()
+    }
+
+    async fn action_handshake_result(
+        &mut self,
+        res: Result<(), ProtocolError>,
+    ) -> Result<State, ProtocolError> {
+        match res {
+            Ok(_) => {
+                log::debug!("Handshake was successful");
+                let _ = self
+                    .listener_tx
+                    .send(IncomingEventMessage::IncomingTunnelCompletion)
+                    .await;
+                Ok(State::Connected)
+            }
+            Err(e) => {
+                log::warn!("Handshake failure");
+                Err(e)
+            }
+        }
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ProtocolError {
     #[error("Received unexpected message type")]
     UnexpectedMessageType,
+    #[error("Cannot pass message to the handshake protocol")]
+    HandshakeSendFailure,
+    #[error("Handshake timeout occurred")]
+    HandshakeTimeout,
+}
+
+#[derive(Debug)]
+pub(super) struct SenderWrapper {
+    pub event_tx: Sender<HandshakeEvent>,
+}
+
+impl PartialEq for SenderWrapper {
+    fn eq(&self, _other: &Self) -> bool {
+        // we only want to compare states, the sender is irrelevant
+        true
+    }
 }
 
 #[derive(Debug, PartialEq)]
 pub(super) enum State {
     Closed,
-    Connecting,
+    Connecting(SenderWrapper),
     Connected,
     Terminated,
 }
@@ -244,6 +367,7 @@ pub enum FsmEvent {
     Handshake(HandshakeData),                   // Received handshake data
     EncryptedHandshake(EncryptedHandshakeData), // Received encrypted handshake data
     ApplicationData(ApplicationData),           // Received encrypted application data
+    HandshakeResult(Result<(), ProtocolError>), // HandshakeResult from handshake fsm
 }
 
 /*
@@ -260,23 +384,6 @@ pub(crate) struct TunnelStateMachine {
 }
 
 impl TunnelStateMachine {
-    /// For now only ReceiveData events are supported, do not use this function.
-    /// Use wait_for_frame_event instead.
-    async fn wait_for_event(&mut self) -> Result<IoEvent, P2pError> {
-        let event_future = self.event_rx.recv();
-        let event = timeout(Duration::from_secs(30), event_future).await;
-
-        if event.is_err() {
-            return Err(TunnelError::SocketResponseTimeout(0));
-        }
-        let event = event.unwrap(); // Safe
-        if event.is_none() {
-            return Err(TunnelError::EventQueueClosed);
-        }
-        let event = event.unwrap(); // Safe
-        Ok(event)
-    }
-
     async fn wait_for_frame_event(
         &mut self,
     ) -> Result<p2p_messages::TunnelFrame_oneof_message, P2pError> {
@@ -399,10 +506,6 @@ impl TunnelStateMachine {
                 )))
             }
         }
-    }
-
-    pub(crate) async fn close_tunnel(&mut self) -> Result<TunnelTransit, TunnelError> {
-        Ok(Transit::Terminate)
     }
 }
 */
