@@ -1,5 +1,5 @@
 pub(crate) mod p2p_messages;
-
+/*
 impl From<p2p_messages::TunnelHello> for p2p_messages::TunnelFrame {
     fn from(msg: p2p_messages::TunnelHello) -> Self {
         let mut frame = Self::new();
@@ -23,3 +23,4 @@ impl From<p2p_messages::TunnelClose> for p2p_messages::TunnelFrame {
         frame
     }
 }
+*/

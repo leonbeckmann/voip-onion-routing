@@ -3,41 +3,46 @@ mod onion_tunnel;
 
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;
-use crate::p2p_protocol::onion_tunnel::OnionTunnel;
+use crate::p2p_protocol::messages::p2p_messages::{TunnelFrame, TunnelFrame_oneof_message};
+use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
+use crate::p2p_protocol::onion_tunnel::{OnionTunnel, TunnelResult};
+use protobuf::Message;
 use std::sync::{Arc, Weak};
-use std::{collections::HashMap, mem::size_of, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::UdpSocket;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
-// TODO: Configuration option
+// hard coded packet size should not be configurable and equal for all modules
 pub(crate) const PACKET_SIZE: usize = 1024;
 
 pub type TunnelId = u32;
+type FrameId = u64;
 pub type ConnectionId = u64;
-type PacketId = u32;
 
 pub(crate) struct P2pInterface {
     // TODO is there a way for a more well-distributed key?
-    onion_tunnels: Mutex<HashMap<TunnelId, OnionTunnel>>,
-    packet_ids: Arc<Mutex<HashMap<PacketId, TunnelId>>>,
+    // TODO maybe rw lock for better performance?
+    onion_tunnels: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+    frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
     socket: Arc<UdpSocket>,
-    _config: OnionConfiguration,
+    config: OnionConfiguration,
 }
 
 impl P2pInterface {
     pub(crate) async fn new(config: OnionConfiguration) -> anyhow::Result<Self> {
         Ok(Self {
-            onion_tunnels: Mutex::new(HashMap::new()),
-            packet_ids: Arc::new(Mutex::new(HashMap::new())),
+            onion_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            frame_ids: Arc::new(Mutex::new(HashMap::new())),
             socket: Arc::new(
                 UdpSocket::bind(format!("{}:{:?}", config.p2p_hostname, config.p2p_port)).await?,
             ),
-            _config: config,
+            config,
         })
     }
 
-    pub(crate) async fn listen(&self, _api_interface: Weak<ApiInterface>) -> anyhow::Result<()> {
+    pub(crate) async fn listen(&self, api_interface: Weak<ApiInterface>) -> Result<(), P2pError> {
         // Allow to receive more than expected to detect messages exceeding the fixed size.
         // Otherwise recv_from would silently discards exceeding bytes.
         let mut buf = [0u8; PACKET_SIZE + 1];
@@ -47,36 +52,92 @@ impl P2pInterface {
                     if size == PACKET_SIZE {
                         log::debug!("Received UDP packet with valid length from {:?}", addr);
 
-                        let mut packet_id_buf_copy = [0u8; size_of::<PacketId>()];
-                        packet_id_buf_copy.copy_from_slice(&buf[0..size_of::<PacketId>()]);
+                        // parse tunnel frame
+                        match TunnelFrame::parse_from_bytes(&buf[0..PACKET_SIZE]) {
+                            Ok(frame) => {
+                                // check if message is available, which should always be the case
+                                if frame.message.is_none() {
+                                    log::warn!("Received empty frame");
+                                    continue;
+                                }
+                                let event = match frame.message.unwrap() {
+                                    TunnelFrame_oneof_message::handshakeData(data) => {
+                                        FsmEvent::Handshake(data)
+                                    }
+                                    TunnelFrame_oneof_message::encHandshakeData(data) => {
+                                        FsmEvent::EncryptedHandshake(data)
+                                    }
+                                    TunnelFrame_oneof_message::appData(data) => {
+                                        FsmEvent::ApplicationData(data)
+                                    }
+                                };
 
-                        let packet_id = PacketId::from_le_bytes(packet_id_buf_copy);
+                                let tunnel_id = if frame.frameId == 0 {
+                                    // frame id zero is the initial handshake message (client_hello)
 
-                        let mut packet_ids = self.packet_ids.lock().await;
-                        let mut tunnel_id = packet_ids.remove(&packet_id);
-                        drop(packet_ids); // unlock mutex
+                                    // get listener connections as hashset
+                                    let iface = match api_interface.upgrade() {
+                                        None => {
+                                            // interface not available, so the api listener has terminated
+                                            // calling functions will ensure termination when this is happening
+                                            return Err(P2pError::ApiInterfaceError);
+                                        }
+                                        Some(iface) => iface,
+                                    };
+                                    let connections = iface.connections.lock().await;
+                                    let listeners = connections.keys().cloned().collect();
 
-                        let mut tunnels = self.onion_tunnels.lock().await;
-                        let onion_tunnel = match tunnel_id {
-                            Some(tunnel_id) => tunnels.get(&tunnel_id).unwrap(),
-                            None => {
-                                // unlock mutex for build function, then lock it again
-                                drop(tunnels);
-                                let (new_tunnel_id, _) = self
-                                    .build_tunnel_impl(Some(addr), None, vec![], false)
-                                    .await?;
-                                tunnels = self.onion_tunnels.lock().await;
-                                tunnel_id = Some(new_tunnel_id);
-                                tunnels.get(&new_tunnel_id).unwrap()
+                                    // build a new target tunnel
+                                    let tunnel_id = OnionTunnel::new_target_tunnel(
+                                        listeners,
+                                        self.frame_ids.clone(),
+                                        self.socket.clone(),
+                                        addr,
+                                        self.onion_tunnels.clone(),
+                                    )
+                                    .await;
+
+                                    tunnel_id
+                                } else {
+                                    // not a new tunnel request, get corresponding tunnel id from frame id
+                                    let frame_ids = self.frame_ids.lock().await;
+                                    let tunnel_id = match frame_ids.get(&frame.frameId) {
+                                        None => {
+                                            log::warn!(
+                                                "Received unexpected frame id, drop the frame"
+                                            );
+                                            continue;
+                                        }
+                                        Some(tunnel_id) => tunnel_id,
+                                    };
+                                    *tunnel_id
+                                };
+
+                                let mut tunnels = self.onion_tunnels.lock().await;
+                                match tunnels.get(&tunnel_id) {
+                                    None => {
+                                        log::warn!(
+                                            "Received frame for not available tunnel with id {:?}",
+                                            tunnel_id
+                                        );
+                                    }
+                                    Some(tunnel) => {
+                                        // forward message to tunnel
+                                        if tunnel.forward_event(event).await.is_err() {
+                                            // tunnel has been closed, remove tunnel from registry
+                                            let _ = tunnels.remove(&tunnel_id);
+                                        }
+                                    }
+                                };
+                            }
+                            Err(_) => {
+                                log::warn!(
+                                    "Cannot parse UDP packet from {:?} to tunnel frame.",
+                                    addr
+                                );
                             }
                         };
-
-                        let res = onion_tunnel.forward_packet(buf.to_vec()).await;
-                        if res.is_err() {
-                            tunnels.remove(&tunnel_id.unwrap()); // Safe unwrap
-                        }
                     } else {
-                        // Drop packet with invalid size
                         log::warn!(
                             "Dropping received UDP packet from {:?} because of packet size",
                             addr
@@ -84,81 +145,82 @@ impl P2pInterface {
                     }
                 }
                 Err(e) => {
-                    // TODO do we always want to quit here?
                     log::error!("Cannot read from UDP socket {}", e);
-                    return Err(anyhow::Error::from(e));
+                    return Err(P2pError::IOError(e));
                 }
             };
         }
     }
 
-    /// Unsubscribe connection from all tunnels due to connection closure
-    pub(crate) async fn unsubscribe(&self, connection_id: ConnectionId) -> Result<(), P2pError> {
+    /**
+     *  Unsubscribe connection from all tunnels due to connection closure
+     */
+    pub(crate) async fn unsubscribe(&self, connection_id: ConnectionId) {
         // call unsubscribe on all tunnels
         let mut onion_tunnels = self.onion_tunnels.lock().await;
-        for (_, b) in onion_tunnels.iter_mut() {
-            b.unsubscribe(connection_id);
+        for (_, tunnel) in onion_tunnels.iter_mut() {
+            tunnel.unsubscribe(connection_id).await;
         }
-        Ok(())
     }
 
-    /// Build a new onion tunnel
-    ///
-    /// Return the new tunnel_id and the identity of the destination peer in DER format
-    async fn build_tunnel_impl(
-        &self,
-        source: Option<SocketAddr>,
-        target: Option<SocketAddr>,
-        host_key: Vec<u8>,
-        start_endpoint: bool,
-    ) -> Result<(TunnelId, Vec<u8>), P2pError> {
-        // TODO: return identity of the destination peer in DER format
-        let mut onion_tunnels = self.onion_tunnels.lock().await;
-        let mut tunnel_id: TunnelId = TunnelId::default();
-        while onion_tunnels.contains_key(&tunnel_id) {
-            tunnel_id += 1;
-        }
-        let tunnel = OnionTunnel::new(
-            self.packet_ids.clone(),
-            tunnel_id,
-            self.socket.clone(),
-            source,
-            target,
-            host_key,
-            start_endpoint,
-        )
-        .await;
-        onion_tunnels.insert(tunnel_id, tunnel);
-        Ok((tunnel_id, vec![]))
-    }
-
+    /**
+     *  Build a new onion tunnel (initiator) triggered from the api protocol
+     *
+     *  Return the tunnel_id and the target peer public key (DER)
+     */
     pub(crate) async fn build_tunnel(
         &self,
         target: SocketAddr,
         host_key: Vec<u8>,
+        listener: ConnectionId,
     ) -> Result<(TunnelId, Vec<u8>), P2pError> {
-        self.build_tunnel_impl(None, Some(target), host_key, true)
-            .await
+        let (tx, rx) = oneshot::channel::<TunnelResult>();
+
+        let tunnel_id = OnionTunnel::new_initiator_tunnel(
+            listener,
+            self.frame_ids.clone(),
+            self.socket.clone(),
+            target,
+            host_key.clone(),
+            self.onion_tunnels.clone(),
+            self.config.hop_count,
+            self.config.rps_api_address,
+            tx,
+        )
+        .await;
+
+        // wait until connected or failure
+        match rx.await {
+            Ok(res) => match res {
+                TunnelResult::Connected => Ok((tunnel_id, host_key)),
+                TunnelResult::Failure(e) => Err(P2pError::HandshakeFailure(e)),
+            },
+            Err(_) => Err(P2pError::TunnelClosed),
+        }
     }
 
-    /// Unsubscribe connection from specific tunnel
+    /*
+     *  Unsubscribe connection from specific tunnel
+     */
     pub(crate) async fn destroy_tunnel_ref(
         &self,
         tunnel_id: TunnelId,
         connection_id: ConnectionId,
     ) -> Result<(), P2pError> {
         // call unsubscribe on specific tunnel
-        let mut onion_tunnels = self.onion_tunnels.lock().await;
-        match onion_tunnels.get_mut(&tunnel_id) {
+        let onion_tunnels = self.onion_tunnels.lock().await;
+        match onion_tunnels.get(&tunnel_id) {
             None => Err(P2pError::InvalidTunnelId(tunnel_id)),
             Some(tunnel) => {
-                tunnel.unsubscribe(connection_id);
+                tunnel.unsubscribe(connection_id).await;
                 Ok(())
             }
         }
     }
 
-    /// Send data via specific tunnel
+    /*
+     *  Send data via specific tunnel
+     */
     pub(crate) async fn send_data(
         &self,
         tunnel_id: TunnelId,
@@ -168,18 +230,13 @@ impl P2pInterface {
         let tunnel = tunnels.get(&tunnel_id);
 
         match tunnel {
-            Some(tunnel) => tunnel.forward_packet(data).await,
-            None => {
-                log::error!(
-                    "Trying to send data through invalid tunnel id: {}",
-                    tunnel_id
-                );
-                Err(P2pError::InvalidTunnelId(tunnel_id))
-            }
+            Some(tunnel) => tunnel.send(data).await,
+            None => Err(P2pError::InvalidTunnelId(tunnel_id)),
         }
     }
 
     /// Send cover traffic via new random tunnel
+    /// API protocol
     pub(crate) async fn send_cover_traffic(&self, _cover_size: u16) -> Result<(), P2pError> {
         // TODO implement logic
         Ok(())
@@ -190,22 +247,24 @@ impl P2pInterface {
 pub enum P2pError {
     #[error("Onion tunnel with ID '{0}' is not existent")]
     InvalidTunnelId(u32),
+    #[error("Onion tunnel closed")]
+    TunnelClosed,
+    #[error("Handshake failed: {0}")]
+    HandshakeFailure(ProtocolError),
+    #[error("API Interface not available anymore")]
+    ApiInterfaceError,
+    #[error("IO Error: {0}")]
+    IOError(std::io::Error),
     #[error("Onion tunnel event invalid")]
     _InvalidTunnelEvent,
     #[error("Onion tunnel with ID '{0}': Timeout waiting for packet")]
-    SocketResponseTimeout(u32),
-    // #[error("Onion tunnel with ID '{0}': Invalid state transition")]
-    // InvalidStateTransition(u32),
-    #[error("IO Error: {0}")]
-    IOError(std::io::Error),
-    #[error("Onion tunnel closed")]
-    TunnelClosed,
+    _SocketResponseTimeout(u32),
     #[error("Error decoding protobuf message: {0}")]
     ProtobufError(protobuf::error::ProtobufError),
     #[error("Invalid protobuf frame content: {0}")]
-    FrameError(String),
+    _FrameError(String),
     #[error("Event queue closed unexpectely")]
-    EventQueueClosed,
+    _EventQueueClosed,
 }
 
 impl From<std::io::Error> for P2pError {

@@ -3,23 +3,44 @@ syntax = "proto3";
 // P2P Onion Tunnel frame
 message TunnelFrame {
 
+  // an identifier for identifying the corresponding tunnel of this frame
+  uint64 frameId = 1;
+
   oneof message {
-    TunnelHello tunnelHello = 1;
-    TunnelData tunnelData = 2;
-    TunnelClose tunnelClose = 3;
+    HandshakeData handshakeData = 2;
+    EncryptedHandshakeData encHandshakeData = 3;
+    ApplicationData appData = 4;
   }
 }
 
-message TunnelHello {
-  repeated uint32 next_packet_ids = 1;
-  string target = 2;
+message HandshakeData {
+  // establish secure channel
+  oneof message {
+    ClientHello clientHello = 1;
+    ServerHello serverHello = 2;
+  }
 }
 
-message TunnelData {
-  repeated uint32 next_packet_ids = 1;
-  bytes data = 2;
+message ClientHello {
+
 }
 
-message TunnelClose {
+message ServerHello {
+
+}
+
+message EncryptedHandshakeData {
+  bytes data = 1; // this can be parsed into DecryptedHandshakeData afterwards
+}
+
+message DecryptedHandshakeData {
+  // exchange routing information
+}
+
+message ApplicationData {
+  bytes data = 1; // this can be parsed into DecryptedApplicationData
+}
+
+message DecryptedApplicationData {
 
 }

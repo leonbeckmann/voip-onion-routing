@@ -1,317 +1,181 @@
-mod message_codec;
+pub mod fsm;
 
-use std::{
-    collections::{HashMap, LinkedList},
-    net::SocketAddr,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc::Sender, oneshot, Mutex};
+
+use crate::p2p_protocol::{ConnectionId, P2pError};
+
+use super::{FrameId, TunnelId};
+use crate::p2p_protocol::onion_tunnel::fsm::{
+    FiniteStateMachine, FsmEvent, InitiatorStateMachine, ProtocolError, TargetStateMachine,
 };
+use std::collections::HashSet;
 
-use tokio::sync::{
-    mpsc::{Receiver, Sender},
-    Mutex,
-};
-use tokio::{net::UdpSocket, time::timeout};
+pub(crate) const _RPS_QUERY: u16 = 540;
+pub(crate) const _RPS_PEER: u16 = 541;
 
-use crate::p2p_protocol::messages::p2p_messages;
-use crate::p2p_protocol::P2pError;
+static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
+fn get_id() -> u32 {
+    ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
-use super::{PacketId, TunnelId};
+pub enum TunnelResult {
+    Connected,
+    Failure(ProtocolError),
+}
 
-/// The initial sending tunnel endpoint behaves the same as an intermediate hop.
-///
-/// Tunnel state machine
-///
-/// ```text
-///            Connecting
-///                |
-///                |
-///                | - send connection request
-///                | - receive response
-///                |
-///                V
-///            Connected ------------+
-///                |   ^             |
-///                |   |             | handle packets
-///                |   |             |
-///                |   +-------------+
-/// end connection |
-///                |
-///                V
-///             Closing
-///                |
-///                |
-///  receive resp. |
-///                |
-///                V
-///            Terminate
-/// ```
+type IntermediateHop = (SocketAddr, Vec<u8>);
 
 pub(crate) struct OnionTunnel {
-    event_tx: Sender<IoEvent>,
+    listeners: Mutex<HashSet<ConnectionId>>, // all the api connection listeners
+    event_tx: Sender<FsmEvent>,              // sending events to the fsm
+    tunnel_id: TunnelId,                     // unique tunnel id
+    tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // tunnel registry for managing tunnel
 }
 
-#[derive(Debug)]
-pub(crate) struct TunnelStateMachine {
-    event_rx: Receiver<IoEvent>,
-    message_codec_in: Box<dyn message_codec::P2pCodec + Send + 'static>,
-    message_codec_out: Box<dyn message_codec::P2pCodec + Send + 'static>,
-    is_endpoint: bool,
-    packet_ids: Arc<Mutex<HashMap<PacketId, TunnelId>>>,
-    incoming_next_packet_ids: LinkedList<PacketId>,
-    outgoing_next_packet_ids: LinkedList<PacketId>,
-    tunnel_id: TunnelId,
-}
-
-#[derive(Debug, Clone, PartialEq, Copy)]
-pub(crate) enum TunnelState {
-    Connecting,
-    Connected,
-    Closing,
-}
-
-type TunnelError = P2pError;
-pub enum Transit<Out>
-where
-    Out: Sized + Copy,
-{
-    /// Enter the next state
-    To(Out),
-    /// Final state
-    Terminate,
-}
-type TunnelTransit = Transit<TunnelState>;
-
-#[derive(Debug, Clone, PartialEq)]
-enum IoEvent {
-    ReceiveData(Vec<u8>),
-}
-
-impl TunnelStateMachine {
-    /// For now only ReceiveData events are supported, do not use this function.
-    /// Use wait_for_frame_event instead.
-    async fn wait_for_event(&mut self) -> Result<IoEvent, P2pError> {
-        let event_future = self.event_rx.recv();
-        let event = timeout(Duration::from_secs(30), event_future).await;
-
-        if event.is_err() {
-            return Err(TunnelError::SocketResponseTimeout(0));
-        }
-        let event = event.unwrap(); // Safe
-        if event.is_none() {
-            return Err(TunnelError::EventQueueClosed);
-        }
-        let event = event.unwrap(); // Safe
-        Ok(event)
-    }
-
-    async fn wait_for_frame_event(
-        &mut self,
-    ) -> Result<p2p_messages::TunnelFrame_oneof_message, P2pError> {
-        let event = self.wait_for_event().await?;
-
-        match event {
-            IoEvent::ReceiveData(data) => {
-                let connect_request = self.message_codec_in.from_raw(&data).await?;
-                let message = connect_request
-                    .message
-                    .ok_or(P2pError::FrameError("TunnelFrame is unset".to_string()))?;
-                Ok(message)
-            }
-        }
-    }
-
-    fn outgoing_packet_id(&mut self) -> (Vec<PacketId>, PacketId) {
-        let current_packet_id = self
-            .outgoing_next_packet_ids
-            .pop_front()
-            .expect("Out of packet ids");
-        self.outgoing_next_packet_ids.push_back(rand::random());
-        let mut next_packet_ids = vec![];
-        next_packet_ids.extend(self.outgoing_next_packet_ids.iter());
-
-        (next_packet_ids, current_packet_id)
-    }
-
-    async fn incoming_packet_id(&mut self, next_packet_ids: &[PacketId]) {
-        for next_packet_id in next_packet_ids {
-            if !self.incoming_next_packet_ids.contains(&next_packet_id) {
-                self.incoming_next_packet_ids
-                    .push_back(next_packet_id.to_owned());
-                let mut packet_ids = self.packet_ids.lock().await;
-
-                // The key should not be present
-                debug_assert!(packet_ids
-                    .insert(next_packet_id.to_owned(), self.tunnel_id)
-                    .is_none());
-            }
-        }
-        // Move acceptance window forward if packets got lost
-        while self.incoming_next_packet_ids.len() > 20 {
-            let timeout_packet_id = self.incoming_next_packet_ids.pop_front().unwrap(); // safe unwrap
-            let mut packet_ids = self.packet_ids.lock().await;
-            debug_assert!(packet_ids.remove(&timeout_packet_id).is_some());
-        }
-    }
-
-    pub(crate) async fn tunnel_connect(&mut self) -> Result<TunnelTransit, TunnelError> {
-        let frame = self.wait_for_frame_event().await?;
-
-        match frame {
-            p2p_messages::TunnelFrame_oneof_message::tunnelHello(message) => {
-                self.incoming_packet_id(message.get_next_packet_ids()).await;
-
-                let target = if message.target == "" {
-                    // Final host in the hop chain
-                    None
-                } else {
-                    Some(SocketAddr::from_str(message.target.as_str()).map_err(|e| {
-                        P2pError::FrameError(format!(
-                            "Target is invalid socket address: {:#?}, error: {:#?}",
-                            message.target, e
-                        ))
-                    })?)
-                };
-                self.message_codec_out.set_target(target);
-
-                return Ok(Transit::To(TunnelState::Connected));
-            }
-            _ => {
-                return Err(P2pError::FrameError(format!(
-                    "Expected TunnelHello, got: {:#?}",
-                    frame
-                )))
-            }
-        }
-    }
-
-    pub(crate) async fn receive_packet(&mut self) -> Result<TunnelTransit, TunnelError> {
-        let frame = self.wait_for_frame_event().await?;
-
-        match frame {
-            p2p_messages::TunnelFrame_oneof_message::tunnelData(message) => {
-                self.incoming_packet_id(message.get_next_packet_ids()).await;
-
-                if self.message_codec_out.is_endpoint() {
-                    // TODO: send data to API
-                    log::debug!("Received {} bytes at final endpoint", message.data.len());
-                } else {
-                    let mut msg = p2p_messages::TunnelData::new();
-                    msg.set_data(message.data);
-
-                    let (next_packet_ids, current_packet_id) = self.outgoing_packet_id();
-                    msg.set_next_packet_ids(next_packet_ids);
-
-                    self.message_codec_out
-                        .write_socket(current_packet_id, &msg.into())
-                        .await?;
-                }
-
-                return Ok(Transit::To(TunnelState::Connected));
-            }
-            p2p_messages::TunnelFrame_oneof_message::tunnelClose(_message) => {
-                let msg = p2p_messages::TunnelClose::new();
-
-                let (_next_packet_ids, current_packet_id) = self.outgoing_packet_id();
-
-                self.message_codec_out
-                    .write_socket(current_packet_id, &msg.into())
-                    .await?;
-
-                return Ok(Transit::To(TunnelState::Closing));
-            }
-            _ => {
-                return Err(P2pError::FrameError(format!(
-                    "Expected TunnelData or TunnelClose, got: {:#?}",
-                    frame
-                )))
-            }
-        }
-    }
-
-    pub(crate) async fn close_tunnel(&mut self) -> Result<TunnelTransit, TunnelError> {
-        Ok(Transit::Terminate)
-    }
-}
-
+// TODO private keys
 impl OnionTunnel {
-    pub fn unsubscribe(&mut self, _connection_id: u64) {}
-
-    pub async fn new(
-        packet_ids: Arc<Mutex<HashMap<PacketId, TunnelId>>>,
+    async fn new_tunnel(
+        listeners: HashSet<ConnectionId>,
+        tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+        event_tx: Sender<FsmEvent>,
         tunnel_id: TunnelId,
-        socket: Arc<UdpSocket>,
-        source: Option<SocketAddr>,
-        target: Option<SocketAddr>,
-        _host_key: Vec<u8>,
-        start_endpoint: bool,
-    ) -> Self {
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
-        let mut app = TunnelStateMachine {
-            event_rx,
-            message_codec_in: Box::new(message_codec::PlainProtobuf {
-                socket: socket.clone(),
-                target: source,
-            }),
-            message_codec_out: Box::new(message_codec::PlainProtobuf {
-                socket,
-                target: None,
-            }),
-            is_endpoint: false,
-            packet_ids,
-            incoming_next_packet_ids: LinkedList::new(),
-            outgoing_next_packet_ids: LinkedList::new(),
+    ) {
+        // clone the sender for init
+        let event_tx_clone = event_tx.clone();
+
+        let tunnel = OnionTunnel {
+            listeners: Mutex::new(listeners),
+            event_tx,
             tunnel_id,
+            tunnel_registry: tunnel_registry.clone(),
         };
-        let tunnel = OnionTunnel { event_tx };
 
+        // start fsm
+        if let Err(_e) = event_tx_clone.send(FsmEvent::Init).await {
+            // TODO handle error
+        }
+
+        // register tunnel at registry
+        let mut tunnels = tunnel_registry.lock().await;
+        let _ = tunnels.insert(tunnel_id, tunnel);
+    }
+
+    /*
+     * Create a tunnel for an initiating peer
+     */
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_initiator_tunnel(
+        listener: ConnectionId,
+        frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
+        socket: Arc<UdpSocket>,
+        target: SocketAddr,
+        target_host_key: Vec<u8>,
+        tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+        _hop_count: u8,
+        _rps_api_address: SocketAddr,
+        tunnel_result_tx: oneshot::Sender<TunnelResult>,
+    ) -> TunnelId {
+        // TODO select intermediate hops via rps module and hop count
+        let hops: Vec<IntermediateHop> = vec![];
+
+        // create a channel for handing events to the fsm
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+
+        // create new tunnel id
+        let tunnel_id = get_id();
+
+        // create initiator FSM
+        let mut fsm = InitiatorStateMachine::new(
+            hops,
+            tunnel_result_tx,
+            frame_ids,
+            socket,
+            target,
+            target_host_key,
+            tunnel_id,
+        );
+
+        // run the fsm
         tokio::spawn(async move {
-            // Start in Connecting state
-            let mut trans = Transit::To(TunnelState::Connecting);
-
-            loop {
-                trans = match trans {
-                    Transit::To(out) => {
-                        let res = match out {
-                            TunnelState::Connecting => app.tunnel_connect().await,
-                            TunnelState::Connected => app.receive_packet().await,
-                            TunnelState::Closing => app.close_tunnel().await,
-                        };
-                        match res {
-                            Ok(t) => t,
-                            Err(e) => {
-                                log::warn!("{:?}", e);
-                                return Err(e);
-                            }
-                        }
-                    }
-                    Transit::Terminate => return Ok(()),
-                }
-            }
+            fsm.handle_events(event_rx).await;
         });
 
-        if start_endpoint {
-            let mut hello_msg = p2p_messages::TunnelHello::new();
-            hello_msg.set_target(
-                target
-                    .expect("target must be set when start_endpoint is true")
-                    .to_string(),
-            );
-            let msg = message_codec::start_endpoint_into_raw(&hello_msg.into()).unwrap();
-            // Ignore error
-            tunnel.event_tx.send(IoEvent::ReceiveData(msg)).await.ok();
-        }
+        // create the tunnel
+        let mut listeners = HashSet::new();
+        listeners.insert(listener);
 
-        tunnel
+        Self::new_tunnel(listeners, tunnel_registry, event_tx, tunnel_id).await;
+        tunnel_id
     }
 
-    pub(crate) async fn forward_packet(&self, data: Vec<u8>) -> Result<(), TunnelError> {
-        let res = self.event_tx.send(IoEvent::ReceiveData(data)).await;
-        if res.is_err() {
-            Err(TunnelError::TunnelClosed)
+    /*
+     *  Create a tunnel for a non-initiating peer (intermediate hop and target peer)
+     */
+    pub async fn new_target_tunnel(
+        listeners: HashSet<ConnectionId>,
+        frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
+        socket: Arc<UdpSocket>,
+        source: SocketAddr,
+        tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+    ) -> TunnelId {
+        // create a channel for handing events to the fsm
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+
+        // create new tunnel id
+        let tunnel_id = get_id();
+
+        // create target FSM
+        let mut fsm = TargetStateMachine::new(frame_ids, socket, source, tunnel_id);
+
+        // run the fsm
+        tokio::spawn(async move {
+            fsm.handle_events(event_rx).await;
+        });
+
+        Self::new_tunnel(listeners, tunnel_registry, event_tx, tunnel_id).await;
+        tunnel_id
+    }
+
+    pub(crate) async fn send(&self, data: Vec<u8>) -> Result<(), P2pError> {
+        self.forward_event(FsmEvent::Send(data)).await
+    }
+
+    pub(crate) async fn forward_event(&self, e: FsmEvent) -> Result<(), P2pError> {
+        if self.event_tx.send(e).await.is_err() {
+            Err(P2pError::TunnelClosed)
         } else {
             Ok(())
+        }
+    }
+
+    async fn close_tunnel(&self) {
+        // send close event
+        let _ = self.forward_event(FsmEvent::Close).await;
+
+        // remove from tunnels list
+        log::debug!(
+            "Remove tunnel with id {:?} from tunnel registry",
+            self.tunnel_id
+        );
+        let mut tunnel_registry = self.tunnel_registry.lock().await;
+        let _ = tunnel_registry.remove(&self.tunnel_id);
+    }
+
+    pub async fn unsubscribe(&self, connection_id: u64) {
+        let mut connections = self.listeners.lock().await;
+        let _ = connections.remove(&connection_id);
+        if connections.is_empty() {
+            // no more listeners exist, terminate tunnel
+            log::debug!(
+                "No more listeners exist for tunnel with id {:?}. Close tunnel",
+                self.tunnel_id
+            );
+            self.close_tunnel().await;
         }
     }
 }

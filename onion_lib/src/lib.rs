@@ -1,5 +1,3 @@
-use tokio;
-
 pub mod api_protocol;
 mod config_parser;
 mod p2p_protocol;
@@ -53,7 +51,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
                 config.p2p_port
             );
             if let Err(e) = p2p_interface.listen(api_interface_ref).await {
-                log::error!("Cannot start P2P listener: {}", e);
+                log::error!("P2P listener has failed: {}", e);
             }
 
             // shutdown peer
@@ -67,7 +65,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
         tokio::spawn(async move {
             log::info!("Run API listener ({:?}) ...", api_address);
             if let Err(e) = api_interface.listen(api_address, p2p_interface_ref).await {
-                log::error!("Cannot start API connection listener: {}", e);
+                log::error!("API connection listener has failed: {}", e);
             }
 
             // shutdown peer
@@ -88,3 +86,4 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
 
 #[cfg(test)]
 mod tests {}
+// TODO test running a peer with valid config, invalid config, shutdown api and p2p protocol

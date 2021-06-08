@@ -8,12 +8,10 @@ use crate::p2p_protocol::P2pInterface;
 use api_connection::Connection;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
-
-pub(crate) const _RPS_QUERY: u16 = 540;
-pub(crate) const _RPS_PEER: u16 = 541;
+use tokio::sync::Mutex;
 
 pub(crate) const ONION_TUNNEL_BUILD: u16 = 560; // incoming for tunnel build in next round
 pub(crate) const ONION_TUNNEL_READY: u16 = 561; // outgoing response on build with new tunnel
@@ -41,6 +39,7 @@ async fn handle_incoming_event(
                     .build_tunnel(
                         (onion_build.ip, onion_build.onion_port).into(),
                         onion_build.host_key,
+                        connection_id,
                     )
                     .await
                 {
@@ -158,19 +157,13 @@ async fn handle_connection(
     log::debug!("Handle new API connection with id {:?}", connection_id);
 
     // register connection at registry
-    match connections.lock() {
-        Ok(mut connections) => {
-            log::debug!(
-                "Register connection {:?} in connections registry",
-                connection_id
-            );
-            connections.insert(connection.internal_id, connection);
-        }
-        Err(e) => {
-            log::error!("Cannot acquire connections lock: {}", e);
-            return;
-        }
-    }
+    let connections_clone = connections.clone();
+    let mut connections_guard = connections_clone.lock().await;
+    log::debug!(
+        "Register connection {:?} in connections registry",
+        connection_id
+    );
+    connections_guard.insert(connection.internal_id, connection);
 
     async fn unregister_connection(
         connections: Arc<Mutex<HashMap<u64, Connection>>>,
@@ -182,27 +175,15 @@ async fn handle_connection(
                 "Unsubscribe connection with id {:?} from all onion tunnels",
                 connection_id
             );
-            if let Err(e) = i_face.unsubscribe(connection_id).await {
-                log::error!(
-                    "Cannot unsubscribe connection with id {:?} from tunnels: {:?}",
-                    connection_id,
-                    e
-                )
-            }
+            i_face.unsubscribe(connection_id).await;
         }
-        match connections.lock() {
-            Ok(mut connections) => {
-                log::debug!(
-                    "Unregister connection with id {:?} from connections",
-                    connection_id
-                );
-                connections.remove(&connection_id);
-            }
-            Err(e) => {
-                log::error!("Cannot acquire connections lock: {}", e);
-            }
-        }
-    };
+        let mut connections_guard = connections.lock().await;
+        log::debug!(
+            "Unregister connection with id {:?} from connections",
+            connection_id
+        );
+        connections_guard.remove(&connection_id);
+    }
 
     // read async events on this connection
     loop {
@@ -241,6 +222,8 @@ pub(crate) struct ApiInterface {
 }
 
 impl ApiInterface {
+    //TODO add api for p2p protocol
+
     pub fn new() -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
