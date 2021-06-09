@@ -4,43 +4,61 @@ syntax = "proto3";
 message TunnelFrame {
 
   // an identifier for identifying the corresponding tunnel of this frame
-  uint64 frameId = 1;
+  fixed64 frameId = 1;
 
-  oneof message {
-    HandshakeData handshakeData = 2;
-    EncryptedHandshakeData encHandshakeData = 3;
-    ApplicationData appData = 4;
-  }
+  // HandshakeData | enc(ApplicationData)
+  bytes data = 2;
 }
 
 message HandshakeData {
+  oneof message {
+    PlainHandshakeData handshakeData = 1;
+    EncryptedHandshakeData encHandshakeData = 2;
+  }
+}
+
+message PlainHandshakeData {
   // establish secure channel
   oneof message {
     ClientHello clientHello = 1;
     ServerHello serverHello = 2;
   }
+
+  // unencrypted padding
+  bytes padding = 3;
 }
 
 message ClientHello {
-
+  // TODO fill
 }
 
 message ServerHello {
-
+  // TODO fill
 }
 
 message EncryptedHandshakeData {
-  bytes data = 1; // this can be parsed into DecryptedHandshakeData afterwards
+  bytes iv = 1;   // random, unpredictable iv used for encryption
+  bytes data = 2; // this can be parsed into DecryptedHandshakeData afterwards
 }
 
 message DecryptedHandshakeData {
+
+  // a secure random seed for generating iv's without iv transfer due to padding issues
+  bytes secure_seed = 1;
+
   // exchange routing information
+  // TODO fill
+  bytes padding = 2;
 }
 
 message ApplicationData {
-  bytes data = 1; // this can be parsed into DecryptedApplicationData
+
+  oneof message {
+    bytes data = 1;
+    Close close = 2;
+  }
+
+  bytes padding = 3;
 }
 
-message DecryptedApplicationData {
-
-}
+message Close {}

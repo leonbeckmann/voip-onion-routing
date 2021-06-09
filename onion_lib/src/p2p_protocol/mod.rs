@@ -3,7 +3,7 @@ mod onion_tunnel;
 
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;
-use crate::p2p_protocol::messages::p2p_messages::{TunnelFrame, TunnelFrame_oneof_message};
+use crate::p2p_protocol::messages::p2p_messages::TunnelFrame;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::{OnionTunnel, TunnelResult};
 use protobuf::Message;
@@ -60,25 +60,16 @@ impl P2pInterface {
                         // parse tunnel frame
                         match TunnelFrame::parse_from_bytes(&buf[0..PACKET_SIZE]) {
                             Ok(frame) => {
-                                // check if message is available, which should always be the case
-                                if frame.message.is_none() {
+                                // check if data available, which should always be the case
+                                if frame.data.is_empty() {
                                     log::warn!("Received empty frame");
                                     continue;
                                 }
-                                let event = match frame.message.unwrap() {
-                                    TunnelFrame_oneof_message::handshakeData(data) => {
-                                        FsmEvent::Handshake(data)
-                                    }
-                                    TunnelFrame_oneof_message::encHandshakeData(data) => {
-                                        FsmEvent::EncryptedHandshake(data)
-                                    }
-                                    TunnelFrame_oneof_message::appData(data) => {
-                                        FsmEvent::ApplicationData(data)
-                                    }
-                                };
 
-                                let tunnel_id = if frame.frameId == 0 {
-                                    // frame id zero is the initial handshake message (client_hello)
+                                let event = FsmEvent::IncomingFrame(frame.data);
+
+                                let tunnel_id = if frame.frameId == 1 {
+                                    // frame id one is the initial handshake message (client_hello)
 
                                     // get listener connections as hashset
                                     let iface = match self.api_interface.upgrade() {
@@ -109,14 +100,15 @@ impl P2pInterface {
                                     let frame_ids = self.frame_ids.lock().await;
                                     let tunnel_id = match frame_ids.get(&frame.frameId) {
                                         None => {
+                                            // no tunnel available for the given frame
                                             log::warn!(
                                                 "Received unexpected frame id, drop the frame"
                                             );
                                             continue;
                                         }
-                                        Some(tunnel_id) => tunnel_id,
+                                        Some(tunnel_id) => *tunnel_id,
                                     };
-                                    *tunnel_id
+                                    tunnel_id
                                 };
 
                                 let mut tunnels = self.onion_tunnels.lock().await;
@@ -262,25 +254,11 @@ pub enum P2pError {
     ApiInterfaceError,
     #[error("IO Error: {0}")]
     IOError(std::io::Error),
-    #[error("Onion tunnel event invalid")]
-    _InvalidTunnelEvent,
-    #[error("Error decoding protobuf message: {0}")]
-    ProtobufError(protobuf::error::ProtobufError),
-    #[error("Invalid protobuf frame content: {0}")]
-    _FrameError(String),
-    #[error("Event queue closed unexpectely")]
-    _EventQueueClosed,
 }
 
 impl From<std::io::Error> for P2pError {
     fn from(e: std::io::Error) -> Self {
         Self::IOError(e)
-    }
-}
-
-impl From<protobuf::error::ProtobufError> for P2pError {
-    fn from(e: protobuf::error::ProtobufError) -> Self {
-        Self::ProtobufError(e)
     }
 }
 

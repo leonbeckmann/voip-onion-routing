@@ -1,8 +1,8 @@
-mod application_fsm;
 mod handshake_fsm;
 
 use crate::p2p_protocol::messages::p2p_messages::{
-    ApplicationData, EncryptedHandshakeData, HandshakeData,
+    HandshakeData, HandshakeData_oneof_message,
+    PlainHandshakeData_oneof_message,
 };
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
@@ -10,6 +10,8 @@ use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
 use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, IntermediateHop, TunnelResult};
 use crate::p2p_protocol::{FrameId, TunnelId};
 use async_trait::async_trait;
+use bytes::Bytes;
+use protobuf::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,7 +78,31 @@ pub(super) trait FiniteStateMachine {
         data: HandshakeData,
     ) -> Result<State, ProtocolError> {
         log::debug!("Delegate handshake data to the handshake protocol");
-        match tx.event_tx.send(HandshakeEvent::HandshakeData(data)).await {
+
+        // split up into more specific event
+        if data.message.is_none() {
+            return Err(ProtocolError::EmptyMessage);
+        }
+        let event = match data.message.unwrap() {
+            HandshakeData_oneof_message::handshakeData(data) => {
+                if data.message.is_none() {
+                    return Err(ProtocolError::EmptyMessage);
+                }
+                match data.message.unwrap() {
+                    PlainHandshakeData_oneof_message::clientHello(data) => {
+                        HandshakeEvent::ClientHello(data)
+                    }
+                    PlainHandshakeData_oneof_message::serverHello(data) => {
+                        HandshakeEvent::ServerHello(data)
+                    }
+                }
+            }
+            HandshakeData_oneof_message::encHandshakeData(data) => {
+                HandshakeEvent::EncryptedHandshakeData(data)
+            }
+        };
+
+        match tx.event_tx.send(event).await {
             Ok(_) => {
                 // stay in connecting
                 Ok(State::Connecting(tx))
@@ -87,13 +113,7 @@ pub(super) trait FiniteStateMachine {
             }
         }
     }
-
-    async fn action_enc_handshake_data(
-        &mut self,
-        tx: SenderWrapper,
-        data: EncryptedHandshakeData,
-    ) -> Result<State, ProtocolError>;
-    async fn action_app_data(&mut self, data: ApplicationData) -> Result<State, ProtocolError>;
+    async fn action_app_data(&mut self, data: Bytes) -> Result<State, ProtocolError>;
     async fn action_close(&mut self) -> Result<State, ProtocolError>;
     async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError>;
     async fn action_handshake_result(
@@ -138,13 +158,15 @@ pub(super) trait FiniteStateMachine {
                         log::warn!("Received send event for non-connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::Handshake(data) => self.action_handshake_data(tx, data).await,
-                    FsmEvent::EncryptedHandshake(data) => {
-                        self.action_enc_handshake_data(tx, data).await
-                    }
-                    FsmEvent::ApplicationData(_) => {
-                        log::warn!("Received application data for not-connected FSM.");
-                        Err(ProtocolError::UnexpectedMessageType)
+                    FsmEvent::IncomingFrame(data) => {
+                        // we expect handshake data
+                        match HandshakeData::parse_from_bytes(data.as_ref()) {
+                            Ok(data) => self.action_handshake_data(tx, data).await,
+                            Err(_) => {
+                                log::warn!("Cannot parse incoming frame to handshake data");
+                                Err(ProtocolError::ProtobufError)
+                            }
+                        }
                     }
                     FsmEvent::HandshakeResult(res) => self.action_handshake_result(res).await,
                 },
@@ -156,15 +178,10 @@ pub(super) trait FiniteStateMachine {
                     }
                     FsmEvent::Close => self.action_close().await,
                     FsmEvent::Send(data) => self.action_send(data).await,
-                    FsmEvent::Handshake(_) => {
-                        log::warn!("Received handshake data for connected FSM.");
-                        Err(ProtocolError::UnexpectedMessageType)
+                    FsmEvent::IncomingFrame(data) => {
+                        // we expect encrypted application data
+                        self.action_app_data(data).await
                     }
-                    FsmEvent::EncryptedHandshake(_) => {
-                        log::warn!("Received encrypted handshake data for connected FSM.");
-                        Err(ProtocolError::UnexpectedMessageType)
-                    }
-                    FsmEvent::ApplicationData(data) => self.action_app_data(data).await,
                     FsmEvent::HandshakeResult(_) => {
                         log::warn!("Received handshake result for connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
@@ -202,7 +219,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'start'
         log::debug!("Initialize the handshake protocol as an initiator");
-        let handshake_fsm = HandshakeStateMachine::<Client>::new();
+        let mut handshake_fsm = HandshakeStateMachine::<Client>::new();
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -220,18 +237,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
         }
     }
 
-    async fn action_enc_handshake_data(
-        &mut self,
-        _tx: SenderWrapper,
-        _data: EncryptedHandshakeData,
-    ) -> Result<State, ProtocolError> {
-        // TODO decrypt message
-        // TODO parse protobuf message
-        // TODO delegate to handshake fsm
-        unimplemented!()
-    }
-
-    async fn action_app_data(&mut self, _data: ApplicationData) -> Result<State, ProtocolError> {
+    async fn action_app_data(&mut self, _data: Bytes) -> Result<State, ProtocolError> {
         // TODO implement
         unimplemented!()
     }
@@ -271,7 +277,7 @@ impl FiniteStateMachine for TargetStateMachine {
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'WaitForClientHello'
         log::debug!("Initialize the handshake protocol as a non-initiator");
-        let handshake_fsm = HandshakeStateMachine::<Server>::new();
+        let mut handshake_fsm = HandshakeStateMachine::<Server>::new();
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -283,18 +289,7 @@ impl FiniteStateMachine for TargetStateMachine {
         Ok(State::Connecting(SenderWrapper { event_tx }))
     }
 
-    async fn action_enc_handshake_data(
-        &mut self,
-        _tx: SenderWrapper,
-        _data: EncryptedHandshakeData,
-    ) -> Result<State, ProtocolError> {
-        // TODO decrypt message
-        // TODO parse protobuf message
-        // TODO delegate to handshake fsm
-        unimplemented!()
-    }
-
-    async fn action_app_data(&mut self, _data: ApplicationData) -> Result<State, ProtocolError> {
+    async fn action_app_data(&mut self, _data: Bytes) -> Result<State, ProtocolError> {
         // TODO implement
         unimplemented!()
     }
@@ -334,10 +329,14 @@ impl FiniteStateMachine for TargetStateMachine {
 pub enum ProtocolError {
     #[error("Received unexpected message type")]
     UnexpectedMessageType,
+    #[error("Received empty message")]
+    EmptyMessage,
     #[error("Cannot pass message to the handshake protocol")]
     HandshakeSendFailure,
     #[error("Handshake timeout occurred")]
     HandshakeTimeout,
+    #[error("Error decoding protobuf message. Unexpected message format")]
+    ProtobufError,
 }
 
 #[derive(Debug)]
@@ -364,9 +363,7 @@ pub enum FsmEvent {
     Init,                                       // Start the FSM
     Close,                                      // Close the Tunnel
     Send(Vec<u8>),                              // Send Data via the Tunnel
-    Handshake(HandshakeData),                   // Received handshake data
-    EncryptedHandshake(EncryptedHandshakeData), // Received encrypted handshake data
-    ApplicationData(ApplicationData),           // Received encrypted application data
+    IncomingFrame(Bytes),                       // Received data frame
     HandshakeResult(Result<(), ProtocolError>), // HandshakeResult from handshake fsm
 }
 
@@ -472,7 +469,6 @@ impl TunnelStateMachine {
                 self.incoming_packet_id(message.get_next_packet_ids()).await;
 
                 if self.message_codec_out.is_endpoint() {
-                    // TODO: send data to API
                     log::debug!("Received {} bytes at final endpoint", message.data.len());
                 } else {
                     let mut msg = p2p_messages::TunnelData::new();
