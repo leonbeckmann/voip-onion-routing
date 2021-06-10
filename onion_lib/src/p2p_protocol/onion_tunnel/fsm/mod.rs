@@ -1,14 +1,17 @@
 mod handshake_fsm;
 
+use crate::p2p_protocol::messages::message_codec::DataType::AppData;
+use crate::p2p_protocol::messages::message_codec::{
+    InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
+};
 use crate::p2p_protocol::messages::p2p_messages::{
-    HandshakeData, HandshakeData_oneof_message,
-    PlainHandshakeData_oneof_message,
+    HandshakeData, HandshakeData_oneof_message, PlainHandshakeData_oneof_message,
 };
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
 use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, IntermediateHop, TunnelResult};
-use crate::p2p_protocol::{FrameId, TunnelId, Direction};
+use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
 use protobuf::Message;
@@ -23,6 +26,8 @@ use tokio::sync::{oneshot, Mutex};
 pub(super) struct InitiatorStateMachine {
     tunnel_result_tx: Option<oneshot::Sender<TunnelResult>>, // signal the listener completion
     event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
+    endpoint_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
+    listener_tx: Sender<IncomingEventMessage>,
 }
 
 // TODO fill fsm
@@ -31,17 +36,21 @@ impl InitiatorStateMachine {
     pub fn new(
         _hops: Vec<IntermediateHop>,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
-        _frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
-        _socket: Arc<UdpSocket>,
-        _target: SocketAddr,
+        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        socket: Arc<UdpSocket>,
+        target: SocketAddr,
         _target_host_key: Vec<u8>,
-        _tunnel_id: TunnelId,
-        _listener_tx: Sender<IncomingEventMessage>,
+        tunnel_id: TunnelId,
+        listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
     ) -> Self {
         InitiatorStateMachine {
             tunnel_result_tx: Some(tunnel_result_tx),
             event_tx,
+            endpoint_codec: Arc::new(Mutex::new(Box::new(InitiatorEndpoint::new(
+                socket, target, frame_ids, tunnel_id,
+            )))),
+            listener_tx,
         }
     }
 }
@@ -49,21 +58,24 @@ impl InitiatorStateMachine {
 pub(super) struct TargetStateMachine {
     listener_tx: Sender<IncomingEventMessage>,
     event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
+    codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
 }
 
-// TODO fill fsm
 impl TargetStateMachine {
     pub fn new(
-        _frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
-        _socket: Arc<UdpSocket>,
-        _source: SocketAddr,
-        _tunnel_id: TunnelId,
+        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        socket: Arc<UdpSocket>,
+        source: SocketAddr,
+        tunnel_id: TunnelId,
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
     ) -> Self {
         TargetStateMachine {
             listener_tx,
             event_tx,
+            codec: Arc::new(Mutex::new(Box::new(TargetEndpoint::new(
+                socket, source, frame_ids, tunnel_id,
+            )))),
         }
     }
 }
@@ -113,16 +125,61 @@ pub(super) trait FiniteStateMachine {
             }
         }
     }
-    async fn action_app_data(&mut self, _data: Bytes, _direction: Direction) -> Result<State, ProtocolError>;
-    async fn action_close(&mut self) -> Result<State, ProtocolError>;
+
+    async fn action_app_data(
+        &mut self,
+        data: Bytes,
+        direction: Direction,
+    ) -> Result<State, ProtocolError> {
+        // send data to the target via the tunnel
+        match self
+            .get_codec()
+            .lock()
+            .await
+            .process_data(direction, data)
+            .await?
+        {
+            ProcessedData::TransferredToNextHop => {
+                log::debug!("Data have been transferred to next hop");
+            }
+            ProcessedData::IncomingData(data) => {
+                log::debug!("Send incoming data to upper layer");
+                // we can ignore an error here since this will only fail when the tunnel has been closed
+                let _ = self
+                    .get_listener()
+                    .send(IncomingEventMessage::IncomingData(data))
+                    .await;
+            }
+        };
+
+        // stay in state connected
+        Ok(State::Connected)
+    }
+
+    async fn action_close(&mut self) -> Result<State, ProtocolError> {
+        // all connection listeners have left
+        log::debug!("Received close event, notify tunnel peers and shutdown tunnel");
+        self.get_codec().lock().await.close().await;
+        Ok(State::Terminated)
+    }
+
     async fn action_recv_close(&mut self) -> Result<State, ProtocolError>;
-    async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError>;
+
+    async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError> {
+        // send data to the target via the tunnel
+        self.get_codec().lock().await.write(AppData(data)).await?;
+        Ok(State::Connected)
+    }
+
     async fn action_handshake_result(
         &mut self,
         res: Result<(), ProtocolError>,
     ) -> Result<State, ProtocolError>;
 
     const INIT_STATE: State = State::Closed;
+
+    fn get_listener(&mut self) -> Sender<IncomingEventMessage>;
+    fn get_codec(&mut self) -> Arc<Mutex<Box<dyn P2pCodec + Send>>>;
 
     #[allow(unused_assignments)]
     async fn handle_events(&mut self, mut event_rx: Receiver<FsmEvent>) {
@@ -222,7 +279,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'start'
         log::debug!("Initialize the handshake protocol as an initiator");
-        let mut handshake_fsm = HandshakeStateMachine::<Client>::new();
+        let mut handshake_fsm = HandshakeStateMachine::<Client>::new(self.endpoint_codec.clone());
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -240,24 +297,11 @@ impl FiniteStateMachine for InitiatorStateMachine {
         }
     }
 
-    async fn action_app_data(&mut self, _data: Bytes, _direction: Direction) -> Result<State, ProtocolError> {
-        // TODO implement
-        unimplemented!()
-    }
-
-    async fn action_close(&mut self) -> Result<State, ProtocolError> {
-        // TODO implement
-        Ok(State::Terminated)
-    }
-
     async fn action_recv_close(&mut self) -> Result<State, ProtocolError> {
-        // TODO implement
+        // target sends closure, notify hops
+        log::debug!("Received closure from target peer, notify hops and close tunnel");
+        self.endpoint_codec.lock().await.close().await;
         Ok(State::Terminated)
-    }
-
-    async fn action_send(&mut self, _data: Vec<u8>) -> Result<State, ProtocolError> {
-        // TODO implement
-        unimplemented!()
     }
 
     async fn action_handshake_result(
@@ -278,6 +322,14 @@ impl FiniteStateMachine for InitiatorStateMachine {
             }
         }
     }
+
+    fn get_listener(&mut self) -> Sender<IncomingEventMessage> {
+        self.listener_tx.clone()
+    }
+
+    fn get_codec(&mut self) -> Arc<Mutex<Box<dyn P2pCodec + Send>>> {
+        self.endpoint_codec.clone()
+    }
 }
 
 #[async_trait]
@@ -285,7 +337,7 @@ impl FiniteStateMachine for TargetStateMachine {
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'WaitForClientHello'
         log::debug!("Initialize the handshake protocol as a non-initiator");
-        let mut handshake_fsm = HandshakeStateMachine::<Server>::new();
+        let mut handshake_fsm = HandshakeStateMachine::<Server>::new(self.codec.clone());
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -297,24 +349,10 @@ impl FiniteStateMachine for TargetStateMachine {
         Ok(State::Connecting(SenderWrapper { event_tx }))
     }
 
-    async fn action_app_data(&mut self, _data: Bytes, _direction: Direction) -> Result<State, ProtocolError> {
-        // TODO implement
-        unimplemented!()
-    }
-
-    async fn action_close(&mut self) -> Result<State, ProtocolError> {
-        // TODO implement
-        Ok(State::Terminated)
-    }
-
     async fn action_recv_close(&mut self) -> Result<State, ProtocolError> {
-        // TODO implement
+        // receives close from initiator peer
+        log::debug!("Received closure from initiator peer, close tunnel");
         Ok(State::Terminated)
-    }
-
-    async fn action_send(&mut self, _data: Vec<u8>) -> Result<State, ProtocolError> {
-        // TODO implement
-        unimplemented!()
     }
 
     async fn action_handshake_result(
@@ -336,6 +374,14 @@ impl FiniteStateMachine for TargetStateMachine {
             }
         }
     }
+
+    fn get_listener(&mut self) -> Sender<IncomingEventMessage> {
+        self.listener_tx.clone()
+    }
+
+    fn get_codec(&mut self) -> Arc<Mutex<Box<dyn P2pCodec + Send>>> {
+        self.codec.clone()
+    }
 }
 
 #[derive(Error, Debug, Clone)]
@@ -350,6 +396,10 @@ pub enum ProtocolError {
     HandshakeTimeout,
     #[error("Error decoding protobuf message. Unexpected message format")]
     ProtobufError,
+    #[error("Cannot parse routing information of next hop into SockAddr")]
+    InvalidRoutingInformation,
+    #[error("Cannot update codec from TargetEndpoint to IntermediateHop")]
+    CodecUpdateError,
 }
 
 #[derive(Debug)]
@@ -373,8 +423,8 @@ pub(super) enum State {
 }
 
 pub enum FsmEvent {
-    Init,                                       // Start the FSM
-    Close,                                      // Close the Tunnel
+    Init,  // Start the FSM
+    Close, // Close the Tunnel
     RecvClose,
     Send(Vec<u8>),                              // Send Data via the Tunnel
     IncomingFrame((Bytes, Direction)),          // Received data frame

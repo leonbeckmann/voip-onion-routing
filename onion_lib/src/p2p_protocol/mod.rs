@@ -21,9 +21,10 @@ pub type TunnelId = u32;
 type FrameId = u64;
 pub type ConnectionId = u64;
 
+#[derive(Debug)]
 pub enum Direction {
     Forward,
-    Backward
+    Backward,
 }
 
 impl ToOwned for Direction {
@@ -76,14 +77,13 @@ impl P2pInterface {
                         // parse tunnel frame
                         match TunnelFrame::parse_from_bytes(&buf[0..PACKET_SIZE]) {
                             Ok(frame) => {
-
                                 // check if data available, which should always be the case
                                 let frame_message = match frame.message {
                                     None => {
                                         log::warn!("Received empty frame");
                                         continue;
                                     }
-                                    Some(message) => message
+                                    Some(message) => message,
                                 };
 
                                 let (tunnel_id, direction) = if frame.frameId == 1 {
@@ -119,9 +119,7 @@ impl P2pInterface {
                                     TunnelFrame_oneof_message::data(data) => {
                                         FsmEvent::IncomingFrame((data, direction))
                                     }
-                                    TunnelFrame_oneof_message::close(_) => {
-                                        FsmEvent::RecvClose
-                                    }
+                                    TunnelFrame_oneof_message::close(_) => FsmEvent::RecvClose,
                                 };
 
                                 let mut tunnels = self.onion_tunnels.lock().await;

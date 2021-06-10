@@ -5,9 +5,12 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc::{Receiver, Sender}, oneshot, Mutex};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    oneshot, Mutex,
+};
 
-use crate::p2p_protocol::{ConnectionId, P2pError, Direction};
+use crate::p2p_protocol::{ConnectionId, Direction, P2pError};
 
 use super::{FrameId, TunnelId};
 use crate::api_protocol::ApiInterface;
@@ -107,7 +110,8 @@ impl OnionTunnel {
 
                                     // store listeners in tunnel reference
                                     let mut listeners_guard = listeners.lock().await;
-                                    let mut listeners_available_guard = listeners_available.lock().await;
+                                    let mut listeners_available_guard =
+                                        listeners_available.lock().await;
                                     *listeners_guard = raw_listeners;
                                     *listeners_available_guard = true;
                                     drop(listeners_guard);
@@ -189,8 +193,11 @@ impl OnionTunnel {
         });
 
         // create the tunnel
-        let listeners =
-            Arc::new(Mutex::new(vec![listener].into_iter().collect::<HashSet<ConnectionId>>()));
+        let listeners = Arc::new(Mutex::new(
+            vec![listener]
+                .into_iter()
+                .collect::<HashSet<ConnectionId>>(),
+        ));
 
         Self::new_tunnel(
             listeners,

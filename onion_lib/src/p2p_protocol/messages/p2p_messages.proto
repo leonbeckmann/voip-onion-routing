@@ -50,12 +50,17 @@ message DecryptedHandshakeData {
   bytes secure_seed = 1;
 
   // exchange routing information
-  // TODO fill
-  bytes padding = 2;
+  RoutingInformation routing = 2;
+
+  bytes padding = 3;
+}
+
+message RoutingInformation {
+  bytes next_hop_addr = 2;
+  uint32 next_hop_port = 3;
 }
 
 message ApplicationData {
-
 
   bytes data = 1;
 

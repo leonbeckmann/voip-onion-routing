@@ -1,44 +1,203 @@
-use std::{mem::size_of, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
-use crate::p2p_protocol::{messages::p2p_messages};
-use async_trait::async_trait;
-use protobuf::Message;
-use tokio::net::UdpSocket;
+use crate::p2p_protocol::messages::p2p_messages::{
+    ApplicationData, DecryptedHandshakeData, PlainHandshakeData, TunnelFrame,
+};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
+use crate::p2p_protocol::{Direction, FrameId, TunnelId};
+use async_trait::async_trait;
 use bytes::Bytes;
+use std::any::Any;
+use std::collections::HashMap;
+use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 
-pub(crate) enum ProcessedData {
-    Close,
+pub enum ProcessedData {
     TransferredToNextHop,
     IncomingData(Vec<u8>),
 }
 
-// TODO how to receive closures for intermediate hops
+pub enum DataType {
+    AppData(Vec<u8>),
+    PlainHandshakeData(PlainHandshakeData),
+    DecHandshakeData(DecryptedHandshakeData),
+}
+
+// TODO crypto context
+
+/**
+ *  P2pCodec responsible for encryption, message padding and writing messages to the socket
+ */
 
 #[async_trait]
-pub(crate) trait P2pCodec: std::fmt::Debug {
-
+pub trait P2pCodec {
     /*
      *  Send data to the previous peer (for endpoints, previous == next)
      *  Used for sending handshake data to or back from hops or sending application data from endpoints
      */
-    async fn write<Data>(&mut self, data: Data) -> Result<(), ProtocolError>;
+    async fn write(&mut self, data: DataType) -> Result<(), ProtocolError>;
 
     /*
      *  Process incoming encrypted data.
      *
      *  If self is an intermediate hop, the data are processed and transferred to the next hop.
-     *
+     *  If self is an endpoint, the data are returned ass IncomingData
      */
-    async fn process_data(&mut self, d: Direction, data: Bytes) -> Result<ProcessedData, ProtocolError>;
+    async fn process_data(
+        &mut self,
+        d: Direction,
+        data: Bytes,
+    ) -> Result<ProcessedData, ProtocolError>;
+
+    /*
+     *  Send close messages to
+     */
+    async fn close(&mut self);
+
+    /*
+     *  Get the implementation of the trait for updating codecs
+     */
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PlainProtobuf {
-    pub(crate) socket: Arc<UdpSocket>,
-    pub(crate) target: Option<SocketAddr>,
+pub(crate) struct InitiatorEndpoint {
+    socket: Arc<UdpSocket>,
+    next_hop: SocketAddr,
+    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    tunnel_id: TunnelId,
 }
 
+impl InitiatorEndpoint {
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        next_hop: SocketAddr,
+        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        tunnel_id: TunnelId,
+    ) -> Self {
+        Self {
+            socket,
+            next_hop,
+            frame_ids,
+            tunnel_id,
+        }
+    }
+}
+
+pub(crate) struct TargetEndpoint {
+    socket: Arc<UdpSocket>,
+    prev_hop: SocketAddr,
+    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    tunnel_id: TunnelId,
+}
+
+impl TargetEndpoint {
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        prev_hop: SocketAddr,
+        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        tunnel_id: TunnelId,
+    ) -> Self {
+        Self {
+            socket,
+            prev_hop,
+            frame_ids,
+            tunnel_id,
+        }
+    }
+}
+
+pub(crate) struct IntermediateHop {
+    socket: Arc<UdpSocket>,
+    next_hop: SocketAddr,
+    prev_hop: SocketAddr,
+    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    tunnel_id: TunnelId,
+}
+
+// make target to intermediate
+impl IntermediateHop {
+    pub fn from(target: &TargetEndpoint, next_hop: SocketAddr) -> Self {
+        Self {
+            socket: target.socket.clone(),
+            next_hop,
+            prev_hop: target.prev_hop,
+            frame_ids: target.frame_ids.clone(),
+            tunnel_id: target.tunnel_id,
+        }
+    }
+}
+
+#[async_trait]
+impl P2pCodec for InitiatorEndpoint {
+    async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
+        unimplemented!()
+    }
+
+    async fn process_data(
+        &mut self,
+        d: Direction,
+        data: Bytes,
+    ) -> Result<ProcessedData, ProtocolError> {
+        unimplemented!()
+    }
+
+    async fn close(&mut self) {
+        unimplemented!()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[async_trait]
+impl P2pCodec for TargetEndpoint {
+    async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
+        unimplemented!()
+    }
+
+    async fn process_data(
+        &mut self,
+        d: Direction,
+        data: Bytes,
+    ) -> Result<ProcessedData, ProtocolError> {
+        unimplemented!()
+    }
+
+    async fn close(&mut self) {
+        unimplemented!()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[async_trait]
+impl P2pCodec for IntermediateHop {
+    async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
+        unimplemented!()
+    }
+
+    async fn process_data(
+        &mut self,
+        d: Direction,
+        data: Bytes,
+    ) -> Result<ProcessedData, ProtocolError> {
+        unimplemented!()
+    }
+
+    async fn close(&mut self) {
+        unimplemented!()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/*
 #[async_trait]
 impl P2pCodec for PlainProtobuf {
     async fn write_socket(
@@ -89,18 +248,5 @@ impl P2pCodec for PlainProtobuf {
         Ok(p2p_messages::TunnelFrame::parse_from_bytes(buf_msg)?)
     }
 
-    fn set_target(&mut self, target: Option<SocketAddr>) {
-        self.target = target;
-    }
-
-    fn is_endpoint(&self) -> bool {
-        self.target.is_none()
-    }
 }
-
-pub(crate) fn start_endpoint_into_raw(
-    msg: &p2p_messages::TunnelFrame,
-) -> Result<Vec<u8>, P2pError> {
-    let buf = msg.write_to_bytes().unwrap();
-    Ok(buf)
-}
+*/

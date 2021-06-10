@@ -1,10 +1,18 @@
+use crate::p2p_protocol::messages::message_codec::{
+    DataType, IntermediateHop, P2pCodec, TargetEndpoint,
+};
 use crate::p2p_protocol::messages::p2p_messages::{
-    ClientHello, EncryptedHandshakeData, ServerHello,
+    ClientHello, DecryptedHandshakeData, EncryptedHandshakeData, PlainHandshakeData, ServerHello,
 };
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
+use protobuf::Message;
+use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 pub(super) struct Client;
@@ -22,10 +30,7 @@ impl PeerType for Server {
     const INIT_STATE: HandshakeState = HandshakeState::WaitForClientHello;
 }
 
-// TODO we need a codec that uses the crypto context, pad the message and send the data
-// TODO store the routing information within the codec
 // TODO we need a crypto context that holds the key, manages the iv and encrypts / decrypts data
-// TODO pass the crypto context and the codec to the main FSM on handshake success
 
 #[derive(Debug, PartialEq)]
 pub enum HandshakeState {
@@ -45,43 +50,133 @@ pub enum HandshakeEvent {
 
 pub struct HandshakeStateMachine<PT> {
     _phantom: PhantomData<PT>,
+    message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
-    pub fn new() -> Self {
+    pub fn new(message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>) -> Self {
         Self {
             _phantom: Default::default(),
+            message_codec,
         }
     }
 
     pub async fn action_init(&mut self) -> Result<HandshakeState, ProtocolError> {
-        // TODO create client hello and give it to message codec
-        Ok(HandshakeState::WaitForServerHello)
+        // create client hello and give it to message codec
+        // TODO fill client hello
+        let client_hello = ClientHello::new();
+        let mut plain_data = PlainHandshakeData::new();
+        plain_data.set_clientHello(client_hello);
+
+        let mut codec = self.message_codec.lock().await;
+        if let Err(e) = codec.write(DataType::PlainHandshakeData(plain_data)).await {
+            Err(e)
+        } else {
+            Ok(HandshakeState::WaitForServerHello)
+        }
     }
 
     pub async fn action_recv_client_hello(
         &mut self,
         _data: ClientHello,
     ) -> Result<HandshakeState, ProtocolError> {
-        // TODO create server hello and give it to message_codec
-        Ok(HandshakeState::WaitForRoutingInformation)
+        // create server hello and give it to message_codec
+        // TODO fill server hello using client hello
+        let server_hello = ServerHello::new();
+        let mut plain_data = PlainHandshakeData::new();
+        plain_data.set_serverHello(server_hello);
+
+        let mut codec = self.message_codec.lock().await;
+        if let Err(e) = codec.write(DataType::PlainHandshakeData(plain_data)).await {
+            Err(e)
+        } else {
+            Ok(HandshakeState::WaitForRoutingInformation)
+        }
     }
 
     pub async fn action_recv_server_hello(
         &mut self,
         _data: ServerHello,
     ) -> Result<(), ProtocolError> {
-        // TODO create encrypted handshake message and give it to message_codec
-        Ok(())
+        // create decrypted handshake message and give it to message_codec
+        // TODO handle received ServerHello
+        // TODO get next hop from self and set routing in dec handshake data
+        let dec_data = DecryptedHandshakeData::new();
+
+        let mut codec = self.message_codec.lock().await;
+        if let Err(e) = codec.write(DataType::DecHandshakeData(dec_data)).await {
+            Err(e)
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn action_recv_routing(
         &mut self,
-        _data: EncryptedHandshakeData,
+        data: EncryptedHandshakeData,
     ) -> Result<(), ProtocolError> {
         // TODO decrypt via crypto context
-        // TODO check for routing information
-        Ok(())
+        let decrypted_bytes = data.data;
+
+        // check for decrypted handshake data
+        let handshake_data =
+            match DecryptedHandshakeData::parse_from_bytes(decrypted_bytes.as_ref()) {
+                Ok(decrypted_frame) => decrypted_frame,
+                Err(_) => {
+                    log::warn!("Cannot parse incoming frame to decrypted handshake data");
+                    return Err(ProtocolError::ProtobufError);
+                }
+            };
+
+        // TODO store secure iv seed in crypto context
+        let _secure_seed = handshake_data.secure_seed;
+
+        // check for routing
+        if handshake_data.routing.is_none() {
+            log::debug!("No routing information provided, peer is the target endpoint");
+            Ok(())
+        } else {
+            // parse socket addr
+            let routing = handshake_data.routing.unwrap(); // safe
+            let addr = match u16::try_from(routing.next_hop_port) {
+                Ok(port) => match routing.next_hop_addr.len() {
+                    4 => {
+                        // ipv4
+                        let slice: [u8; 4] =
+                            routing.next_hop_addr.as_ref()[0..4].try_into().unwrap();
+                        let ipv4 = IpAddr::from(slice);
+                        SocketAddr::new(ipv4, port)
+                    }
+                    16 => {
+                        // ip6
+                        let slice: [u8; 16] =
+                            routing.next_hop_addr.as_ref()[0..16].try_into().unwrap();
+                        let ipv6 = IpAddr::from(slice);
+                        SocketAddr::new(ipv6, port)
+                    }
+                    _ => {
+                        return Err(ProtocolError::InvalidRoutingInformation);
+                    }
+                },
+                Err(_) => {
+                    return Err(ProtocolError::InvalidRoutingInformation);
+                }
+            };
+
+            // construct intermediate hop from target and next_hop addr
+            let mut codec_guard = self.message_codec.lock().await;
+            let target_endpoint = match (*codec_guard).as_any().downcast_ref::<TargetEndpoint>() {
+                None => return Err(ProtocolError::CodecUpdateError),
+                Some(endpoint) => endpoint,
+            };
+
+            let new_codec = Box::new(IntermediateHop::from(target_endpoint, addr));
+
+            // update codec
+            *codec_guard = new_codec;
+
+            Ok(())
+        }
     }
 
     pub async fn run(
@@ -127,9 +222,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 },
 
                 HandshakeState::WaitForClientHello => match event {
-                    HandshakeEvent::ClientHello(data) => {
-                        self.action_recv_client_hello(data).await
-                    }
+                    HandshakeEvent::ClientHello(data) => self.action_recv_client_hello(data).await,
                     _ => {
                         log::warn!(
                             "Received unexpected event '{:?}' in WaitForClientHello",
@@ -143,7 +236,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                     HandshakeEvent::ServerHello(data) => {
                         match self.action_recv_server_hello(data).await {
                             Ok(_) => {
-                                // TODO return success
+                                let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(()))).await;
                                 return;
                             }
                             Err(e) => Err(e),
@@ -162,7 +255,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                     HandshakeEvent::EncryptedHandshakeData(data) => {
                         match self.action_recv_routing(data).await {
                             Ok(_) => {
-                                // TODO return success
+                                let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(()))).await;
                                 return;
                             }
                             Err(e) => Err(e),

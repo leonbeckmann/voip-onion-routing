@@ -1,5 +1,5 @@
+pub(crate) mod message_codec;
 pub(crate) mod p2p_messages;
-//pub(crate) mod message_codec;
 
 // Alice -> H1 -> Bob (data)
 // 1. Alice creates m = DecryptedData   // length x
@@ -39,13 +39,17 @@ pub(crate) mod p2p_messages;
 #[cfg(test)]
 mod tests {
     use crate::p2p_protocol::messages::p2p_messages::TunnelFrame;
+    use bytes::Bytes;
     use protobuf::Message;
+    use std::convert::TryInto;
 
     #[test]
     fn unit_test() {
         let mut frame = TunnelFrame::new();
         frame.set_frameId(1);
+        frame.set_data(Bytes::from("hallo"));
         println!("{:?}", frame.compute_size());
-        println!("{:?}", frame.write_to_bytes().unwrap());
+        let a: [u8; 2] = frame.get_data()[0..2].try_into().unwrap();
+        println!("{:?}", a);
     }
 }
