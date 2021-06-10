@@ -1,25 +1,36 @@
 use std::{mem::size_of, net::SocketAddr, sync::Arc};
 
-use crate::p2p_protocol::{messages::p2p_messages, P2pError, PacketId};
+use crate::p2p_protocol::{messages::p2p_messages};
 use async_trait::async_trait;
 use protobuf::Message;
 use tokio::net::UdpSocket;
+use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
+use bytes::Bytes;
 
-type PacketSize = u32;
+pub(crate) enum ProcessedData {
+    Close,
+    TransferredToNextHop,
+    IncomingData(Vec<u8>),
+}
+
+// TODO how to receive closures for intermediate hops
 
 #[async_trait]
 pub(crate) trait P2pCodec: std::fmt::Debug {
-    async fn write_socket(
-        &mut self,
-        packet_id: PacketId,
-        msg: &p2p_messages::TunnelFrame,
-    ) -> Result<(), P2pError>;
 
-    async fn from_raw(&mut self, raw: &[u8]) -> Result<p2p_messages::TunnelFrame, P2pError>;
+    /*
+     *  Send data to the previous peer (for endpoints, previous == next)
+     *  Used for sending handshake data to or back from hops or sending application data from endpoints
+     */
+    async fn write<Data>(&mut self, data: Data) -> Result<(), ProtocolError>;
 
-    fn set_target(&mut self, source_target: Option<SocketAddr>);
-
-    fn is_endpoint(&self) -> bool;
+    /*
+     *  Process incoming encrypted data.
+     *
+     *  If self is an intermediate hop, the data are processed and transferred to the next hop.
+     *
+     */
+    async fn process_data(&mut self, d: Direction, data: Bytes) -> Result<ProcessedData, ProtocolError>;
 }
 
 #[derive(Debug, Clone)]

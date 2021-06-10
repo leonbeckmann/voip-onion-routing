@@ -22,9 +22,9 @@ impl PeerType for Server {
     const INIT_STATE: HandshakeState = HandshakeState::WaitForClientHello;
 }
 
-// TODO we need a crypto context that holds the key, manages the iv and encrypts / decrypts data
 // TODO we need a codec that uses the crypto context, pad the message and send the data
 // TODO store the routing information within the codec
+// TODO we need a crypto context that holds the key, manages the iv and encrypts / decrypts data
 // TODO pass the crypto context and the codec to the main FSM on handshake success
 
 #[derive(Debug, PartialEq)]

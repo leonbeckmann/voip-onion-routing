@@ -6,8 +6,11 @@ message TunnelFrame {
   // an identifier for identifying the corresponding tunnel of this frame
   fixed64 frameId = 1;
 
-  // HandshakeData | enc(ApplicationData)
-  bytes data = 2;
+  // HandshakeData | enc(ApplicationData) | enc(HandshakeData)
+  oneof message {
+    bytes data = 2;
+    Close close = 3;
+  }
 }
 
 message HandshakeData {
@@ -53,12 +56,12 @@ message DecryptedHandshakeData {
 
 message ApplicationData {
 
-  oneof message {
-    bytes data = 1;
-    Close close = 2;
-  }
 
-  bytes padding = 3;
+  bytes data = 1;
+
+  bytes padding = 2;
 }
 
-message Close {}
+message Close {
+  bytes padding = 1;
+}

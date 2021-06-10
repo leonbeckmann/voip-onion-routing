@@ -1,4 +1,5 @@
 pub(crate) mod p2p_messages;
+//pub(crate) mod message_codec;
 
 // Alice -> H1 -> Bob (data)
 // 1. Alice creates m = DecryptedData   // length x

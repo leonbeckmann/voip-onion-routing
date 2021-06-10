@@ -3,7 +3,7 @@ mod onion_tunnel;
 
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;
-use crate::p2p_protocol::messages::p2p_messages::TunnelFrame;
+use crate::p2p_protocol::messages::p2p_messages::{TunnelFrame, TunnelFrame_oneof_message};
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::{OnionTunnel, TunnelResult};
 use protobuf::Message;
@@ -21,11 +21,27 @@ pub type TunnelId = u32;
 type FrameId = u64;
 pub type ConnectionId = u64;
 
+pub enum Direction {
+    Forward,
+    Backward
+}
+
+impl ToOwned for Direction {
+    type Owned = Direction;
+
+    fn to_owned(&self) -> Self::Owned {
+        match self {
+            Direction::Forward => Direction::Forward,
+            Direction::Backward => Direction::Backward,
+        }
+    }
+}
+
 pub(crate) struct P2pInterface {
     // TODO is there a way for a more well-distributed key?
     // TODO maybe rw lock for better performance?
     onion_tunnels: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
-    frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
+    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
     socket: Arc<UdpSocket>,
     config: OnionConfiguration,
     api_interface: Weak<ApiInterface>,
@@ -60,32 +76,21 @@ impl P2pInterface {
                         // parse tunnel frame
                         match TunnelFrame::parse_from_bytes(&buf[0..PACKET_SIZE]) {
                             Ok(frame) => {
+
                                 // check if data available, which should always be the case
-                                if frame.data.is_empty() {
-                                    log::warn!("Received empty frame");
-                                    continue;
-                                }
+                                let frame_message = match frame.message {
+                                    None => {
+                                        log::warn!("Received empty frame");
+                                        continue;
+                                    }
+                                    Some(message) => message
+                                };
 
-                                let event = FsmEvent::IncomingFrame(frame.data);
-
-                                let tunnel_id = if frame.frameId == 1 {
+                                let (tunnel_id, direction) = if frame.frameId == 1 {
                                     // frame id one is the initial handshake message (client_hello)
-
-                                    // get listener connections as hashset
-                                    let iface = match self.api_interface.upgrade() {
-                                        None => {
-                                            // interface not available, so the api listener has terminated
-                                            // calling functions will ensure termination when this is happening
-                                            return Err(P2pError::ApiInterfaceError);
-                                        }
-                                        Some(iface) => iface,
-                                    };
-                                    let connections = iface.connections.lock().await;
-                                    let listeners = connections.keys().cloned().collect();
 
                                     // build a new target tunnel
                                     let tunnel_id = OnionTunnel::new_target_tunnel(
-                                        listeners,
                                         self.frame_ids.clone(),
                                         self.socket.clone(),
                                         addr,
@@ -94,11 +99,11 @@ impl P2pInterface {
                                     )
                                     .await;
 
-                                    tunnel_id
+                                    (tunnel_id, Direction::Forward)
                                 } else {
                                     // not a new tunnel request, get corresponding tunnel id from frame id
                                     let frame_ids = self.frame_ids.lock().await;
-                                    let tunnel_id = match frame_ids.get(&frame.frameId) {
+                                    match frame_ids.get(&frame.frameId) {
                                         None => {
                                             // no tunnel available for the given frame
                                             log::warn!(
@@ -106,9 +111,17 @@ impl P2pInterface {
                                             );
                                             continue;
                                         }
-                                        Some(tunnel_id) => *tunnel_id,
-                                    };
-                                    tunnel_id
+                                        Some((tunnel_id, d)) => (*tunnel_id, d.to_owned()),
+                                    }
+                                };
+
+                                let event = match frame_message {
+                                    TunnelFrame_oneof_message::data(data) => {
+                                        FsmEvent::IncomingFrame((data, direction))
+                                    }
+                                    TunnelFrame_oneof_message::close(_) => {
+                                        FsmEvent::RecvClose
+                                    }
                                 };
 
                                 let mut tunnels = self.onion_tunnels.lock().await;
@@ -250,8 +263,6 @@ pub enum P2pError {
     TunnelClosed,
     #[error("Handshake failed: {0}")]
     HandshakeFailure(ProtocolError),
-    #[error("API Interface not available anymore")]
-    ApiInterfaceError,
     #[error("IO Error: {0}")]
     IOError(std::io::Error),
 }

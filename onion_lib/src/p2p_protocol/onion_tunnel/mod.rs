@@ -5,12 +5,9 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{
-    mpsc::{Receiver, Sender},
-    oneshot, Mutex,
-};
+use tokio::sync::{mpsc::{Receiver, Sender}, oneshot, Mutex};
 
-use crate::p2p_protocol::{ConnectionId, P2pError};
+use crate::p2p_protocol::{ConnectionId, P2pError, Direction};
 
 use super::{FrameId, TunnelId};
 use crate::api_protocol::ApiInterface;
@@ -47,6 +44,7 @@ type IntermediateHop = (SocketAddr, Vec<u8>);
 
 pub(crate) struct OnionTunnel {
     listeners: Arc<Mutex<HashSet<ConnectionId>>>, // all the api connection listeners
+    listeners_available: Arc<Mutex<bool>>,        // are the listeners set, important for managing
     event_tx: Sender<FsmEvent>,                   // sending events to the fsm
     tunnel_id: TunnelId,                          // unique tunnel id
     tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // tunnel registry for tunnel mgmt
@@ -55,7 +53,8 @@ pub(crate) struct OnionTunnel {
 // TODO private keys
 impl OnionTunnel {
     async fn new_tunnel(
-        listeners: HashSet<ConnectionId>,
+        listeners: Arc<Mutex<HashSet<ConnectionId>>>,
+        listeners_available: Arc<Mutex<bool>>,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
         event_tx: Sender<FsmEvent>,
         tunnel_id: TunnelId,
@@ -65,9 +64,9 @@ impl OnionTunnel {
         // clone the sender for init
         let event_tx_clone = event_tx.clone();
 
-        let listeners = Arc::new(Mutex::new(listeners));
         let tunnel = OnionTunnel {
             listeners: listeners.clone(),
+            listeners_available: listeners_available.clone(),
             event_tx,
             tunnel_id,
             tunnel_registry: tunnel_registry.clone(),
@@ -99,6 +98,20 @@ impl OnionTunnel {
                                         "Received IncomingTunnelCompletion at tunnel {:?}",
                                         id_clone
                                     );
+
+                                    // get listeners
+                                    let connections = iface.connections.lock().await;
+                                    let raw_listeners = connections.keys().cloned().collect();
+
+                                    // TODO check if listeners are empty, then we want to terminate the tunnel
+
+                                    // store listeners in tunnel reference
+                                    let mut listeners_guard = listeners.lock().await;
+                                    let mut listeners_available_guard = listeners_available.lock().await;
+                                    *listeners_guard = raw_listeners;
+                                    *listeners_available_guard = true;
+                                    drop(listeners_guard);
+
                                     iface.incoming_tunnel(id_clone, listeners.clone()).await;
                                 }
 
@@ -135,7 +148,7 @@ impl OnionTunnel {
     #[allow(clippy::too_many_arguments)]
     pub async fn new_initiator_tunnel(
         listener: ConnectionId,
-        frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
+        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
         socket: Arc<UdpSocket>,
         target: SocketAddr,
         target_host_key: Vec<u8>,
@@ -176,11 +189,12 @@ impl OnionTunnel {
         });
 
         // create the tunnel
-        let mut listeners = HashSet::new();
-        listeners.insert(listener);
+        let listeners =
+            Arc::new(Mutex::new(vec![listener].into_iter().collect::<HashSet<ConnectionId>>()));
 
         Self::new_tunnel(
             listeners,
+            Arc::new(Mutex::new(true)),
             tunnel_registry,
             event_tx,
             tunnel_id,
@@ -195,8 +209,7 @@ impl OnionTunnel {
      *  Create a tunnel for a non-initiating peer (intermediate hop and target peer)
      */
     pub async fn new_target_tunnel(
-        listeners: HashSet<ConnectionId>,
-        frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
+        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
         socket: Arc<UdpSocket>,
         source: SocketAddr,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
@@ -227,7 +240,8 @@ impl OnionTunnel {
         });
 
         Self::new_tunnel(
-            listeners,
+            Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(Mutex::new(false)),
             tunnel_registry,
             event_tx,
             tunnel_id,
@@ -264,15 +278,18 @@ impl OnionTunnel {
     }
 
     pub async fn unsubscribe(&self, connection_id: u64) {
-        let mut connections = self.listeners.lock().await;
-        let _ = connections.remove(&connection_id);
-        if connections.is_empty() {
-            // no more listeners exist, terminate tunnel
-            log::debug!(
-                "No more listeners exist for tunnel with id {:?}. Close tunnel",
-                self.tunnel_id
-            );
-            self.close_tunnel().await;
+        let available_guard = self.listeners_available.lock().await;
+        if *available_guard {
+            let mut connections = self.listeners.lock().await;
+            let _ = connections.remove(&connection_id);
+            if connections.is_empty() {
+                // no more listeners exist, terminate tunnel
+                log::debug!(
+                    "No more listeners exist for tunnel with id {:?}. Close tunnel",
+                    self.tunnel_id
+                );
+                self.close_tunnel().await;
+            }
         }
     }
 }

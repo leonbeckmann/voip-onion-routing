@@ -8,7 +8,7 @@ use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
 use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, IntermediateHop, TunnelResult};
-use crate::p2p_protocol::{FrameId, TunnelId};
+use crate::p2p_protocol::{FrameId, TunnelId, Direction};
 use async_trait::async_trait;
 use bytes::Bytes;
 use protobuf::Message;
@@ -31,7 +31,7 @@ impl InitiatorStateMachine {
     pub fn new(
         _hops: Vec<IntermediateHop>,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
-        _frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
+        _frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
         _socket: Arc<UdpSocket>,
         _target: SocketAddr,
         _target_host_key: Vec<u8>,
@@ -54,7 +54,7 @@ pub(super) struct TargetStateMachine {
 // TODO fill fsm
 impl TargetStateMachine {
     pub fn new(
-        _frame_ids: Arc<Mutex<HashMap<FrameId, TunnelId>>>,
+        _frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
         _socket: Arc<UdpSocket>,
         _source: SocketAddr,
         _tunnel_id: TunnelId,
@@ -113,8 +113,9 @@ pub(super) trait FiniteStateMachine {
             }
         }
     }
-    async fn action_app_data(&mut self, data: Bytes) -> Result<State, ProtocolError>;
+    async fn action_app_data(&mut self, _data: Bytes, _direction: Direction) -> Result<State, ProtocolError>;
     async fn action_close(&mut self) -> Result<State, ProtocolError>;
+    async fn action_recv_close(&mut self) -> Result<State, ProtocolError>;
     async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError>;
     async fn action_handshake_result(
         &mut self,
@@ -158,7 +159,7 @@ pub(super) trait FiniteStateMachine {
                         log::warn!("Received send event for non-connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::IncomingFrame(data) => {
+                    FsmEvent::IncomingFrame((data, _)) => {
                         // we expect handshake data
                         match HandshakeData::parse_from_bytes(data.as_ref()) {
                             Ok(data) => self.action_handshake_data(tx, data).await,
@@ -169,6 +170,7 @@ pub(super) trait FiniteStateMachine {
                         }
                     }
                     FsmEvent::HandshakeResult(res) => self.action_handshake_result(res).await,
+                    FsmEvent::RecvClose => self.action_recv_close().await,
                 },
 
                 State::Connected => match event {
@@ -178,14 +180,15 @@ pub(super) trait FiniteStateMachine {
                     }
                     FsmEvent::Close => self.action_close().await,
                     FsmEvent::Send(data) => self.action_send(data).await,
-                    FsmEvent::IncomingFrame(data) => {
+                    FsmEvent::IncomingFrame((data, dir)) => {
                         // we expect encrypted application data
-                        self.action_app_data(data).await
+                        self.action_app_data(data, dir).await
                     }
                     FsmEvent::HandshakeResult(_) => {
                         log::warn!("Received handshake result for connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
                     }
+                    FsmEvent::RecvClose => self.action_recv_close().await,
                 },
 
                 State::Terminated => {
@@ -237,12 +240,17 @@ impl FiniteStateMachine for InitiatorStateMachine {
         }
     }
 
-    async fn action_app_data(&mut self, _data: Bytes) -> Result<State, ProtocolError> {
+    async fn action_app_data(&mut self, _data: Bytes, _direction: Direction) -> Result<State, ProtocolError> {
         // TODO implement
         unimplemented!()
     }
 
     async fn action_close(&mut self) -> Result<State, ProtocolError> {
+        // TODO implement
+        Ok(State::Terminated)
+    }
+
+    async fn action_recv_close(&mut self) -> Result<State, ProtocolError> {
         // TODO implement
         Ok(State::Terminated)
     }
@@ -289,12 +297,17 @@ impl FiniteStateMachine for TargetStateMachine {
         Ok(State::Connecting(SenderWrapper { event_tx }))
     }
 
-    async fn action_app_data(&mut self, _data: Bytes) -> Result<State, ProtocolError> {
+    async fn action_app_data(&mut self, _data: Bytes, _direction: Direction) -> Result<State, ProtocolError> {
         // TODO implement
         unimplemented!()
     }
 
     async fn action_close(&mut self) -> Result<State, ProtocolError> {
+        // TODO implement
+        Ok(State::Terminated)
+    }
+
+    async fn action_recv_close(&mut self) -> Result<State, ProtocolError> {
         // TODO implement
         Ok(State::Terminated)
     }
@@ -362,8 +375,9 @@ pub(super) enum State {
 pub enum FsmEvent {
     Init,                                       // Start the FSM
     Close,                                      // Close the Tunnel
+    RecvClose,
     Send(Vec<u8>),                              // Send Data via the Tunnel
-    IncomingFrame(Bytes),                       // Received data frame
+    IncomingFrame((Bytes, Direction)),          // Received data frame
     HandshakeResult(Result<(), ProtocolError>), // HandshakeResult from handshake fsm
 }
 
