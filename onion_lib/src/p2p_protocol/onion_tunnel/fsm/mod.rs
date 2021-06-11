@@ -4,9 +4,7 @@ use crate::p2p_protocol::messages::message_codec::DataType::AppData;
 use crate::p2p_protocol::messages::message_codec::{
     InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
 };
-use crate::p2p_protocol::messages::p2p_messages::{
-    HandshakeData, HandshakeData_oneof_message, PlainHandshakeData_oneof_message,
-};
+use crate::p2p_protocol::messages::p2p_messages::HandshakeData_oneof_message;
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
@@ -14,7 +12,6 @@ use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, IntermediateHop, T
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
-use protobuf::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -89,34 +86,43 @@ pub(super) trait FiniteStateMachine {
     async fn action_handshake_data(
         &mut self,
         tx: SenderWrapper,
-        data: HandshakeData,
+        data: Bytes,
         iv: IV,
     ) -> Result<State, ProtocolError> {
-        log::debug!("Delegate handshake data to the handshake protocol");
-
-        // split up into more specific event
-        if data.message.is_none() {
-            return Err(ProtocolError::EmptyMessage);
-        }
-        let event = match data.message.unwrap() {
-            HandshakeData_oneof_message::handshakeData(data) => {
+        // parse handshake data
+        let event = match self
+            .get_codec()
+            .lock()
+            .await
+            .process_data(Direction::Forward, data, iv)
+            .await?
+        {
+            ProcessedData::TransferredToNextHop => {
+                return Err(ProtocolError::UnexpectedMessageType);
+            }
+            ProcessedData::HandshakeData(data) => {
                 if data.message.is_none() {
                     return Err(ProtocolError::EmptyMessage);
                 }
                 match data.message.unwrap() {
-                    PlainHandshakeData_oneof_message::clientHello(data) => {
+                    HandshakeData_oneof_message::clientHello(data) => {
                         HandshakeEvent::ClientHello(data)
                     }
-                    PlainHandshakeData_oneof_message::serverHello(data) => {
+                    HandshakeData_oneof_message::serverHello(data) => {
                         HandshakeEvent::ServerHello(data)
+                    }
+                    HandshakeData_oneof_message::routing(data) => {
+                        HandshakeEvent::RoutingInformation(data)
                     }
                 }
             }
-            HandshakeData_oneof_message::encHandshakeData(data) => {
-                HandshakeEvent::EncryptedHandshakeData(data, iv)
+            ProcessedData::IncomingData(_) => {
+                log::warn!("Not expecting application message in connecting state");
+                return Err(ProtocolError::UnexpectedMessageType);
             }
         };
 
+        log::debug!("Delegate handshake data to the handshake protocol");
         match tx.event_tx.send(event).await {
             Ok(_) => {
                 // stay in connecting
@@ -153,6 +159,10 @@ pub(super) trait FiniteStateMachine {
                     .get_listener()
                     .send(IncomingEventMessage::IncomingData(data))
                     .await;
+            }
+            ProcessedData::HandshakeData(_) => {
+                log::warn!("Not expecting handshake message in connected state");
+                return Err(ProtocolError::UnexpectedMessageType);
             }
         };
 
@@ -226,13 +236,7 @@ pub(super) trait FiniteStateMachine {
                     }
                     FsmEvent::IncomingFrame((data, _, iv)) => {
                         // we expect handshake data
-                        match HandshakeData::parse_from_bytes(data.as_ref()) {
-                            Ok(data) => self.action_handshake_data(tx, data, iv).await,
-                            Err(_) => {
-                                log::warn!("Cannot parse incoming frame to handshake data");
-                                Err(ProtocolError::ProtobufError)
-                            }
-                        }
+                        self.action_handshake_data(tx, data, iv).await
                     }
                     FsmEvent::HandshakeResult(res) => self.action_handshake_result(res).await,
                     FsmEvent::RecvClose(direction) => self.action_recv_close(direction).await,
@@ -411,10 +415,10 @@ pub enum ProtocolError {
     CodecUpdateError,
     #[error("Codec impl received unsupported action")]
     CodecUnsupportedAction,
-    #[error("Cannot create packet of expected size")]
-    CodecPaddingError,
     #[error("IO Error occurred: {0}")]
     IOError(String),
+    #[error("Received a packet with invalid playload length")]
+    InvalidPacketLength,
 }
 
 #[derive(Debug)]

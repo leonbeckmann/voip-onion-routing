@@ -1,22 +1,25 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::p2p_protocol::messages::message_codec::ProcessedData::IncomingData;
 use crate::p2p_protocol::messages::p2p_messages::{
-    ApplicationData, ClientHello, Close, DecryptedHandshakeData, HandshakeData, PlainHandshakeData,
-    ServerHello, TunnelFrame,
+    ApplicationData, ClientHello, Close, HandshakeData, RoutingInformation, ServerHello,
+    TunnelFrame,
 };
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
-use crate::p2p_protocol::{Direction, FrameId, TunnelId, PACKET_SIZE};
+use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
 use protobuf::Message;
 use std::any::Any;
 use std::collections::HashMap;
+use std::mem::size_of;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
+pub(crate) const PAYLOAD_SIZE: u16 = 1024;
+
 pub enum ProcessedData {
     TransferredToNextHop,
+    HandshakeData(HandshakeData),
     IncomingData(Vec<u8>),
 }
 
@@ -24,7 +27,65 @@ pub enum DataType {
     AppData(Vec<u8>),
     ClientHello(ClientHello),
     ServerHello(ServerHello),
-    DecHandshakeData(DecryptedHandshakeData),
+    RoutingInformation(RoutingInformation),
+}
+
+struct RawData {
+    padding_len: u16,
+    message_type: u8,
+    data: Vec<u8>,
+    padding: Vec<u8>,
+}
+
+const APP_DATA: u8 = 1;
+const HANDSHAKE_DATA: u8 = 2;
+
+impl RawData {
+    // TODO assert data small enough
+    fn new(len: u16, message_type: u8, data: Vec<u8>) -> Self {
+        let padding_len = len - (data.len() as u16) - 3;
+        Self {
+            padding_len,
+            message_type,
+            data,
+            padding: (0..padding_len).map(|_| rand::random::<u8>()).collect(),
+        }
+    }
+
+    fn deserialize(raw: &[u8]) -> Result<Self, ProtocolError> {
+        if raw.len() != (PAYLOAD_SIZE as usize) {
+            // TODO do we want to terminate here?
+            return Err(ProtocolError::InvalidPacketLength);
+        }
+        // we have padding_size, so we are safe here
+        let (padding_size_buf, remainder) = raw.split_at(size_of::<u16>());
+        let (message_type_buf, data_buf) = remainder.split_at(size_of::<u8>());
+        let mut padding_size = [0u8; size_of::<u16>()];
+        padding_size.copy_from_slice(&padding_size_buf);
+        let padding_len = u16::from_le_bytes(padding_size);
+        let message_type = message_type_buf[0];
+        if message_type != APP_DATA && message_type != HANDSHAKE_DATA {
+            return Err(ProtocolError::UnexpectedMessageType);
+        }
+        let data_len = PAYLOAD_SIZE - padding_len - (size_of::<u16>() + size_of::<u8>()) as u16;
+        let (data, _padding) = data_buf.split_at(data_len as usize);
+        Ok(RawData {
+            padding_len,
+            message_type,
+            data: data.to_vec(),
+            padding: vec![], // not required
+        })
+    }
+
+    fn serialize(&mut self) -> Vec<u8> {
+        let mut buf = vec![];
+        let mut len = self.padding_len.to_le_bytes().to_vec();
+        buf.append(&mut len);
+        buf.push(self.message_type);
+        buf.append(&mut self.data);
+        buf.append(&mut self.padding);
+        buf
+    }
 }
 
 type IV = Bytes;
@@ -102,24 +163,23 @@ async fn new_frame_id(
 }
 
 fn cleanup_frames(
-    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
-    my_frames: &[(FrameId, Direction)],
+    _frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    _my_frames: &[(FrameId, Direction)],
 ) {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    // FIXME cannot run runtime within runtime
+    /*let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let mut frame_ids = frame_ids.lock().await;
         for (id, _) in my_frames.iter() {
             let _ = frame_ids.remove(id);
         }
-    });
+    });*/
 }
 
 async fn send_close(frame_id: FrameId, addr: SocketAddr, socket: Arc<UdpSocket>) {
     let mut frame = TunnelFrame::new();
     frame.set_frameId(frame_id);
-    let close = Close::new();
-    // TODO padding
-    frame.set_close(close);
+    frame.set_close(Close::new());
     let data = frame.write_to_bytes().unwrap();
     let _ = socket.send_to(data.as_ref(), addr).await;
 }
@@ -254,13 +314,10 @@ impl P2pCodec for InitiatorEndpoint {
             DataType::AppData(data) => {
                 let mut app_data = ApplicationData::new();
                 app_data.set_data(Bytes::from(data));
-
-                // TODO padding
-
                 let data = app_data.write_to_bytes().unwrap();
-
+                let raw_data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
                 // TODO encrypt via iv and keys
-                data
+                raw_data
             }
             DataType::ClientHello(mut client_hello) => {
                 // calculate frame_id
@@ -270,24 +327,20 @@ impl P2pCodec for InitiatorEndpoint {
                 client_hello.set_backwardFrameId(new_id);
 
                 // prepare frame
-                let mut plain_handshake = PlainHandshakeData::new();
-                plain_handshake.set_clientHello(client_hello);
-
-                // TODO padding
-
-                let mut handshake_data = HandshakeData::new();
-                handshake_data.set_handshakeData(plain_handshake);
-                let data = handshake_data.write_to_bytes().unwrap();
-
+                let mut handshake = HandshakeData::new();
+                handshake.set_clientHello(client_hello);
+                let data = handshake.write_to_bytes().unwrap();
+                let raw_data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
                 // TODO encrypt via iv and keys
-                data
+                raw_data
             }
-            DataType::DecHandshakeData(data) => {
-                // TODO padding
-                let data = data.write_to_bytes().unwrap();
-
-                // TODO encrypt using iv and keys
-                data
+            DataType::RoutingInformation(data) => {
+                let mut handshake = HandshakeData::new();
+                handshake.set_routing(data);
+                let data = handshake.write_to_bytes().unwrap();
+                let raw_data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
+                // TODO encrypt via iv and keys
+                raw_data
             }
             _ => {
                 log::warn!("Invalid write action in initiator codec");
@@ -297,10 +350,6 @@ impl P2pCodec for InitiatorEndpoint {
 
         frame.set_data(Bytes::from(ready_bytes));
         let data = frame.write_to_bytes().unwrap();
-
-        if data.len() != PACKET_SIZE {
-            return Err(ProtocolError::CodecPaddingError);
-        }
 
         // write to stream
         if let Err(e) = self.socket.send_to(data.as_ref(), self.next_hop).await {
@@ -319,12 +368,19 @@ impl P2pCodec for InitiatorEndpoint {
         data: Bytes,
         _iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
-        // expected incoming data backwards, process and return
+        // expected incoming data or incoming handshake, process and return
         // TODO decrypt using keys and iv
-
-        match ApplicationData::parse_from_bytes(data.as_ref()) {
-            Ok(data) => Ok(IncomingData(data.data.to_vec())),
-            Err(_) => Err(ProtocolError::ProtobufError),
+        let raw_data = RawData::deserialize(data.as_ref())?;
+        match raw_data.message_type {
+            APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
+                Ok(data) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
+                Err(_) => Err(ProtocolError::ProtobufError),
+            },
+            HANDSHAKE_DATA => match HandshakeData::parse_from_bytes(raw_data.data.as_ref()) {
+                Ok(data) => Ok(ProcessedData::HandshakeData(data)),
+                Err(_) => Err(ProtocolError::ProtobufError),
+            },
+            _ => return Err(ProtocolError::UnexpectedMessageType),
         }
     }
 
@@ -363,13 +419,10 @@ impl P2pCodec for TargetEndpoint {
             DataType::AppData(data) => {
                 let mut app_data = ApplicationData::new();
                 app_data.set_data(Bytes::from(data));
-
-                // TODO padding
-
                 let data = app_data.write_to_bytes().unwrap();
-
-                // TODO encrypt via iv and key
-                data
+                let raw_data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
+                // TODO encrypt via iv and keys
+                raw_data
             }
             DataType::ServerHello(mut server_hello) => {
                 // calculate frame_ids
@@ -385,14 +438,10 @@ impl P2pCodec for TargetEndpoint {
                 server_hello.set_backwardFrameId(new_backward_id);
 
                 // prepare frame
-                let mut plain_handshake = PlainHandshakeData::new();
-                plain_handshake.set_serverHello(server_hello);
-
-                // TODO padding
-
-                let mut handshake_data = HandshakeData::new();
-                handshake_data.set_handshakeData(plain_handshake);
-                handshake_data.write_to_bytes().unwrap()
+                let mut handshake = HandshakeData::new();
+                handshake.set_serverHello(server_hello);
+                let data = handshake.write_to_bytes().unwrap();
+                RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize()
             }
             _ => {
                 log::warn!("Invalid write action in target codec");
@@ -402,10 +451,6 @@ impl P2pCodec for TargetEndpoint {
 
         frame.set_data(Bytes::from(ready_bytes));
         let data = frame.write_to_bytes().unwrap();
-
-        if data.len() != PACKET_SIZE {
-            return Err(ProtocolError::CodecPaddingError);
-        }
 
         // write to stream
         if let Err(e) = self.socket.send_to(data.as_ref(), self.prev_hop).await {
@@ -421,11 +466,24 @@ impl P2pCodec for TargetEndpoint {
     async fn process_data(
         &mut self,
         _d: Direction,
-        _data: Bytes,
+        data: Bytes,
         _iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
-        // TODO expect incoming data forward, process and return
-        unimplemented!()
+        // expect incoming data, handshake or encrypted handshake, process and return
+        // TODO how to notice in an efficient way if we are expecting encrypted data? maybe from FSM?
+        // TODO decrypt using keys and iv
+        let raw_data = RawData::deserialize(data.as_ref())?;
+        match raw_data.message_type {
+            APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
+                Ok(data) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
+                Err(_) => Err(ProtocolError::ProtobufError),
+            },
+            HANDSHAKE_DATA => match HandshakeData::parse_from_bytes(raw_data.data.as_ref()) {
+                Ok(data) => Ok(ProcessedData::HandshakeData(data)),
+                Err(_) => Err(ProtocolError::ProtobufError),
+            },
+            _ => return Err(ProtocolError::UnexpectedMessageType),
+        }
     }
 
     async fn close(&mut self, _: Direction, initiator: bool) {
@@ -456,14 +514,22 @@ impl P2pCodec for IntermediateHop {
         data: Bytes,
         iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
+        if data.len() != (PAYLOAD_SIZE as usize) {
+            // TODO do we want to terminate here?
+            return Err(ProtocolError::InvalidPacketLength);
+        }
         if d == Direction::Backward && self.forward_frame_id == 1 {
             // seems to be the unencrypted server_hello of the next hop, catch the forward id
-            match PlainHandshakeData::parse_from_bytes(data.as_ref()) {
-                Ok(plain) => {
-                    if !plain.has_serverHello() {
+            let raw_data = RawData::deserialize(data.as_ref())?;
+            if raw_data.message_type != HANDSHAKE_DATA {
+                return Err(ProtocolError::UnexpectedMessageType);
+            }
+            match HandshakeData::parse_from_bytes(raw_data.data.as_ref()) {
+                Ok(data) => {
+                    if !data.has_serverHello() {
                         return Err(ProtocolError::UnexpectedMessageType);
                     }
-                    let id = plain.get_serverHello().get_forwardFrameId();
+                    let id = data.get_serverHello().get_forwardFrameId();
                     self.forward_frame_id = id;
                 }
                 Err(_) => {
@@ -493,10 +559,6 @@ impl P2pCodec for IntermediateHop {
         };
 
         let data = frame.write_to_bytes().unwrap();
-
-        if data.len() != PACKET_SIZE {
-            return Err(ProtocolError::CodecPaddingError);
-        }
 
         // write to stream
         if let Err(e) = self.socket.send_to(data.as_ref(), addr).await {

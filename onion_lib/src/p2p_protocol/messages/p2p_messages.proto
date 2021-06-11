@@ -9,29 +9,20 @@ message TunnelFrame {
   // random, unpredictable iv used for encryption
   bytes iv = 2;
 
-  // HandshakeData | enc(ApplicationData) | enc(HandshakeData)
   oneof message {
+    // [padding_size: u16, data_type: u8, data, padding] encrypted
     bytes data = 3;
     Close close = 4;
   }
 }
 
 message HandshakeData {
-  oneof message {
-    PlainHandshakeData handshakeData = 1;
-    EncryptedHandshakeData encHandshakeData = 2;
-  }
-}
-
-message PlainHandshakeData {
   // establish secure channel
   oneof message {
     ClientHello clientHello = 1;
     ServerHello serverHello = 2;
+    RoutingInformation routing = 3;
   }
-
-  // unencrypted padding
-  bytes padding = 3;
 }
 
 message ClientHello {
@@ -46,30 +37,14 @@ message ServerHello {
   uint64 forwardFrameId = 2;
 }
 
-message EncryptedHandshakeData {
-  // this can be parsed into DecryptedHandshakeData afterwards
-  bytes data = 2;
-}
-
-message DecryptedHandshakeData {
-
-  // exchange routing information
-  RoutingInformation routing = 1;
-
-  bytes padding = 2;
-}
-
 message RoutingInformation {
-  bytes nextHopAddr = 1;
-  uint32 nextHopPort = 2;
+  bool isEndpoint = 1;
+  bytes nextHopAddr = 2;
+  uint32 nextHopPort = 3;
 }
 
 message ApplicationData {
-
   bytes data = 1;
-  bytes padding = 2;
 }
 
-message Close {
-  bytes padding = 1;
-}
+message Close {}
