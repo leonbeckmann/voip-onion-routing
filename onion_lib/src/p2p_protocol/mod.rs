@@ -21,21 +21,10 @@ pub type TunnelId = u32;
 type FrameId = u64;
 pub type ConnectionId = u64;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Direction {
     Forward,
     Backward,
-}
-
-impl ToOwned for Direction {
-    type Owned = Direction;
-
-    fn to_owned(&self) -> Self::Owned {
-        match self {
-            Direction::Forward => Direction::Forward,
-            Direction::Backward => Direction::Backward,
-        }
-    }
 }
 
 pub(crate) struct P2pInterface {
@@ -111,15 +100,17 @@ impl P2pInterface {
                                             );
                                             continue;
                                         }
-                                        Some((tunnel_id, d)) => (*tunnel_id, d.to_owned()),
+                                        Some((tunnel_id, d)) => (*tunnel_id, *d),
                                     }
                                 };
 
                                 let event = match frame_message {
                                     TunnelFrame_oneof_message::data(data) => {
-                                        FsmEvent::IncomingFrame((data, direction))
+                                        FsmEvent::IncomingFrame((data, direction, frame.iv))
                                     }
-                                    TunnelFrame_oneof_message::close(_) => FsmEvent::RecvClose,
+                                    TunnelFrame_oneof_message::close(_) => {
+                                        FsmEvent::RecvClose(direction)
+                                    }
                                 };
 
                                 let mut tunnels = self.onion_tunnels.lock().await;

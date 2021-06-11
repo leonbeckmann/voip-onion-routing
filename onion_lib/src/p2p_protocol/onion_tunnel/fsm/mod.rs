@@ -23,6 +23,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{oneshot, Mutex};
 
+type IV = Bytes;
+
 pub(super) struct InitiatorStateMachine {
     tunnel_result_tx: Option<oneshot::Sender<TunnelResult>>, // signal the listener completion
     event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
@@ -88,6 +90,7 @@ pub(super) trait FiniteStateMachine {
         &mut self,
         tx: SenderWrapper,
         data: HandshakeData,
+        iv: IV,
     ) -> Result<State, ProtocolError> {
         log::debug!("Delegate handshake data to the handshake protocol");
 
@@ -110,7 +113,7 @@ pub(super) trait FiniteStateMachine {
                 }
             }
             HandshakeData_oneof_message::encHandshakeData(data) => {
-                HandshakeEvent::EncryptedHandshakeData(data)
+                HandshakeEvent::EncryptedHandshakeData(data, iv)
             }
         };
 
@@ -130,13 +133,14 @@ pub(super) trait FiniteStateMachine {
         &mut self,
         data: Bytes,
         direction: Direction,
+        iv: IV,
     ) -> Result<State, ProtocolError> {
         // send data to the target via the tunnel
         match self
             .get_codec()
             .lock()
             .await
-            .process_data(direction, data)
+            .process_data(direction, data, iv)
             .await?
         {
             ProcessedData::TransferredToNextHop => {
@@ -159,11 +163,15 @@ pub(super) trait FiniteStateMachine {
     async fn action_close(&mut self) -> Result<State, ProtocolError> {
         // all connection listeners have left
         log::debug!("Received close event, notify tunnel peers and shutdown tunnel");
-        self.get_codec().lock().await.close().await;
+        self.get_codec()
+            .lock()
+            .await
+            .close(Direction::Forward, true)
+            .await;
         Ok(State::Terminated)
     }
 
-    async fn action_recv_close(&mut self) -> Result<State, ProtocolError>;
+    async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError>;
 
     async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError> {
         // send data to the target via the tunnel
@@ -216,10 +224,10 @@ pub(super) trait FiniteStateMachine {
                         log::warn!("Received send event for non-connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::IncomingFrame((data, _)) => {
+                    FsmEvent::IncomingFrame((data, _, iv)) => {
                         // we expect handshake data
                         match HandshakeData::parse_from_bytes(data.as_ref()) {
-                            Ok(data) => self.action_handshake_data(tx, data).await,
+                            Ok(data) => self.action_handshake_data(tx, data, iv).await,
                             Err(_) => {
                                 log::warn!("Cannot parse incoming frame to handshake data");
                                 Err(ProtocolError::ProtobufError)
@@ -227,7 +235,7 @@ pub(super) trait FiniteStateMachine {
                         }
                     }
                     FsmEvent::HandshakeResult(res) => self.action_handshake_result(res).await,
-                    FsmEvent::RecvClose => self.action_recv_close().await,
+                    FsmEvent::RecvClose(direction) => self.action_recv_close(direction).await,
                 },
 
                 State::Connected => match event {
@@ -237,15 +245,15 @@ pub(super) trait FiniteStateMachine {
                     }
                     FsmEvent::Close => self.action_close().await,
                     FsmEvent::Send(data) => self.action_send(data).await,
-                    FsmEvent::IncomingFrame((data, dir)) => {
+                    FsmEvent::IncomingFrame((data, dir, iv)) => {
                         // we expect encrypted application data
-                        self.action_app_data(data, dir).await
+                        self.action_app_data(data, dir, iv).await
                     }
                     FsmEvent::HandshakeResult(_) => {
                         log::warn!("Received handshake result for connected FSM.");
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::RecvClose => self.action_recv_close().await,
+                    FsmEvent::RecvClose(direction) => self.action_recv_close(direction).await,
                 },
 
                 State::Terminated => {
@@ -297,10 +305,10 @@ impl FiniteStateMachine for InitiatorStateMachine {
         }
     }
 
-    async fn action_recv_close(&mut self) -> Result<State, ProtocolError> {
+    async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
         // target sends closure, notify hops
         log::debug!("Received closure from target peer, notify hops and close tunnel");
-        self.endpoint_codec.lock().await.close().await;
+        self.endpoint_codec.lock().await.close(d, false).await;
         Ok(State::Terminated)
     }
 
@@ -349,9 +357,10 @@ impl FiniteStateMachine for TargetStateMachine {
         Ok(State::Connecting(SenderWrapper { event_tx }))
     }
 
-    async fn action_recv_close(&mut self) -> Result<State, ProtocolError> {
+    async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
         // receives close from initiator peer
         log::debug!("Received closure from initiator peer, close tunnel");
+        self.codec.lock().await.close(d, false).await;
         Ok(State::Terminated)
     }
 
@@ -400,6 +409,12 @@ pub enum ProtocolError {
     InvalidRoutingInformation,
     #[error("Cannot update codec from TargetEndpoint to IntermediateHop")]
     CodecUpdateError,
+    #[error("Codec impl received unsupported action")]
+    CodecUnsupportedAction,
+    #[error("Cannot create packet of expected size")]
+    CodecPaddingError,
+    #[error("IO Error occurred: {0}")]
+    IOError(String),
 }
 
 #[derive(Debug)]
@@ -425,9 +440,9 @@ pub(super) enum State {
 pub enum FsmEvent {
     Init,  // Start the FSM
     Close, // Close the Tunnel
-    RecvClose,
+    RecvClose(Direction),
     Send(Vec<u8>),                              // Send Data via the Tunnel
-    IncomingFrame((Bytes, Direction)),          // Received data frame
+    IncomingFrame((Bytes, Direction, IV)),      // Received data frame
     HandshakeResult(Result<(), ProtocolError>), // HandshakeResult from handshake fsm
 }
 

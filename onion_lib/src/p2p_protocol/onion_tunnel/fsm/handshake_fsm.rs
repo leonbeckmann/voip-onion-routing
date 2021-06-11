@@ -2,9 +2,9 @@ use crate::p2p_protocol::messages::message_codec::{
     DataType, IntermediateHop, P2pCodec, TargetEndpoint,
 };
 use crate::p2p_protocol::messages::p2p_messages::{
-    ClientHello, DecryptedHandshakeData, EncryptedHandshakeData, PlainHandshakeData, ServerHello,
+    ClientHello, DecryptedHandshakeData, EncryptedHandshakeData, ServerHello,
 };
-use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
+use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError, IV};
 use protobuf::Message;
 use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
@@ -45,7 +45,7 @@ pub enum HandshakeEvent {
     Init,
     ClientHello(ClientHello),
     ServerHello(ServerHello),
-    EncryptedHandshakeData(EncryptedHandshakeData),
+    EncryptedHandshakeData(EncryptedHandshakeData, IV),
 }
 
 pub struct HandshakeStateMachine<PT> {
@@ -65,11 +65,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // create client hello and give it to message codec
         // TODO fill client hello
         let client_hello = ClientHello::new();
-        let mut plain_data = PlainHandshakeData::new();
-        plain_data.set_clientHello(client_hello);
 
         let mut codec = self.message_codec.lock().await;
-        if let Err(e) = codec.write(DataType::PlainHandshakeData(plain_data)).await {
+        if let Err(e) = codec.write(DataType::ClientHello(client_hello)).await {
             Err(e)
         } else {
             Ok(HandshakeState::WaitForServerHello)
@@ -78,16 +76,16 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
     pub async fn action_recv_client_hello(
         &mut self,
-        _data: ClientHello,
+        data: ClientHello,
     ) -> Result<HandshakeState, ProtocolError> {
-        // create server hello and give it to message_codec
-        // TODO fill server hello using client hello
-        let server_hello = ServerHello::new();
-        let mut plain_data = PlainHandshakeData::new();
-        plain_data.set_serverHello(server_hello);
-
+        // set backward frame id on the target endpoint
         let mut codec = self.message_codec.lock().await;
-        if let Err(e) = codec.write(DataType::PlainHandshakeData(plain_data)).await {
+        codec.set_backward_frame_id(data.backwardFrameId);
+
+        // create server hello and give it to message_codec
+        // TODO fill server_hello
+        let server_hello = ServerHello::new();
+        if let Err(e) = codec.write(DataType::ServerHello(server_hello)).await {
             Err(e)
         } else {
             Ok(HandshakeState::WaitForRoutingInformation)
@@ -96,14 +94,15 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
     pub async fn action_recv_server_hello(
         &mut self,
-        _data: ServerHello,
+        data: ServerHello,
     ) -> Result<(), ProtocolError> {
-        // create decrypted handshake message and give it to message_codec
-        // TODO handle received ServerHello
-        // TODO get next hop from self and set routing in dec handshake data
-        let dec_data = DecryptedHandshakeData::new();
-
         let mut codec = self.message_codec.lock().await;
+        codec.set_forward_frame_id(data.forwardFrameId);
+        codec.set_backward_frame_id(data.backwardFrameId);
+
+        // create decrypted handshake message and give it to message_codec
+        // TODO fill
+        let dec_data = DecryptedHandshakeData::new();
         if let Err(e) = codec.write(DataType::DecHandshakeData(dec_data)).await {
             Err(e)
         } else {
@@ -114,8 +113,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     pub async fn action_recv_routing(
         &mut self,
         data: EncryptedHandshakeData,
+        _iv: IV,
     ) -> Result<(), ProtocolError> {
-        // TODO decrypt via crypto context
+        // TODO decrypt via crypto context using iv and key
         let decrypted_bytes = data.data;
 
         // check for decrypted handshake data
@@ -128,29 +128,33 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 }
             };
 
-        // TODO store secure iv seed in crypto context
-        let _secure_seed = handshake_data.secure_seed;
+        // get target endpoint
+        let mut codec_guard = self.message_codec.lock().await;
+        let target_endpoint = match (*codec_guard).as_any().downcast_mut::<TargetEndpoint>() {
+            None => return Err(ProtocolError::CodecUpdateError),
+            Some(endpoint) => endpoint,
+        };
 
         // check for routing
         if handshake_data.routing.is_none() {
             log::debug!("No routing information provided, peer is the target endpoint");
+            target_endpoint.lock_as_target_endpoint().await;
             Ok(())
         } else {
             // parse socket addr
             let routing = handshake_data.routing.unwrap(); // safe
-            let addr = match u16::try_from(routing.next_hop_port) {
-                Ok(port) => match routing.next_hop_addr.len() {
+            let addr = match u16::try_from(routing.nextHopPort) {
+                Ok(port) => match routing.nextHopAddr.len() {
                     4 => {
                         // ipv4
-                        let slice: [u8; 4] =
-                            routing.next_hop_addr.as_ref()[0..4].try_into().unwrap();
+                        let slice: [u8; 4] = routing.nextHopAddr.as_ref()[0..4].try_into().unwrap();
                         let ipv4 = IpAddr::from(slice);
                         SocketAddr::new(ipv4, port)
                     }
                     16 => {
                         // ip6
                         let slice: [u8; 16] =
-                            routing.next_hop_addr.as_ref()[0..16].try_into().unwrap();
+                            routing.nextHopAddr.as_ref()[0..16].try_into().unwrap();
                         let ipv6 = IpAddr::from(slice);
                         SocketAddr::new(ipv6, port)
                     }
@@ -163,16 +167,8 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 }
             };
 
-            // construct intermediate hop from target and next_hop addr
-            let mut codec_guard = self.message_codec.lock().await;
-            let target_endpoint = match (*codec_guard).as_any().downcast_ref::<TargetEndpoint>() {
-                None => return Err(ProtocolError::CodecUpdateError),
-                Some(endpoint) => endpoint,
-            };
-
-            let new_codec = Box::new(IntermediateHop::from(target_endpoint, addr));
-
             // update codec
+            let new_codec = Box::new(IntermediateHop::from(target_endpoint, addr));
             *codec_guard = new_codec;
 
             Ok(())
@@ -252,8 +248,8 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 },
 
                 HandshakeState::WaitForRoutingInformation => match event {
-                    HandshakeEvent::EncryptedHandshakeData(data) => {
-                        match self.action_recv_routing(data).await {
+                    HandshakeEvent::EncryptedHandshakeData(data, iv) => {
+                        match self.action_recv_routing(data, iv).await {
                             Ok(_) => {
                                 let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(()))).await;
                                 return;

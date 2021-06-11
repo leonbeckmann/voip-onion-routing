@@ -38,18 +38,37 @@ pub(crate) mod p2p_messages;
 
 #[cfg(test)]
 mod tests {
-    use crate::p2p_protocol::messages::p2p_messages::TunnelFrame;
+    use crate::p2p_protocol::messages::p2p_messages::{
+        ClientHello, HandshakeData, PlainHandshakeData, TunnelFrame,
+    };
     use bytes::Bytes;
     use protobuf::Message;
-    use std::convert::TryInto;
 
     #[test]
     fn unit_test() {
         let mut frame = TunnelFrame::new();
         frame.set_frameId(1);
-        frame.set_data(Bytes::from("hallo"));
-        println!("{:?}", frame.compute_size());
-        let a: [u8; 2] = frame.get_data()[0..2].try_into().unwrap();
-        println!("{:?}", a);
+        let mut client_hello = ClientHello::new();
+        client_hello.set_backwardFrameId(rand::random::<u64>());
+        let mut plain = PlainHandshakeData::new();
+        let mut handshake = HandshakeData::new();
+
+        plain.set_clientHello(client_hello);
+        println!("{:?}", plain.compute_size());
+        let offset = 18;
+        let padding_size = 1024 - offset - plain.compute_size();
+        let padding: Vec<u8> = (0..padding_size).map(|_| rand::random::<u8>()).collect();
+        plain.set_padding(Bytes::from(padding));
+
+        handshake.set_handshakeData(plain);
+        println!("{:?}", handshake.compute_size());
+        let data = handshake.write_to_bytes().unwrap();
+        println!("{:?}", data.len());
+
+        frame.set_data(Bytes::from(data));
+        let frame_data = frame.write_to_bytes().unwrap();
+
+        println!("{:?}", frame_data.len());
+        println!("{:?}", frame_data);
     }
 }

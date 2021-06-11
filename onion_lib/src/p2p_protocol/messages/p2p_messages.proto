@@ -6,10 +6,13 @@ message TunnelFrame {
   // an identifier for identifying the corresponding tunnel of this frame
   fixed64 frameId = 1;
 
+  // random, unpredictable iv used for encryption
+  bytes iv = 2;
+
   // HandshakeData | enc(ApplicationData) | enc(HandshakeData)
   oneof message {
-    bytes data = 2;
-    Close close = 3;
+    bytes data = 3;
+    Close close = 4;
   }
 }
 
@@ -32,38 +35,38 @@ message PlainHandshakeData {
 }
 
 message ClientHello {
-  // TODO fill
+  // frameId used for communicating with the source
+  uint64 backwardFrameId = 1;
 }
 
 message ServerHello {
-  // TODO fill
+  // used for hops to tell next hop how to address prev hop
+  uint64 backwardFrameId = 1;
+  // used for telling the source how to address the peer
+  uint64 forwardFrameId = 2;
 }
 
 message EncryptedHandshakeData {
-  bytes iv = 1;   // random, unpredictable iv used for encryption
-  bytes data = 2; // this can be parsed into DecryptedHandshakeData afterwards
+  // this can be parsed into DecryptedHandshakeData afterwards
+  bytes data = 2;
 }
 
 message DecryptedHandshakeData {
 
-  // a secure random seed for generating iv's without iv transfer due to padding issues
-  bytes secure_seed = 1;
-
   // exchange routing information
-  RoutingInformation routing = 2;
+  RoutingInformation routing = 1;
 
-  bytes padding = 3;
+  bytes padding = 2;
 }
 
 message RoutingInformation {
-  bytes next_hop_addr = 2;
-  uint32 next_hop_port = 3;
+  bytes nextHopAddr = 1;
+  uint32 nextHopPort = 2;
 }
 
 message ApplicationData {
 
   bytes data = 1;
-
   bytes padding = 2;
 }
 
