@@ -169,6 +169,7 @@ async fn handle_connection(
         connection_id
     );
     connections_guard.insert(connection.internal_id, connection);
+    drop(connections_guard);
 
     async fn unregister_connection(
         connections: Arc<Mutex<HashMap<ConnectionId, Connection>>>,

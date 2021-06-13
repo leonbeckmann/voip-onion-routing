@@ -79,14 +79,14 @@ impl OnionTunnel {
         let id_clone = tunnel_id;
         let registry_clone = tunnel_registry.clone();
         tokio::spawn(async move {
+            log::trace!("Tunnel={:?}: Run the async management task", id_clone);
             loop {
                 match mgmt_rx.recv().await {
                     None => {
                         log::debug!(
-                            "Tunnel with id {:?} has received a closure from the FSM.",
+                            "Tunnel={:?}: Received a closure from the FSM. Unregister the tunnel and shutdown the management layer",
                             id_clone
                         );
-                        log::debug!("Unregister tunnel and shutdown management layer");
                         let mut registry = registry_clone.lock().await;
                         let _ = registry.remove(&id_clone);
                         return;
@@ -98,13 +98,19 @@ impl OnionTunnel {
                             match m {
                                 IncomingEventMessage::IncomingTunnelCompletion => {
                                     log::debug!(
-                                        "Received IncomingTunnelCompletion at tunnel {:?}",
+                                        "Tunnel={:?}: Received IncomingTunnelCompletion, delegate to API",
                                         id_clone
                                     );
 
                                     // get listeners
                                     let connections = iface.connections.lock().await;
                                     let raw_listeners = connections.keys().cloned().collect();
+                                    drop(connections);
+                                    log::debug!(
+                                        "Tunnel={:?}: Listeners={:?}",
+                                        id_clone,
+                                        raw_listeners
+                                    );
 
                                     // TODO check if listeners are empty, then we want to terminate the tunnel
 
@@ -120,15 +126,16 @@ impl OnionTunnel {
                                 }
 
                                 IncomingEventMessage::IncomingData(data) => {
-                                    log::debug!("Received IncomingData at {:?}", id_clone);
+                                    log::debug!(
+                                        "Tunnel={:?}: Received incoming data, delegate to API",
+                                        id_clone
+                                    );
                                     iface.incoming_data(data, id_clone, listeners.clone()).await;
                                 }
                             }
                         } else {
                             // this will always lead to a shutdown of the main thread
-                            log::error!(
-                                "API interface not available anymore. Shutdown tunnel mgmt"
-                            );
+                            log::error!("API interface not available anymore");
                             return;
                         }
                     }
@@ -173,6 +180,7 @@ impl OnionTunnel {
 
         // create new tunnel id
         let tunnel_id = get_id();
+        log::trace!("Create new initiator tunnel with new ID={:?}", tunnel_id);
 
         // create initiator FSM
         let mut fsm = InitiatorStateMachine::new(
@@ -230,6 +238,7 @@ impl OnionTunnel {
 
         // create new tunnel id
         let tunnel_id = get_id();
+        log::trace!("Create new target tunnel with new ID={:?}", tunnel_id);
 
         // create target FSM
         let mut fsm = TargetStateMachine::new(
@@ -264,7 +273,9 @@ impl OnionTunnel {
     }
 
     pub(crate) async fn forward_event(&self, e: FsmEvent) -> Result<(), P2pError> {
+        log::trace!("Tunnel={:?}: Forward event={:?} to FSM", self.tunnel_id, e);
         if self.event_tx.send(e).await.is_err() {
+            log::warn!("Tunnel={:?}: Cannot forward event to FSM", self.tunnel_id);
             Err(P2pError::TunnelClosed)
         } else {
             Ok(())
@@ -273,11 +284,12 @@ impl OnionTunnel {
 
     async fn close_tunnel(&self) {
         // send close event
+        log::trace!("Tunnel={:?}: Send close event to FSM", self.tunnel_id);
         let _ = self.forward_event(FsmEvent::Close).await;
 
         // remove from tunnels list
-        log::debug!(
-            "Remove tunnel with id {:?} from tunnel registry",
+        log::trace!(
+            "Tunnel={:?}: Remove tunnel from tunnel registry",
             self.tunnel_id
         );
         let mut tunnel_registry = self.tunnel_registry.lock().await;
@@ -288,11 +300,16 @@ impl OnionTunnel {
         let available_guard = self.listeners_available.lock().await;
         if *available_guard {
             let mut connections = self.listeners.lock().await;
+            log::trace!(
+                "Tunnel={:?}: Remove connection={:?}",
+                self.tunnel_id,
+                connection_id
+            );
             let _ = connections.remove(&connection_id);
             if connections.is_empty() {
                 // no more listeners exist, terminate tunnel
                 log::debug!(
-                    "No more listeners exist for tunnel with id {:?}. Close tunnel",
+                    "Tunnel={:?}: No more listeners exist. Close the tunnel",
                     self.tunnel_id
                 );
                 self.close_tunnel().await;

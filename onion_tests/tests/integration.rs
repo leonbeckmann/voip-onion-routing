@@ -13,7 +13,8 @@ use std::time::Duration;
 use tempdir::TempDir;
 
 use onion_lib::api_protocol::messages::{
-    OnionError, OnionMessageHeader, OnionTunnelBuild, OnionTunnelDestroy, OnionTunnelReady,
+    OnionError, OnionMessageHeader, OnionTunnelBuild, OnionTunnelData, OnionTunnelDestroy,
+    OnionTunnelIncoming, OnionTunnelReady,
 };
 use std::convert::TryFrom;
 use std::path::PathBuf;
@@ -21,9 +22,9 @@ use std::str::FromStr;
 
 const ONION_TUNNEL_BUILD: u16 = 560; // incoming for tunnel build in next round
 const ONION_TUNNEL_READY: u16 = 561; // outgoing response on build with new tunnel
-const _ONION_TUNNEL_INCOMING: u16 = 562; // outgoing to all api connection listeners
+const ONION_TUNNEL_INCOMING: u16 = 562; // outgoing to all api connection listeners
 const ONION_TUNNEL_DESTROY: u16 = 563; // incoming Destroy a tunnel for this api connection, destroy if no listeners available anymore
-const _ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tunnel
+const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tunnel
 const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
 const _ONION_COVER: u16 = 566; // send cover traffic to random peer
 
@@ -100,7 +101,7 @@ fn write_msg(msg_type: u16, data: Vec<u8>, stream: &mut TcpStream) {
 #[test]
 fn integration_test() {
     // enable logging
-    env::set_var("RUST_LOG", "debug");
+    env::set_var("RUST_LOG", "trace");
     env_logger::init();
 
     log::info!("Starting integration test");
@@ -120,7 +121,7 @@ fn integration_test() {
     let bob_key = Rsa::generate(4096).unwrap();
     let bob_pub_pem = bob_key.public_key_to_pem().unwrap();
 
-    log::info!("Starting peer alice ..");
+    log::info!("TEST: Starting peer alice ..");
     run_peer(
         "2001",
         "127.0.0.1:2002",
@@ -130,7 +131,7 @@ fn integration_test() {
         alice_pub_pem,
     );
 
-    log::info!("Starting peer bob ..");
+    log::info!("TEST: Starting peer bob ..");
     run_peer(
         "3001",
         "127.0.0.1:3002",
@@ -146,18 +147,18 @@ fn integration_test() {
             panic!("Cannot connect to Alice from CM/CI")
         }
         Some(s) => {
-            log::info!("API connection established to Alice");
+            log::info!("TEST: API connection established to Alice");
             s
         }
     };
 
     // connect to bob from CM/CI
-    let _bob_api = match connect("localhost:3002") {
+    let mut bob_api = match connect("localhost:3002") {
         None => {
             panic!("Cannot connect to Bob from CM/CI")
         }
         Some(s) => {
-            log::info!("API connection established to Bob");
+            log::info!("TEST: API connection established to Bob");
             s
         }
     };
@@ -166,8 +167,9 @@ fn integration_test() {
     let _alice_host_key_der = alice_key.public_key_to_der().unwrap();
     let bob_host_key_der = bob_key.public_key_to_der().unwrap();
 
-    // destroy non-existent tunnel id
-    log::info!("Request TunnelDestroy for non-existent tunnel ID");
+    // TEST: destroy non-existent tunnel id
+
+    log::info!("TEST: Request TunnelDestroy for non-existent tunnel ID");
     let tunnel_destroy = OnionTunnelDestroy::new(20).to_be_vec();
     write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
     let (hdr, data) = read_msg(&mut alice_api);
@@ -176,14 +178,35 @@ fn integration_test() {
     assert_eq!(error.tunnel_id, 20);
     assert_eq!(error.request_type, ONION_TUNNEL_DESTROY);
 
-    // TODO build tunnel to non-existent peer
+    // TEST: build tunnel to non-existent peer
 
-    // TODO send data via non-existent tunnel
+    log::info!("TEST: Request TunnelBuild from Alice to non-existent peer 127.0.0.1:10000");
+    let unknown_peer = IpAddr::from_str("127.0.0.1").unwrap();
+    let unknown_port = 10000;
+    let tunnel_build = OnionTunnelBuild::new(unknown_peer, unknown_port, vec![]).to_be_vec();
+    write_msg(ONION_TUNNEL_BUILD, tunnel_build, &mut alice_api);
+    let (hdr, data) = read_msg(&mut alice_api);
+    assert_eq!(hdr.msg_type, ONION_ERROR);
+    let error = OnionError::try_from(data).unwrap();
+    assert_eq!(error.tunnel_id, 0);
+    assert_eq!(error.request_type, ONION_TUNNEL_BUILD);
 
-    // request new tunnel from alice to bob
+    // TEST: send data via non-existent tunnel
+
+    log::info!("TEST: Request TunnelBuild from Alice to non-existent peer 127.0.0.1:10000");
+    let tunnel_data = OnionTunnelData::new(20, "hello".as_bytes().to_vec()).to_be_vec();
+    write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
+    let (hdr, data) = read_msg(&mut alice_api);
+    assert_eq!(hdr.msg_type, ONION_ERROR);
+    let error = OnionError::try_from(data).unwrap();
+    assert_eq!(error.tunnel_id, 20);
+    assert_eq!(error.request_type, ONION_TUNNEL_DATA);
+
+    // TEST: request new tunnel from alice to bob
+
+    log::info!("TEST: Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
     let bob_hostname = IpAddr::from_str("127.0.0.1").unwrap();
     let bob_port = 3001;
-    log::info!("Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
     let tunnel_build = OnionTunnelBuild::new(bob_hostname, bob_port, bob_host_key_der).to_be_vec();
     write_msg(ONION_TUNNEL_BUILD, tunnel_build, &mut alice_api);
 
@@ -193,19 +216,77 @@ fn integration_test() {
     let ready = Box::<OnionTunnelReady>::try_from(data).unwrap();
     let alice_to_bob_tunnel = ready.tunnel_id;
     log::info!(
-        "Alice received TUNNEL_READY with tunnel ID {:?}",
+        "TEST: Alice has received TUNNEL_READY with tunnel ID {:?}",
         alice_to_bob_tunnel
     );
 
-    // TODO expect Incoming message on Bob's API
+    // expect Incoming message on Bob's API
+    let (hdr, data) = read_msg(&mut bob_api);
+    assert_eq!(hdr.msg_type, ONION_TUNNEL_INCOMING);
+    let incoming = OnionTunnelIncoming::try_from(data).unwrap();
+    let bob_from_alice_tunnel = incoming.tunnel_id;
+    log::info!(
+        "TEST: Bob has received TUNNEL_INCOMING with tunnel ID {:?}",
+        bob_from_alice_tunnel
+    );
 
-    // TODO send data from Alice to Bob
+    // TEST: send data from Alice to Bob
 
-    // TODO expect incoming data in Bob's API
+    log::info!("TEST: Request TunnelData='PING' from Alice to Bob");
+    let message_ping = "PING".as_bytes();
+    let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, message_ping.to_vec()).to_be_vec();
+    write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
 
-    // TODO send data from Bob to Alice
+    // expect incoming data in Bob's API
+    let (hdr, data) = read_msg(&mut bob_api);
+    assert_eq!(hdr.msg_type, ONION_TUNNEL_DATA);
+    let incoming = Box::<OnionTunnelData>::try_from(data).unwrap();
+    assert_eq!(incoming.tunnel_id, bob_from_alice_tunnel);
+    assert_eq!(incoming.data.as_slice(), message_ping);
+    log::info!("TEST: Bob has received PING");
 
-    // TODO expect incoming data in Alice's API
+    // TEST: send data from Bob to Alice
 
-    // TODO destroy the connection
+    log::info!("TEST: Request TunnelData='PONG' from Bob to Alice");
+    let message_pong = "PONG".as_bytes();
+    let tunnel_data =
+        OnionTunnelData::new(bob_from_alice_tunnel, message_pong.to_vec()).to_be_vec();
+    write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut bob_api);
+
+    // expect incoming data in Alice's API
+    let (hdr, data) = read_msg(&mut alice_api);
+    assert_eq!(hdr.msg_type, ONION_TUNNEL_DATA);
+    let incoming = Box::<OnionTunnelData>::try_from(data).unwrap();
+    assert_eq!(incoming.tunnel_id, alice_to_bob_tunnel);
+    assert_eq!(incoming.data.as_slice(), message_pong);
+    log::info!("TEST: Alice has received PONG");
+
+    // TEST: destroy the connection via alice
+
+    log::info!("TEST: Request TunnelDestroy from Alice");
+    let tunnel_destroy = OnionTunnelDestroy::new(alice_to_bob_tunnel).to_be_vec();
+    write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
+
+    /*
+    sleep(Duration::from_secs(1));
+
+    // TEST: cannot send data from Alice to Bob anymore
+    log::info!("TEST: Send data from Alice to Bob via old tunnel and expect failure");
+    let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, "test".as_bytes().to_vec()).to_be_vec();
+    write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
+    let (hdr, data) = read_msg(&mut alice_api);
+    assert_eq!(hdr.msg_type, ONION_ERROR);
+    let error = OnionError::try_from(data).unwrap();
+    assert_eq!(error.tunnel_id, alice_to_bob_tunnel);
+    assert_eq!(error.request_type, ONION_TUNNEL_DATA);
+
+    // TEST: cannot send data from Bob to Alice anymore
+    log::info!("TEST: Send data from Bob to Alice via old tunnel and expect failure");
+    let tunnel_data = OnionTunnelData::new(bob_from_alice_tunnel, "test".as_bytes().to_vec()).to_be_vec();
+    write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut bob_api);
+    let (hdr, data) = read_msg(&mut bob_api);
+    assert_eq!(hdr.msg_type, ONION_ERROR);
+    let error = OnionError::try_from(data).unwrap();
+    assert_eq!(error.tunnel_id, bob_from_alice_tunnel);
+    assert_eq!(error.request_type, ONION_TUNNEL_DATA);*/
 }

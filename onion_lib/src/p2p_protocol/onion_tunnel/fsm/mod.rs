@@ -27,6 +27,7 @@ pub(super) struct InitiatorStateMachine {
     event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
     endpoint_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     listener_tx: Sender<IncomingEventMessage>,
+    tunnel_id: TunnelId,
 }
 
 // TODO fill fsm
@@ -50,6 +51,7 @@ impl InitiatorStateMachine {
                 socket, target, frame_ids, tunnel_id,
             )))),
             listener_tx,
+            tunnel_id,
         }
     }
 }
@@ -58,6 +60,7 @@ pub(super) struct TargetStateMachine {
     listener_tx: Sender<IncomingEventMessage>,
     event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
     codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
+    tunnel_id: TunnelId,
 }
 
 impl TargetStateMachine {
@@ -75,12 +78,15 @@ impl TargetStateMachine {
             codec: Arc::new(Mutex::new(Box::new(TargetEndpoint::new(
                 socket, source, frame_ids, tunnel_id,
             )))),
+            tunnel_id,
         }
     }
 }
 
 #[async_trait]
 pub(super) trait FiniteStateMachine {
+    fn tunnel_id(&self) -> TunnelId;
+
     async fn action_init(&mut self) -> Result<State, ProtocolError>;
 
     async fn action_handshake_data(
@@ -90,6 +96,10 @@ pub(super) trait FiniteStateMachine {
         iv: IV,
     ) -> Result<State, ProtocolError> {
         // parse handshake data
+        log::trace!(
+            "Tunnel={:?}: Try to parse incoming data into handshake data using message codec",
+            self.tunnel_id()
+        );
         let event = match self
             .get_codec()
             .lock()
@@ -117,12 +127,19 @@ pub(super) trait FiniteStateMachine {
                 }
             }
             ProcessedData::IncomingData(_) => {
-                log::warn!("Not expecting application message in connecting state");
+                log::warn!(
+                    "Tunnel={:?}: Not expecting incooming application data in connecting state",
+                    self.tunnel_id()
+                );
                 return Err(ProtocolError::UnexpectedMessageType);
             }
         };
 
-        log::debug!("Delegate handshake data to the handshake protocol");
+        log::trace!(
+            "Tunnel={:?}: Transfer handshake event={:?} to handshake FSM",
+            self.tunnel_id(),
+            event
+        );
         match tx.event_tx.send(event).await {
             Ok(_) => {
                 // stay in connecting
@@ -142,6 +159,11 @@ pub(super) trait FiniteStateMachine {
         iv: IV,
     ) -> Result<State, ProtocolError> {
         // send data to the target via the tunnel
+        log::trace!(
+            "Tunnel={:?}: Handle incoming data (direction={:?}) via codec",
+            self.tunnel_id(),
+            direction
+        );
         match self
             .get_codec()
             .lock()
@@ -150,10 +172,16 @@ pub(super) trait FiniteStateMachine {
             .await?
         {
             ProcessedData::TransferredToNextHop => {
-                log::debug!("Data have been transferred to next hop");
+                log::trace!(
+                    "Tunnel={:?}: Data have been transferred to next hop",
+                    self.tunnel_id()
+                );
             }
             ProcessedData::IncomingData(data) => {
-                log::debug!("Send incoming data to upper layer");
+                log::trace!(
+                    "Tunnel={:?}: Send incoming application data to the upper layer",
+                    self.tunnel_id()
+                );
                 // we can ignore an error here since this will only fail when the tunnel has been closed
                 let _ = self
                     .get_listener()
@@ -161,7 +189,10 @@ pub(super) trait FiniteStateMachine {
                     .await;
             }
             ProcessedData::HandshakeData(_) => {
-                log::warn!("Not expecting handshake message in connected state");
+                log::trace!(
+                    "Tunnel={:?}: Not expecting handshake message in connected state",
+                    self.tunnel_id()
+                );
                 return Err(ProtocolError::UnexpectedMessageType);
             }
         };
@@ -172,7 +203,10 @@ pub(super) trait FiniteStateMachine {
 
     async fn action_close(&mut self) -> Result<State, ProtocolError> {
         // all connection listeners have left
-        log::debug!("Received close event, notify tunnel peers and shutdown tunnel");
+        log::trace!(
+            "Tunnel={:?}: Received close event, notify tunnel peers and shutdown tunnel",
+            self.tunnel_id()
+        );
         self.get_codec()
             .lock()
             .await
@@ -207,31 +241,49 @@ pub(super) trait FiniteStateMachine {
             // read event from queue
             let event = match event_rx.recv().await {
                 None => {
-                    log::warn!("Event queue closed by the tunnel, terminate FSM");
+                    log::warn!(
+                        "Tunnel={:?}: Event queue closed by the tunnel, terminate FSM",
+                        self.tunnel_id()
+                    );
                     current_state = State::Terminated;
                     return;
                 }
                 Some(e) => e,
             };
+            log::trace!(
+                "Tunnel={:?}: Received event={:?} in state={:?}",
+                self.tunnel_id(),
+                event,
+                current_state
+            );
 
             // handle event which returns a result with an error or the next state
             let res = match current_state {
                 State::Closed => match event {
                     FsmEvent::Init => self.action_init().await,
                     _ => {
-                        log::warn!("Received message for uninitialized FSM.");
+                        log::warn!(
+                            "Tunnel={:?}: Received message for uninitialized FSM.",
+                            self.tunnel_id()
+                        );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
                 },
 
                 State::Connecting(tx) => match event {
                     FsmEvent::Init => {
-                        log::warn!("Received init event for initialized FSM.");
+                        log::warn!(
+                            "Tunnel={:?}: Received init event for initialized FSM.",
+                            self.tunnel_id()
+                        );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
                     FsmEvent::Close => self.action_close().await,
                     FsmEvent::Send(_) => {
-                        log::warn!("Received send event for non-connected FSM.");
+                        log::warn!(
+                            "Tunnel={:?}: Received send event for non-connected FSM.",
+                            self.tunnel_id()
+                        );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
                     FsmEvent::IncomingFrame((data, _, iv)) => {
@@ -244,7 +296,10 @@ pub(super) trait FiniteStateMachine {
 
                 State::Connected => match event {
                     FsmEvent::Init => {
-                        log::warn!("Received init event for initialized FSM.");
+                        log::warn!(
+                            "Tunnel={:?}: Received init event for initialized FSM.",
+                            self.tunnel_id()
+                        );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
                     FsmEvent::Close => self.action_close().await,
@@ -254,14 +309,20 @@ pub(super) trait FiniteStateMachine {
                         self.action_app_data(data, dir, iv).await
                     }
                     FsmEvent::HandshakeResult(_) => {
-                        log::warn!("Received handshake result for connected FSM.");
+                        log::warn!(
+                            "Tunnel={:?}: Received handshake result for connected FSM.",
+                            self.tunnel_id()
+                        );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
                     FsmEvent::RecvClose(direction) => self.action_recv_close(direction).await,
                 },
 
                 State::Terminated => {
-                    log::warn!("Received event in state 'Terminated'. Ignore event");
+                    log::warn!(
+                        "Tunnel={:?}: Received event in state 'Terminated'. Ignore event",
+                        self.tunnel_id()
+                    );
                     Ok(State::Terminated)
                 }
             };
@@ -269,17 +330,21 @@ pub(super) trait FiniteStateMachine {
             // handle result
             match res {
                 Ok(new_state) => {
-                    log::trace!("Switch to new state {:?}", new_state);
+                    log::trace!(
+                        "Tunnel={:?}: Switch to new state {:?}",
+                        self.tunnel_id(),
+                        new_state
+                    );
                     current_state = new_state;
                 }
                 Err(e) => {
-                    log::error!("FSM failure: {:?}", e);
+                    log::warn!("Tunnel={:?}: FSM failure: {:?}", e, self.tunnel_id());
                     current_state = State::Terminated;
                 }
             }
 
             if current_state == State::Terminated {
-                log::debug!("Terminate FSM");
+                log::trace!("Tunnel={:?}: Terminate FSM", self.tunnel_id());
                 return;
             }
         }
@@ -288,10 +353,19 @@ pub(super) trait FiniteStateMachine {
 
 #[async_trait]
 impl FiniteStateMachine for InitiatorStateMachine {
+    fn tunnel_id(&self) -> TunnelId {
+        self.tunnel_id
+    }
+
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'start'
-        log::debug!("Initialize the handshake protocol as an initiator");
-        let mut handshake_fsm = HandshakeStateMachine::<Client>::new(self.endpoint_codec.clone());
+        // TODO hops
+        log::trace!(
+            "Tunnel={:?}: Initialize the handshake protocol as an initiator",
+            self.tunnel_id
+        );
+        let mut handshake_fsm =
+            HandshakeStateMachine::<Client>::new(self.endpoint_codec.clone(), self.tunnel_id);
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -311,7 +385,10 @@ impl FiniteStateMachine for InitiatorStateMachine {
 
     async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
         // target sends closure, notify hops
-        log::debug!("Received closure from target peer, notify hops and close tunnel");
+        log::trace!(
+            "Tunnel={:?}: Received closure from target peer, notify hops amd close tunnel",
+            self.tunnel_id
+        );
         self.endpoint_codec.lock().await.close(d, false).await;
         Ok(State::Terminated)
     }
@@ -323,12 +400,12 @@ impl FiniteStateMachine for InitiatorStateMachine {
         let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
         match res {
             Ok(_) => {
-                log::debug!("Handshake was successful");
+                log::trace!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 let _ = tunnel_result_tx.send(TunnelResult::Connected);
                 Ok(State::Connected)
             }
             Err(e) => {
-                log::warn!("Handshake failure");
+                log::warn!("Tunnel={:?}: Handshake failure: {:?}", self.tunnel_id, e);
                 let _ = tunnel_result_tx.send(TunnelResult::Failure(e.clone()));
                 Err(e)
             }
@@ -346,10 +423,18 @@ impl FiniteStateMachine for InitiatorStateMachine {
 
 #[async_trait]
 impl FiniteStateMachine for TargetStateMachine {
+    fn tunnel_id(&self) -> TunnelId {
+        self.tunnel_id
+    }
+
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'WaitForClientHello'
-        log::debug!("Initialize the handshake protocol as a non-initiator");
-        let mut handshake_fsm = HandshakeStateMachine::<Server>::new(self.codec.clone());
+        log::trace!(
+            "Tunnel={:?}: Initialize the handshake protocol as a non-initiator",
+            self.tunnel_id
+        );
+        let mut handshake_fsm =
+            HandshakeStateMachine::<Server>::new(self.codec.clone(), self.tunnel_id);
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -363,7 +448,10 @@ impl FiniteStateMachine for TargetStateMachine {
 
     async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
         // receives close from initiator peer
-        log::debug!("Received closure from initiator peer, close tunnel");
+        log::trace!(
+            "Tunnel={:?}: Received closure from initiator peer, close tunnel",
+            self.tunnel_id
+        );
         self.codec.lock().await.close(d, false).await;
         Ok(State::Terminated)
     }
@@ -374,7 +462,7 @@ impl FiniteStateMachine for TargetStateMachine {
     ) -> Result<State, ProtocolError> {
         match res {
             Ok(_) => {
-                log::debug!("Handshake was successful");
+                log::trace!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 let _ = self
                     .listener_tx
                     .send(IncomingEventMessage::IncomingTunnelCompletion)
@@ -382,7 +470,7 @@ impl FiniteStateMachine for TargetStateMachine {
                 Ok(State::Connected)
             }
             Err(e) => {
-                log::warn!("Handshake failure");
+                log::warn!("Tunnel={:?}: Handshake failure: {:?}", self.tunnel_id, e);
                 Err(e)
             }
         }
@@ -441,6 +529,7 @@ pub(super) enum State {
     Terminated,
 }
 
+#[derive(Debug)]
 pub enum FsmEvent {
     Init,  // Start the FSM
     Close, // Close the Tunnel
@@ -449,142 +538,3 @@ pub enum FsmEvent {
     IncomingFrame((Bytes, Direction, IV)),      // Received data frame
     HandshakeResult(Result<(), ProtocolError>), // HandshakeResult from handshake fsm
 }
-
-/*
-#[derive(Debug)]
-pub(crate) struct TunnelStateMachine {
-    event_rx: Receiver<IoEvent>,
-    message_codec_in: Box<dyn message_codec::P2pCodec + Send + 'static>,
-    message_codec_out: Box<dyn message_codec::P2pCodec + Send + 'static>,
-    is_endpoint: bool,
-    packet_ids: Arc<Mutex<HashMap<PacketId, TunnelId>>>,
-    incoming_next_packet_ids: LinkedList<PacketId>,
-    outgoing_next_packet_ids: LinkedList<PacketId>,
-    tunnel_id: TunnelId,
-}
-
-impl TunnelStateMachine {
-    async fn wait_for_frame_event(
-        &mut self,
-    ) -> Result<p2p_messages::TunnelFrame_oneof_message, P2pError> {
-        let event = self.wait_for_event().await?;
-
-        match event {
-            IoEvent::ReceiveData(data) => {
-                let connect_request = self.message_codec_in.from_raw(&data).await?;
-                let message = connect_request
-                    .message
-                    .ok_or(P2pError::FrameError("TunnelFrame is unset".to_string()))?;
-                Ok(message)
-            }
-        }
-    }
-
-    fn outgoing_packet_id(&mut self) -> (Vec<PacketId>, PacketId) {
-        let current_packet_id = self
-            .outgoing_next_packet_ids
-            .pop_front()
-            .expect("Out of packet ids");
-        self.outgoing_next_packet_ids.push_back(rand::random());
-        let mut next_packet_ids = vec![];
-        next_packet_ids.extend(self.outgoing_next_packet_ids.iter());
-
-        (next_packet_ids, current_packet_id)
-    }
-
-    async fn incoming_packet_id(&mut self, next_packet_ids: &[PacketId]) {
-        for next_packet_id in next_packet_ids {
-            if !self.incoming_next_packet_ids.contains(&next_packet_id) {
-                self.incoming_next_packet_ids
-                    .push_back(next_packet_id.to_owned());
-                let mut packet_ids = self.packet_ids.lock().await;
-
-                // The key should not be present
-                debug_assert!(packet_ids
-                    .insert(next_packet_id.to_owned(), self.tunnel_id)
-                    .is_none());
-            }
-        }
-        // Move acceptance window forward if packets got lost
-        while self.incoming_next_packet_ids.len() > 20 {
-            let timeout_packet_id = self.incoming_next_packet_ids.pop_front().unwrap(); // safe unwrap
-            let mut packet_ids = self.packet_ids.lock().await;
-            debug_assert!(packet_ids.remove(&timeout_packet_id).is_some());
-        }
-    }
-
-    pub(crate) async fn tunnel_connect(&mut self) -> Result<TunnelTransit, TunnelError> {
-        let frame = self.wait_for_frame_event().await?;
-
-        match frame {
-            p2p_messages::TunnelFrame_oneof_message::tunnelHello(message) => {
-                self.incoming_packet_id(message.get_next_packet_ids()).await;
-
-                let target = if message.target == "" {
-                    // Final host in the hop chain
-                    None
-                } else {
-                    Some(SocketAddr::from_str(message.target.as_str()).map_err(|e| {
-                        P2pError::FrameError(format!(
-                            "Target is invalid socket address: {:#?}, error: {:#?}",
-                            message.target, e
-                        ))
-                    })?)
-                };
-                self.message_codec_out.set_target(target);
-
-                return Ok(Transit::To(TunnelState::Connected));
-            }
-            _ => {
-                return Err(P2pError::FrameError(format!(
-                    "Expected TunnelHello, got: {:#?}",
-                    frame
-                )))
-            }
-        }
-    }
-
-    pub(crate) async fn receive_packet(&mut self) -> Result<TunnelTransit, TunnelError> {
-        let frame = self.wait_for_frame_event().await?;
-
-        match frame {
-            p2p_messages::TunnelFrame_oneof_message::tunnelData(message) => {
-                self.incoming_packet_id(message.get_next_packet_ids()).await;
-
-                if self.message_codec_out.is_endpoint() {
-                    log::debug!("Received {} bytes at final endpoint", message.data.len());
-                } else {
-                    let mut msg = p2p_messages::TunnelData::new();
-                    msg.set_data(message.data);
-
-                    let (next_packet_ids, current_packet_id) = self.outgoing_packet_id();
-                    msg.set_next_packet_ids(next_packet_ids);
-
-                    self.message_codec_out
-                        .write_socket(current_packet_id, &msg.into())
-                        .await?;
-                }
-
-                return Ok(Transit::To(TunnelState::Connected));
-            }
-            p2p_messages::TunnelFrame_oneof_message::tunnelClose(_message) => {
-                let msg = p2p_messages::TunnelClose::new();
-
-                let (_next_packet_ids, current_packet_id) = self.outgoing_packet_id();
-
-                self.message_codec_out
-                    .write_socket(current_packet_id, &msg.into())
-                    .await?;
-
-                return Ok(Transit::To(TunnelState::Closing));
-            }
-            _ => {
-                return Err(P2pError::FrameError(format!(
-                    "Expected TunnelData or TunnelClose, got: {:#?}",
-                    frame
-                )))
-            }
-        }
-    }
-}
-*/

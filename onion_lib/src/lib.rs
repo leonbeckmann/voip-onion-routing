@@ -14,7 +14,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
     log::debug!("Parse config file from {:?}", config_file);
     let config = match OnionConfiguration::parse_from_file(config_file) {
         Ok(config) => {
-            log::debug!("Peer configuration: {:?}", config);
+            log::info!("Peer configuration: {:?}", config);
             config
         }
         Err(e) => {

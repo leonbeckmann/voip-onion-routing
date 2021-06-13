@@ -57,19 +57,21 @@ impl P2pInterface {
         // Allow to receive more than expected to detect messages exceeding the fixed size.
         // Otherwise recv_from would silently discards exceeding bytes.
         let mut buf = [0u8; MAX_PACKET_SIZE + 1];
+        let my_addr = format!("{}:{:?}", self.config.p2p_hostname, self.config.p2p_port);
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((size, addr)) => {
                     if size <= MAX_PACKET_SIZE {
-                        log::debug!("Received UDP packet with valid length from {:?}", addr);
+                        log::debug!("Received UDP packet from {:?} at {}", addr, my_addr);
 
                         // parse tunnel frame
                         match TunnelFrame::parse_from_bytes(&buf[0..size]) {
                             Ok(frame) => {
                                 // check if data available, which should always be the case
+                                log::debug!("UDP packet successfully parsed to TunnelFrame");
                                 let frame_message = match frame.message {
                                     None => {
-                                        log::warn!("Received empty frame");
+                                        log::warn!("TunnelFrame is empty, drop the packet");
                                         continue;
                                     }
                                     Some(message) => message,
@@ -77,7 +79,9 @@ impl P2pInterface {
 
                                 let (tunnel_id, direction) = if frame.frameId == 1 {
                                     // frame id one is the initial handshake message (client_hello)
-
+                                    log::debug!(
+                                        "Frame is a new tunnel request. Create a new target tunnel"
+                                    );
                                     // build a new target tunnel
                                     let tunnel_id = OnionTunnel::new_target_tunnel(
                                         self.frame_ids.clone(),
@@ -87,7 +91,7 @@ impl P2pInterface {
                                         self.api_interface.clone(),
                                     )
                                     .await;
-
+                                    log::debug!("New target tunnel has tunnel ID {:?}", tunnel_id);
                                     (tunnel_id, Direction::Forward)
                                 } else {
                                     // not a new tunnel request, get corresponding tunnel id from frame id
@@ -100,7 +104,10 @@ impl P2pInterface {
                                             );
                                             continue;
                                         }
-                                        Some((tunnel_id, d)) => (*tunnel_id, *d),
+                                        Some((tunnel_id, d)) => {
+                                            log::debug!("Incoming frame (direction={:?}) belongs to tunnel with ID {:?} ", d, tunnel_id);
+                                            (*tunnel_id, *d)
+                                        }
                                     }
                                 };
 
@@ -123,8 +130,13 @@ impl P2pInterface {
                                     }
                                     Some(tunnel) => {
                                         // forward message to tunnel
+                                        log::debug!(
+                                            "Froward the parsed frame to the tunnel (ID {:?})",
+                                            tunnel_id
+                                        );
                                         if tunnel.forward_event(event).await.is_err() {
                                             // tunnel has been closed, remove tunnel from registry
+                                            log::warn!("Cannot forward the parsed frame since the tunnel (ID {:?}) has been closed", tunnel_id);
                                             let _ = tunnels.remove(&tunnel_id);
                                         }
                                     }
@@ -132,20 +144,22 @@ impl P2pInterface {
                             }
                             Err(_) => {
                                 log::warn!(
-                                    "Cannot parse UDP packet from {:?} to tunnel frame.",
-                                    addr
+                                    "Cannot parse UDP packet from {:?} at {:?} to tunnel frame.",
+                                    addr,
+                                    my_addr
                                 );
                             }
                         };
                     } else {
                         log::warn!(
-                            "Dropping received UDP packet from {:?} because of packet size",
-                            addr
+                            "Dropping received UDP packet from {:?} at {:?} because of packet size",
+                            addr,
+                            my_addr
                         );
                     }
                 }
                 Err(e) => {
-                    log::error!("Cannot read from UDP socket {}", e);
+                    log::error!("Cannot read from UDP socket at {:?}: {}", my_addr, e);
                     return Err(P2pError::IOError(e));
                 }
             };
@@ -157,6 +171,10 @@ impl P2pInterface {
      */
     pub(crate) async fn unsubscribe(&self, connection_id: ConnectionId) {
         // call unsubscribe on all tunnels
+        log::debug!(
+            "Unsubscribe connection {:?} from all tunnels",
+            connection_id
+        );
         let mut onion_tunnels = self.onion_tunnels.lock().await;
         for (_, tunnel) in onion_tunnels.iter_mut() {
             tunnel.unsubscribe(connection_id).await;
@@ -176,6 +194,7 @@ impl P2pInterface {
     ) -> Result<(TunnelId, Vec<u8>), P2pError> {
         let (tx, rx) = oneshot::channel::<TunnelResult>();
 
+        log::debug!("Received build_tunnel request from connection {:?} to {:?}. Build initiator tunnel and wait for handshake result", listener, target);
         let tunnel_id = OnionTunnel::new_initiator_tunnel(
             listener,
             self.frame_ids.clone(),
@@ -193,10 +212,22 @@ impl P2pInterface {
         // wait until connected or failure
         match rx.await {
             Ok(res) => match res {
-                TunnelResult::Connected => Ok((tunnel_id, host_key)),
-                TunnelResult::Failure(e) => Err(P2pError::HandshakeFailure(e)),
+                TunnelResult::Connected => {
+                    log::debug!("Tunnel with ID={:?} established", tunnel_id);
+                    Ok((tunnel_id, host_key))
+                }
+                TunnelResult::Failure(e) => {
+                    log::warn!("Request build_tunnel failed: Handshake failure {:?}", e);
+                    Err(P2pError::HandshakeFailure(e))
+                }
             },
-            Err(_) => Err(P2pError::TunnelClosed),
+            Err(_) => {
+                log::warn!(
+                    "Request build_tunnel failed: Tunnel (ID={:?}) has closed",
+                    tunnel_id
+                );
+                Err(P2pError::TunnelClosed)
+            }
         }
     }
 
@@ -209,6 +240,11 @@ impl P2pInterface {
         connection_id: ConnectionId,
     ) -> Result<(), P2pError> {
         // call unsubscribe on specific tunnel
+        log::debug!(
+            "Destroy tunnel reference connection={:?}, tunnel={:?}",
+            connection_id,
+            tunnel_id
+        );
         let onion_tunnels = self.onion_tunnels.lock().await;
         match onion_tunnels.get(&tunnel_id) {
             None => Err(P2pError::InvalidTunnelId(tunnel_id)),
@@ -229,10 +265,15 @@ impl P2pInterface {
     ) -> Result<(), P2pError> {
         let tunnels = self.onion_tunnels.lock().await;
         let tunnel = tunnels.get(&tunnel_id);
-
         match tunnel {
-            Some(tunnel) => tunnel.send(data).await,
-            None => Err(P2pError::InvalidTunnelId(tunnel_id)),
+            Some(tunnel) => {
+                log::debug!("Send data via tunnel with ID={:?}", tunnel_id);
+                tunnel.send(data).await
+            }
+            None => {
+                log::debug!("Cannot send data due to unknown tunnel ID={:?}", tunnel_id);
+                Err(P2pError::InvalidTunnelId(tunnel_id))
+            }
         }
     }
 
@@ -254,31 +295,4 @@ pub enum P2pError {
     HandshakeFailure(ProtocolError),
     #[error("IO Error: {0}")]
     IOError(std::io::Error),
-}
-
-impl From<std::io::Error> for P2pError {
-    fn from(e: std::io::Error) -> Self {
-        Self::IOError(e)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tokio::net::UdpSocket;
-
-    #[test]
-    fn unit_test() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let socket = UdpSocket::bind("127.0.0.1:2000").await.unwrap();
-            let client = UdpSocket::bind("127.0.0.1:2001").await.unwrap();
-
-            client.connect("127.0.0.1:2000").await.unwrap();
-            client.send("Data".as_bytes()).await.unwrap();
-
-            let mut buf = [0u8; 3];
-            let (size, _addr) = socket.recv_from(&mut buf).await.unwrap();
-            println!("{:?}", size);
-        });
-    }
 }
