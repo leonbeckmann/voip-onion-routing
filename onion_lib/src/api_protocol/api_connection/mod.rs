@@ -72,6 +72,10 @@ impl Connection {
         read_tx: Sender<IncomingEvent>,
         mut write_rx: Receiver<OutgoingEvent>,
     ) {
+        log::trace!(
+            "Connection={:?}: Start the connection listeners",
+            self.internal_id
+        );
         let (mut rx, mut tx) = tokio::io::split(stream);
         let id = self.internal_id;
 
@@ -86,7 +90,7 @@ impl Connection {
                     Some(e) => {
                         if let Err(e) = write_event(&mut tx, e).await {
                             log::warn!(
-                                "Cannot send outgoing event via TCP (connection {:?}): {}",
+                                "Connection={:?}: Cannot send outgoing event via TCP : {}",
                                 id,
                                 e
                             );
@@ -95,7 +99,7 @@ impl Connection {
                     }
                 }
             }
-            log::trace!("Close SenderHalf (connection {:?})", id);
+            log::trace!("Connection={:?}: Close SenderHalf", id);
             let _ = tx.shutdown();
             write_rx.close();
         });
@@ -111,12 +115,12 @@ impl Connection {
                         }
                     }
                     Err(e) => {
-                        log::warn!("Cannot read event from TCP (connection {:?}): {}", id, e);
+                        log::warn!("Connection={:?}: Cannot read event from TCP: {}", id, e);
                         break;
                     }
                 }
             }
-            log::trace!("Close ReaderHalf (connection {:?})", id);
+            log::trace!("Connection={:?}: Close ReaderHalf", id);
             drop(rx);
             drop(read_tx);
         });

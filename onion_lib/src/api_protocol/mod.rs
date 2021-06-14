@@ -292,11 +292,16 @@ impl ApiInterface {
             if let Some(connection) = connections.get(key) {
                 // we will not catch errors here due to connection closure, this will be recognized
                 // and handled in the connection handler
-                let _ = connection
+                log::trace!("Send TunnelIncoming event to connection={:?}", key);
+                if connection
                     .write_event(OutgoingEvent::TunnelIncoming(OnionTunnelIncoming::new(
                         tunnel_id,
                     )))
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    log::trace!("Cannot send TunnelIncoming event to connection={:?}", key);
+                }
             }
         }
     }
@@ -316,12 +321,20 @@ impl ApiInterface {
             if let Some(connection) = connections.get(key) {
                 // we will not catch errors here due to connection closure, this will be recognized
                 // and handled in the connection handler
-                let _ = connection
+                log::trace!("Send incoming TunnelData event to connection={:?}", key);
+                if connection
                     .write_event(OutgoingEvent::TunnelData(Box::new(OnionTunnelData::new(
                         tunnel_id,
                         data.clone(),
                     ))))
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    log::trace!(
+                        "Cannot send incoming TunnelData event to connection={:?}",
+                        key
+                    );
+                }
             }
         }
     }

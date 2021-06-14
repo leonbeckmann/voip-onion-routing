@@ -1,14 +1,14 @@
 mod handshake_fsm;
 
-use crate::p2p_protocol::messages::message_codec::DataType::AppData;
-use crate::p2p_protocol::messages::message_codec::{
-    InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
-};
 use crate::p2p_protocol::messages::p2p_messages::HandshakeData_oneof_message;
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
-use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, IntermediateHop, TunnelResult};
+use crate::p2p_protocol::onion_tunnel::message_codec::DataType::AppData;
+use crate::p2p_protocol::onion_tunnel::message_codec::{
+    InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
+};
+use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, Peer, TunnelResult};
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -28,30 +28,32 @@ pub(super) struct InitiatorStateMachine {
     endpoint_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     listener_tx: Sender<IncomingEventMessage>,
     tunnel_id: TunnelId,
+    hops: Vec<Peer>,
 }
 
 // TODO fill fsm
 impl InitiatorStateMachine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        _hops: Vec<IntermediateHop>,
+        hops: Vec<Peer>,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
         frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
         socket: Arc<UdpSocket>,
-        target: SocketAddr,
-        _target_host_key: Vec<u8>,
         tunnel_id: TunnelId,
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
     ) -> Self {
+        assert!(!hops.is_empty());
+        let (next_hop, _) = hops.first().unwrap();
         InitiatorStateMachine {
             tunnel_result_tx: Some(tunnel_result_tx),
             event_tx,
             endpoint_codec: Arc::new(Mutex::new(Box::new(InitiatorEndpoint::new(
-                socket, target, frame_ids, tunnel_id,
+                socket, *next_hop, frame_ids, tunnel_id,
             )))),
             listener_tx,
             tunnel_id,
+            hops,
         }
     }
 }
@@ -351,36 +353,229 @@ pub(super) trait FiniteStateMachine {
     }
 }
 
+// used for moving FsmEvent and HandshakeEvent to one channel for initiator action_init
+enum InitiatorEvent {
+    Result(FsmEvent),
+    Data(HandshakeEvent),
+    FsmClosure,
+    HandshakeFsmClosure,
+}
+
 #[async_trait]
 impl FiniteStateMachine for InitiatorStateMachine {
     fn tunnel_id(&self) -> TunnelId {
         self.tunnel_id
     }
 
+    #[allow(clippy::single_match)]
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'start'
-        // TODO hops
         log::trace!(
             "Tunnel={:?}: Initialize the handshake protocol as an initiator",
             self.tunnel_id
         );
-        let mut handshake_fsm =
-            HandshakeStateMachine::<Client>::new(self.endpoint_codec.clone(), self.tunnel_id);
 
-        // create a channel for communicating with the handshake protocol
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
-        let tx_clone = event_tx.clone();
+        // prepare data for task
+        let codec = self.endpoint_codec.clone();
+        let tunnel_id = self.tunnel_id;
+        let peers = self.hops.clone();
+        let final_result_tx = self.event_tx.clone();
 
-        // run the handshake state machine async
-        let fsm_event_tx = self.event_tx.clone();
-        tokio::spawn(async move { handshake_fsm.run(event_rx, fsm_event_tx).await });
+        // create a channel used by the main FSM to communicate with the handshake fsm
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
 
-        // start via init
-        if tx_clone.send(HandshakeEvent::Init).await.is_err() {
-            Err(ProtocolError::HandshakeSendFailure)
-        } else {
-            Ok(State::Connecting(SenderWrapper { event_tx }))
-        }
+        // create a channel used for receiving all kind of events on one channel
+        let (writer, mut reader) = tokio::sync::mpsc::channel::<InitiatorEvent>(32);
+
+        // a task for hooking handshake events from the FSM which are addressed to the handshake fsm
+        let writer_clone = writer.clone();
+        tokio::spawn(async move {
+            log::trace!(
+                "Tunnel={:?}: Run the task listening for handshake events from the FSM",
+                tunnel_id
+            );
+            loop {
+                match event_rx.recv().await {
+                    None => {
+                        log::trace!("Tunnel={:?}: Received closure from FSM, send event to reader and terminate the task listening for handshake events from the FSM", tunnel_id);
+                        if writer_clone.send(InitiatorEvent::FsmClosure).await.is_err() {
+                            log::trace!("Tunnel={:?}: Cannot send FsmClosure, reader has been closed already", tunnel_id);
+                        }
+                        return;
+                    }
+                    Some(e) => {
+                        log::trace!("Tunnel={:?}: Received new handshake event from the FSM, transfer to reader", tunnel_id);
+                        if writer_clone.send(InitiatorEvent::Data(e)).await.is_err() {
+                            log::trace!("Tunnel={:?}: Cannot transfer handshake event, read has been closed already", tunnel_id);
+                        }
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            // codec is already initialized with the first hop, we have to update the codec after
+            // each handshake
+
+            // iterate over all hops and target peer
+            log::trace!(
+                "Tunnel={:?}: Iterate over all peers and establish the tunnel",
+                tunnel_id
+            );
+            for i in 0..peers.len() {
+                let current_peer = peers.get(i).unwrap();
+                let (target, next_hop) = match peers.get(i + 1) {
+                    None => (true, None),
+                    Some((addr, _)) => (false, Some(*addr)),
+                };
+                log::trace!(
+                    "Tunnel={:?}: current_peer={:?}, next_hop={:?}",
+                    tunnel_id,
+                    (*current_peer).0,
+                    next_hop
+                );
+
+                // create the handshake fsm for connecting to current_peer
+                let mut handshake_fsm =
+                    HandshakeStateMachine::<Client>::new(codec.clone(), tunnel_id, next_hop);
+
+                // create a channel for hooking the handshake results
+                let (hooked_result_tx, mut hooked_result_rx) = tokio::sync::mpsc::channel(32);
+
+                // create a channel for communicating with the specific handshake protocol
+                let (event_hooked_tx, event_hooked_rx) = tokio::sync::mpsc::channel(32);
+
+                // a task for hooking handshake events from the FSM which are addressed to the handshake fsm
+                let writer_clone = writer.clone();
+                tokio::spawn(async move {
+                    log::trace!(
+                        "Tunnel={:?}: Run the task listening for handshake results",
+                        tunnel_id
+                    );
+                    loop {
+                        match hooked_result_rx.recv().await {
+                            None => {
+                                log::trace!("Tunnel={:?}: Received closure from handshake FSM, send event to reader and terminate the task listening for handshake result", tunnel_id);
+                                if writer_clone
+                                    .send(InitiatorEvent::HandshakeFsmClosure)
+                                    .await
+                                    .is_err()
+                                {
+                                    log::trace!("Tunnel={:?}: Cannot send HandshakeFsmClosure, reader has been closed already", tunnel_id)
+                                }
+                                return;
+                            }
+                            Some(res) => {
+                                log::trace!("Tunnel={:?}: Result listener has received handshake_result={:?}", tunnel_id, res);
+                                if writer_clone
+                                    .send(InitiatorEvent::Result(res))
+                                    .await
+                                    .is_err()
+                                {
+                                    log::trace!("Tunnel={:?}: Terminate the task listening for handshake results due to sending error", tunnel_id);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // run the handshake fsm
+                tokio::spawn(async move {
+                    handshake_fsm
+                        .run(event_hooked_rx, hooked_result_tx.clone())
+                        .await
+                });
+
+                // send the init
+                if event_hooked_tx.send(HandshakeEvent::Init).await.is_err() {
+                    // cannot send data
+                    log::trace!(
+                        "Tunnel={:?}: Cannot start the handshake, send handshake failure to FSM",
+                        tunnel_id
+                    );
+                    let _ = final_result_tx
+                        .send(FsmEvent::HandshakeResult(Err(
+                            ProtocolError::HandshakeSendFailure,
+                        )))
+                        .await;
+                    return;
+                }
+
+                // wait for the result of the current handshake
+                loop {
+                    match reader.recv().await {
+                        None => {
+                            // here FSM and handshake FSM have failed, nothing more to do
+                            log::trace!("Tunnel={:?}: Cannot read from the handshake reader, transfer to reader", tunnel_id);
+                            return;
+                        }
+                        Some(e) => match e {
+                            InitiatorEvent::Result(res) => match res {
+                                FsmEvent::HandshakeResult(result) => {
+                                    match result {
+                                        Ok(_) => {
+                                            if target {
+                                                log::trace!("Tunnel={:?}: Received handshake_result=ok for the last hop", tunnel_id);
+                                                let _ = final_result_tx
+                                                    .send(FsmEvent::HandshakeResult(Ok(())))
+                                                    .await;
+                                                return;
+                                            } else {
+                                                log::trace!("Tunnel={:?}: Received handshake_result=ok for intermediate hop", tunnel_id);
+                                                // TODO update codec
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::trace!("Tunnel={:?}: Received handshake_result=err, transfer to FSM", tunnel_id);
+                                            let _ = final_result_tx
+                                                .send(FsmEvent::HandshakeResult(Err(e)))
+                                                .await;
+                                            return;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // never happening
+                                }
+                            },
+                            InitiatorEvent::Data(event) => {
+                                // delegate to handshake fsm
+                                log::trace!("Tunnel={:?}: Transfer hooked handshake event to the handshake FSM", tunnel_id);
+                                if event_hooked_tx.send(event).await.is_err() {
+                                    let _ = final_result_tx
+                                        .send(FsmEvent::HandshakeResult(Err(
+                                            ProtocolError::HandshakeSendFailure,
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            }
+                            InitiatorEvent::FsmClosure => {
+                                // FSM has been closed
+                                log::trace!(
+                                    "Tunnel={:?}: FSM closure, shutdown handshake",
+                                    tunnel_id
+                                );
+                                return;
+                            }
+                            InitiatorEvent::HandshakeFsmClosure => {
+                                // Handshake FSM failed without reply
+                                log::trace!(
+                                    "Tunnel={:?}: Handshake FSM closure, shutdown handshake",
+                                    tunnel_id
+                                );
+                                return;
+                            }
+                        },
+                    }
+                }
+            }
+        });
+
+        // return sender to the FSM, used for passing HandshakeEvents to the handshake FSM
+        Ok(State::Connecting(SenderWrapper { event_tx }))
     }
 
     async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
@@ -434,7 +629,7 @@ impl FiniteStateMachine for TargetStateMachine {
             self.tunnel_id
         );
         let mut handshake_fsm =
-            HandshakeStateMachine::<Server>::new(self.codec.clone(), self.tunnel_id);
+            HandshakeStateMachine::<Server>::new(self.codec.clone(), self.tunnel_id, None);
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);

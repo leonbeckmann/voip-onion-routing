@@ -193,7 +193,7 @@ fn integration_test() {
 
     // TEST: send data via non-existent tunnel
 
-    log::info!("TEST: Request TunnelBuild from Alice to non-existent peer 127.0.0.1:10000");
+    log::info!("TEST: Request TunnelData via non-existent tunnel");
     let tunnel_data = OnionTunnelData::new(20, "hello".as_bytes().to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
     let (hdr, data) = read_msg(&mut alice_api);

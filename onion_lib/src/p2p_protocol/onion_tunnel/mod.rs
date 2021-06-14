@@ -1,8 +1,7 @@
-pub mod fsm;
-
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Weak;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use tokio::net::UdpSocket;
 use tokio::sync::{
@@ -10,15 +9,17 @@ use tokio::sync::{
     oneshot, Mutex,
 };
 
-use crate::p2p_protocol::{ConnectionId, Direction, P2pError};
-
-use super::{FrameId, TunnelId};
 use crate::api_protocol::ApiInterface;
 use crate::p2p_protocol::onion_tunnel::fsm::{
     FiniteStateMachine, FsmEvent, InitiatorStateMachine, ProtocolError, TargetStateMachine,
 };
-use std::collections::HashSet;
-use std::sync::Weak;
+use crate::p2p_protocol::{ConnectionId, Direction, P2pError};
+
+use super::{FrameId, TunnelId};
+
+pub(crate) mod crypto;
+pub(crate) mod fsm;
+pub(crate) mod message_codec;
 
 pub(crate) const _RPS_QUERY: u16 = 540;
 pub(crate) const _RPS_PEER: u16 = 541;
@@ -43,7 +44,7 @@ enum IncomingEventMessage {
     IncomingData(Vec<u8>),
 }
 
-type IntermediateHop = (SocketAddr, Vec<u8>);
+pub(crate) type Peer = (SocketAddr, Vec<u8>);
 
 pub(crate) struct OnionTunnel {
     listeners: Arc<Mutex<HashSet<ConnectionId>>>, // all the api connection listeners
@@ -169,8 +170,11 @@ impl OnionTunnel {
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
         api_interface: Weak<ApiInterface>,
     ) -> TunnelId {
+        let mut hops: Vec<Peer> = vec![];
         // TODO select intermediate hops via rps module and hop count
-        let hops: Vec<IntermediateHop> = vec![];
+
+        // add target as last hop
+        hops.push((target, target_host_key));
 
         // create a channel for handing events to the fsm
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -188,8 +192,6 @@ impl OnionTunnel {
             tunnel_result_tx,
             frame_ids,
             socket,
-            target,
-            target_host_key,
             tunnel_id,
             mgmt_tx,
             event_tx.clone(),

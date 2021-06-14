@@ -4,6 +4,7 @@ use crate::p2p_protocol::messages::p2p_messages::{
     ApplicationData, ClientHello, Close, HandshakeData, RoutingInformation, ServerHello,
     TunnelFrame,
 };
+use crate::p2p_protocol::onion_tunnel::crypto::CryptoContext;
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
@@ -41,7 +42,7 @@ const APP_DATA: u8 = 1;
 const HANDSHAKE_DATA: u8 = 2;
 
 impl RawData {
-    // TODO assert data small enough
+    // TODO assert data small enough, else send multiple frames
     fn new(len: u16, message_type: u8, data: Vec<u8>) -> Self {
         let padding_len = len - (data.len() as u16) - 3;
         Self {
@@ -89,8 +90,6 @@ impl RawData {
 }
 
 type IV = Bytes;
-const DUMMY_IV: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-// TODO crypto context
 // TODO make closing procedure safe
 
 /**
@@ -140,6 +139,18 @@ pub trait P2pCodec {
      */
     fn set_backward_frame_id(&mut self, _id: FrameId) {
         log::warn!("Setting backward frame_id not supported for this codec");
+    }
+
+    /*
+     *  This method adds a crypto_context to the codec. It is not supported for the intermediate
+     *  hops impl, which inherits the context from the target_endpoint impl.
+     *
+     *  In case of the target_endpoint, only one crypto_context can be set, all others calls will be
+     *  ignored. In case of the initiator_endpoint, a list of crypto_contexts is provided, one
+     *  context per each hop inclusive the target.
+     */
+    fn add_crypto_context(&mut self, _cc: CryptoContext) {
+        log::warn!("Adding crypto context not supported for this codec");
     }
 }
 
@@ -191,8 +202,9 @@ pub(crate) struct InitiatorEndpoint {
     frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
     tunnel_id: TunnelId,
     forward_frame_id: FrameId, // frame id for forward packages
-    next_hop_backward_frame_id: FrameId,
+    next_hop_backward_frame_id: Option<FrameId>,
     own_frame_ids: Vec<(FrameId, Direction)>,
+    crypto_contexts: Vec<CryptoContext>,
 }
 
 impl InitiatorEndpoint {
@@ -207,9 +219,10 @@ impl InitiatorEndpoint {
             next_hop,
             frame_ids,
             tunnel_id,
-            forward_frame_id: 1,           // initialized for init client hello
-            next_hop_backward_frame_id: 0, // TODO used for client hellos to next hops
+            forward_frame_id: 1,              // initialized for init client hello
+            next_hop_backward_frame_id: None, // used for client hellos to next hops
             own_frame_ids: vec![],
+            crypto_contexts: vec![],
         }
     }
 }
@@ -227,6 +240,7 @@ pub(crate) struct TargetEndpoint {
     tunnel_id: TunnelId,
     backward_frame_id: FrameId, // frame id for backward packages
     own_frame_ids: Vec<(FrameId, Direction)>,
+    crypto_context: Option<CryptoContext>,
 }
 
 impl TargetEndpoint {
@@ -243,6 +257,7 @@ impl TargetEndpoint {
             tunnel_id,
             backward_frame_id: 0,
             own_frame_ids: vec![],
+            crypto_context: None,
         }
     }
 
@@ -270,7 +285,7 @@ impl Drop for TargetEndpoint {
     }
 }
 
-pub(crate) struct IntermediateHop {
+pub(crate) struct IntermediateHopCodec {
     socket: Arc<UdpSocket>,
     next_hop: SocketAddr,
     prev_hop: SocketAddr,
@@ -279,11 +294,12 @@ pub(crate) struct IntermediateHop {
     forward_frame_id: FrameId,  // frame id for forward packages
     backward_frame_id: FrameId, // frame id for backward packages
     own_frame_ids: Vec<(FrameId, Direction)>,
+    crypto_context: CryptoContext,
 }
 
 // make target to intermediate
-impl IntermediateHop {
-    pub fn from(target: &TargetEndpoint, next_hop: SocketAddr) -> Self {
+impl IntermediateHopCodec {
+    pub fn from(target: &mut TargetEndpoint, next_hop: SocketAddr) -> Self {
         Self {
             socket: target.socket.clone(),
             next_hop,
@@ -293,11 +309,12 @@ impl IntermediateHop {
             forward_frame_id: 1,
             backward_frame_id: target.backward_frame_id,
             own_frame_ids: target.own_frame_ids.to_owned(),
+            crypto_context: target.crypto_context.take().unwrap(),
         }
     }
 }
 
-impl Drop for IntermediateHop {
+impl Drop for IntermediateHopCodec {
     fn drop(&mut self) {
         cleanup_frames(self.frame_ids.clone(), &self.own_frame_ids);
     }
@@ -308,39 +325,79 @@ impl P2pCodec for InitiatorEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
         frame.set_frameId(self.forward_frame_id);
-        frame.set_iv(Bytes::from(DUMMY_IV.as_ref()));
+        let iv = if let Some(cc) = self.crypto_contexts.first() {
+            let iv = cc.get_iv();
+            frame.set_iv(Bytes::copy_from_slice(iv.as_ref()));
+            Some(iv)
+        } else {
+            None
+        };
 
         let ready_bytes = match data {
             DataType::AppData(data) => {
                 let mut app_data = ApplicationData::new();
                 app_data.set_data(Bytes::from(data));
                 let data = app_data.write_to_bytes().unwrap();
-                let raw_data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
-                // TODO encrypt via iv and keys
-                raw_data
+                let mut data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
+                // encrypt via iv and keys using the crypto contexts
+                assert!(iv.is_some());
+                if let Some(iv) = iv {
+                    // at least one cc available, use same iv for all encryption with different keys
+                    for cc in self.crypto_contexts.iter().rev() {
+                        data = cc.encrypt(data.as_ref(), iv.as_ref());
+                    }
+                }
+                data
             }
             DataType::ClientHello(mut client_hello) => {
                 // calculate frame_id
-                let new_id =
-                    new_frame_id(self.tunnel_id, Direction::Backward, self.frame_ids.clone()).await;
-                self.own_frame_ids.push((new_id, Direction::Backward));
-                client_hello.set_backwardFrameId(new_id);
+                let id = match self.next_hop_backward_frame_id {
+                    None => {
+                        // this handshake is to the direct successor, we have to provide our own backward id
+                        let new_id = new_frame_id(
+                            self.tunnel_id,
+                            Direction::Backward,
+                            self.frame_ids.clone(),
+                        )
+                        .await;
+                        self.own_frame_ids.push((new_id, Direction::Backward));
+                        new_id
+                    }
+                    Some(id) => {
+                        // this handshake is not to the direct successor, provide backward id of other hop
+                        id
+                    }
+                };
+                client_hello.set_backwardFrameId(id);
 
                 // prepare frame
                 let mut handshake = HandshakeData::new();
                 handshake.set_clientHello(client_hello);
                 let data = handshake.write_to_bytes().unwrap();
-                let raw_data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
-                // TODO encrypt via iv and keys
-                raw_data
+                let mut data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
+                // encrypt via iv and keys using the crypto contexts
+                if let Some(iv) = iv {
+                    // at least one cc available, use same iv for all encryption with different keys
+                    for cc in self.crypto_contexts.iter().rev() {
+                        data = cc.encrypt(data.as_ref(), iv.as_ref());
+                    }
+                }
+                data
             }
             DataType::RoutingInformation(data) => {
                 let mut handshake = HandshakeData::new();
                 handshake.set_routing(data);
                 let data = handshake.write_to_bytes().unwrap();
-                let raw_data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
-                // TODO encrypt via iv and keys
-                raw_data
+                let mut data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
+                // encrypt via iv and keys using the crypto contexts
+                assert!(iv.is_some());
+                if let Some(iv) = iv {
+                    // at least one cc available, use same iv for all encryption with different keys
+                    for cc in self.crypto_contexts.iter().rev() {
+                        data = cc.encrypt(data.as_ref(), iv.as_ref());
+                    }
+                }
+                data
             }
             _ => {
                 log::warn!("Invalid write action in initiator codec");
@@ -366,11 +423,18 @@ impl P2pCodec for InitiatorEndpoint {
         &mut self,
         _d: Direction,
         data: Bytes,
-        _iv: IV,
+        iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
         // expected incoming data or incoming handshake, process and return
-        // TODO decrypt using keys and iv
-        let raw_data = RawData::deserialize(data.as_ref())?;
+
+        // decrypt from next hop to target using iv and cc
+        let mut dec_data = data.to_vec();
+        for cc in self.crypto_contexts.iter() {
+            dec_data = cc.decrypt(data.as_ref(), iv.as_ref());
+        }
+
+        // deserialize data
+        let raw_data = RawData::deserialize(dec_data.as_ref())?;
         match raw_data.message_type {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
                 Ok(data) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
@@ -404,7 +468,11 @@ impl P2pCodec for InitiatorEndpoint {
     }
 
     fn set_backward_frame_id(&mut self, id: FrameId) {
-        self.next_hop_backward_frame_id = id;
+        self.next_hop_backward_frame_id = Some(id);
+    }
+
+    fn add_crypto_context(&mut self, cc: CryptoContext) {
+        self.crypto_contexts.push(cc)
     }
 }
 
@@ -413,16 +481,30 @@ impl P2pCodec for TargetEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
         frame.set_frameId(self.backward_frame_id);
-        frame.set_iv(Bytes::from(DUMMY_IV.as_ref()));
+        let iv = if let Some(cc) = &self.crypto_context {
+            let iv = cc.get_iv();
+            frame.set_iv(Bytes::copy_from_slice(iv.as_ref()));
+            Some(iv)
+        } else {
+            None
+        };
 
         let ready_bytes = match data {
             DataType::AppData(data) => {
                 let mut app_data = ApplicationData::new();
                 app_data.set_data(Bytes::from(data));
                 let data = app_data.write_to_bytes().unwrap();
-                let raw_data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
-                // TODO encrypt via iv and keys
-                raw_data
+                let mut data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
+                // encrypt via iv and key
+                assert!(iv.is_some() && self.crypto_context.is_some());
+                if let Some(iv) = iv {
+                    data = self
+                        .crypto_context
+                        .as_ref()
+                        .unwrap()
+                        .encrypt(data.as_ref(), iv.as_ref());
+                }
+                data
             }
             DataType::ServerHello(mut server_hello) => {
                 // calculate frame_ids
@@ -467,11 +549,16 @@ impl P2pCodec for TargetEndpoint {
         &mut self,
         _d: Direction,
         data: Bytes,
-        _iv: IV,
+        iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
         // expect incoming data, handshake or encrypted handshake, process and return
-        // TODO how to notice in an efficient way if we are expecting encrypted data? maybe from FSM?
-        // TODO decrypt using keys and iv
+
+        // if the crypto_context has already been set, we expect encrypted data
+        let mut data = data.to_vec();
+        if let Some(cc) = &self.crypto_context {
+            // decrypt using keys and iv
+            data = cc.decrypt(data.as_ref(), iv.as_ref());
+        }
         let raw_data = RawData::deserialize(data.as_ref())?;
         match raw_data.message_type {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
@@ -499,10 +586,16 @@ impl P2pCodec for TargetEndpoint {
     fn set_backward_frame_id(&mut self, id: FrameId) {
         self.backward_frame_id = id;
     }
+
+    fn add_crypto_context(&mut self, cc: CryptoContext) {
+        if self.crypto_context.is_none() {
+            self.crypto_context = Some(cc);
+        }
+    }
 }
 
 #[async_trait]
-impl P2pCodec for IntermediateHop {
+impl P2pCodec for IntermediateHopCodec {
     async fn write(&mut self, _data: DataType) -> Result<(), ProtocolError> {
         log::warn!("Invalid write action in intermediate_hop codec");
         return Err(ProtocolError::CodecUnsupportedAction);
@@ -540,23 +633,23 @@ impl P2pCodec for IntermediateHop {
 
         // expect incoming data backward or forward, apply encryption or decryption and delegate to next hop
         let mut frame = TunnelFrame::new();
-        frame.set_iv(iv);
-        let (frame, addr) = match d {
+        let (mut frame, addr) = match d {
             Direction::Forward => {
-                // TODO decrypt using iv and key
-                let decrypted_data = data;
+                // decrypt using iv and key
+                let decrypted_data = self.crypto_context.decrypt(data.as_ref(), iv.as_ref());
                 frame.set_frameId(self.forward_frame_id);
-                frame.set_data(decrypted_data);
+                frame.set_data(Bytes::from(decrypted_data));
                 (frame, self.next_hop)
             }
             Direction::Backward => {
-                // TODO encrypt using iv and key
-                let encrypted_data = data;
+                // encrypt using iv and key
+                let encrypted_data = self.crypto_context.encrypt(data.as_ref(), iv.as_ref());
                 frame.set_frameId(self.backward_frame_id);
-                frame.set_data(encrypted_data);
+                frame.set_data(Bytes::from(encrypted_data));
                 (frame, self.prev_hop)
             }
         };
+        frame.set_iv(iv);
 
         let data = frame.write_to_bytes().unwrap();
 

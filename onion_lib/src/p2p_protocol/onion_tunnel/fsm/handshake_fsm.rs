@@ -1,9 +1,11 @@
-use crate::p2p_protocol::messages::message_codec::{
-    DataType, IntermediateHop, P2pCodec, TargetEndpoint,
-};
 use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, ServerHello};
+use crate::p2p_protocol::onion_tunnel::crypto::CryptoContext;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
+use crate::p2p_protocol::onion_tunnel::message_codec::{
+    DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
+};
 use crate::p2p_protocol::TunnelId;
+use bytes::Bytes;
 use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
@@ -50,14 +52,20 @@ pub struct HandshakeStateMachine<PT> {
     _phantom: PhantomData<PT>,
     message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     tunnel_id: TunnelId,
+    next_hop: Option<SocketAddr>,
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
-    pub fn new(message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>, tunnel_id: TunnelId) -> Self {
+    pub fn new(
+        message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
+        tunnel_id: TunnelId,
+        next_hop: Option<SocketAddr>,
+    ) -> Self {
         Self {
             _phantom: Default::default(),
             message_codec,
             tunnel_id,
+            next_hop,
         }
     }
 
@@ -93,7 +101,12 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // create server hello and give it to message_codec
         let server_hello = ServerHello::new();
-        // TODO fill server_hello
+        // TODO fill server_hello with information for secure key exchange
+
+        // TODO crate cc with key and cipher
+        let cc = CryptoContext::new();
+        codec.add_crypto_context(cc);
+
         log::trace!(
             "Tunnel{:?}: Send ServerHello={:?} via message codec",
             self.tunnel_id,
@@ -116,13 +129,33 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             self.tunnel_id,
             data
         );
+
+        // TODO create crypto context based on secure key exchange
+        let cc = CryptoContext::new();
+
         codec.set_forward_frame_id(data.forwardFrameId);
         codec.set_backward_frame_id(data.backwardFrameId);
+        codec.add_crypto_context(cc);
 
         // create routing information and give it to message_codec
         let mut data = RoutingInformation::new();
-        data.set_isEndpoint(true);
-        // TODO routing information to next hop
+        match self.next_hop {
+            None => {
+                data.set_isEndpoint(true);
+            }
+            Some(addr) => {
+                data.set_isEndpoint(false);
+                data.set_nextHopPort(addr.port() as u32);
+                match addr.ip() {
+                    IpAddr::V4(ip) => {
+                        data.set_nextHopAddr(Bytes::from(ip.octets().to_vec()));
+                    }
+                    IpAddr::V6(ip) => {
+                        data.set_nextHopAddr(Bytes::from(ip.octets().to_vec()));
+                    }
+                };
+            }
+        }
         log::trace!(
             "Tunnel{:?}: Send RoutingInformation={:?} via message codec",
             self.tunnel_id,
@@ -196,7 +229,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 self.tunnel_id,
                 addr
             );
-            let new_codec = Box::new(IntermediateHop::from(target_endpoint, addr));
+            let new_codec = Box::new(IntermediateHopCodec::from(target_endpoint, addr));
             *codec_guard = new_codec;
 
             Ok(())
@@ -233,6 +266,10 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 },
                 Err(_) => {
                     // timeout occurred
+                    log::trace!(
+                        "Tunnel={:?}: Send handshake_result=Err(timeout)",
+                        self.tunnel_id
+                    );
                     let _ = event_tx
                         .send(FsmEvent::HandshakeResult(Err(
                             ProtocolError::HandshakeTimeout,
@@ -279,6 +316,10 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                     HandshakeEvent::ServerHello(data) => {
                         match self.action_recv_server_hello(data).await {
                             Ok(_) => {
+                                log::trace!(
+                                    "Tunnel={:?}: Send handshake_result=ok",
+                                    self.tunnel_id
+                                );
                                 let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(()))).await;
                                 return;
                             }
@@ -299,6 +340,10 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                     HandshakeEvent::RoutingInformation(data) => {
                         match self.action_recv_routing(data).await {
                             Ok(_) => {
+                                log::trace!(
+                                    "Tunnel={:?}: Send handshake_result=ok",
+                                    self.tunnel_id
+                                );
                                 let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(()))).await;
                                 return;
                             }
