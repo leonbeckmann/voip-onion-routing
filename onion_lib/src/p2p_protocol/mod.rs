@@ -1,5 +1,6 @@
 mod messages;
 mod onion_tunnel;
+pub mod rps_api;
 
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;

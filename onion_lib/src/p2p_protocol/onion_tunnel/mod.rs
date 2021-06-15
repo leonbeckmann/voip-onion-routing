@@ -16,13 +16,11 @@ use crate::p2p_protocol::onion_tunnel::fsm::{
 use crate::p2p_protocol::{ConnectionId, Direction, P2pError};
 
 use super::{FrameId, TunnelId};
+use crate::p2p_protocol::rps_api::rps_get_peer;
 
 pub(crate) mod crypto;
 pub(crate) mod fsm;
 pub(crate) mod message_codec;
-
-pub(crate) const _RPS_QUERY: u16 = 540;
-pub(crate) const _RPS_PEER: u16 = 541;
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 fn get_id() -> u32 {
@@ -165,13 +163,18 @@ impl OnionTunnel {
         target: SocketAddr,
         target_host_key: Vec<u8>,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
-        _hop_count: u8,
-        _rps_api_address: SocketAddr,
+        hop_count: u8,
+        rps_api_address: SocketAddr,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
         api_interface: Weak<ApiInterface>,
     ) -> TunnelId {
+        // select intermediate hops via rps module and hop count
         let mut hops: Vec<Peer> = vec![];
-        // TODO select intermediate hops via rps module and hop count
+        for _ in 0..hop_count {
+            // TODO catch error
+            let peer = rps_get_peer(rps_api_address).await.unwrap();
+            hops.push(peer);
+        }
 
         // add target as last hop
         hops.push((target, target_host_key));

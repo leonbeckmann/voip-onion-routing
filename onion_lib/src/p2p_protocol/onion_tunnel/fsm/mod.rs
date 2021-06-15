@@ -452,29 +452,29 @@ impl FiniteStateMachine for InitiatorStateMachine {
                         "Tunnel={:?}: Run the task listening for handshake results",
                         tunnel_id
                     );
-                    loop {
-                        match hooked_result_rx.recv().await {
-                            None => {
-                                log::trace!("Tunnel={:?}: Received closure from handshake FSM, send event to reader and terminate the task listening for handshake result", tunnel_id);
-                                if writer_clone
-                                    .send(InitiatorEvent::HandshakeFsmClosure)
-                                    .await
-                                    .is_err()
-                                {
-                                    log::trace!("Tunnel={:?}: Cannot send HandshakeFsmClosure, reader has been closed already", tunnel_id)
-                                }
-                                return;
+                    match hooked_result_rx.recv().await {
+                        None => {
+                            log::trace!("Tunnel={:?}: Received closure from handshake FSM, send event to reader and terminate the task listening for handshake result", tunnel_id);
+                            if writer_clone
+                                .send(InitiatorEvent::HandshakeFsmClosure)
+                                .await
+                                .is_err()
+                            {
+                                log::trace!("Tunnel={:?}: Cannot send HandshakeFsmClosure, reader has been closed already", tunnel_id)
                             }
-                            Some(res) => {
-                                log::trace!("Tunnel={:?}: Result listener has received handshake_result={:?}", tunnel_id, res);
-                                if writer_clone
-                                    .send(InitiatorEvent::Result(res))
-                                    .await
-                                    .is_err()
-                                {
-                                    log::trace!("Tunnel={:?}: Terminate the task listening for handshake results due to sending error", tunnel_id);
-                                    return;
-                                }
+                        }
+                        Some(res) => {
+                            log::trace!(
+                                "Tunnel={:?}: Result listener has received handshake_result={:?}",
+                                tunnel_id,
+                                res
+                            );
+                            if writer_clone
+                                .send(InitiatorEvent::Result(res))
+                                .await
+                                .is_err()
+                            {
+                                log::trace!("Tunnel={:?}: Terminate the task listening for handshake results due to sending error", tunnel_id);
                             }
                         }
                     }
@@ -512,30 +512,27 @@ impl FiniteStateMachine for InitiatorStateMachine {
                         }
                         Some(e) => match e {
                             InitiatorEvent::Result(res) => match res {
-                                FsmEvent::HandshakeResult(result) => {
-                                    match result {
-                                        Ok(_) => {
-                                            if target {
-                                                log::trace!("Tunnel={:?}: Received handshake_result=ok for the last hop", tunnel_id);
-                                                let _ = final_result_tx
-                                                    .send(FsmEvent::HandshakeResult(Ok(())))
-                                                    .await;
-                                                return;
-                                            } else {
-                                                log::trace!("Tunnel={:?}: Received handshake_result=ok for intermediate hop", tunnel_id);
-                                                // TODO update codec
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            log::trace!("Tunnel={:?}: Received handshake_result=err, transfer to FSM", tunnel_id);
+                                FsmEvent::HandshakeResult(result) => match result {
+                                    Ok(_) => {
+                                        if target {
+                                            log::trace!("Tunnel={:?}: Received handshake_result=ok for the last hop", tunnel_id);
                                             let _ = final_result_tx
-                                                .send(FsmEvent::HandshakeResult(Err(e)))
+                                                .send(FsmEvent::HandshakeResult(Ok(())))
                                                 .await;
                                             return;
+                                        } else {
+                                            log::trace!("Tunnel={:?}: Received handshake_result=ok for intermediate hop", tunnel_id);
+                                            break;
                                         }
                                     }
-                                }
+                                    Err(e) => {
+                                        log::trace!("Tunnel={:?}: Received handshake_result=err, transfer to FSM", tunnel_id);
+                                        let _ = final_result_tx
+                                            .send(FsmEvent::HandshakeResult(Err(e)))
+                                            .await;
+                                        return;
+                                    }
+                                },
                                 _ => {
                                     // never happening
                                 }

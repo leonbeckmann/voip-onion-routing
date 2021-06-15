@@ -1,6 +1,6 @@
 pub mod api_protocol;
 mod config_parser;
-mod p2p_protocol;
+pub mod p2p_protocol;
 
 use std::path::Path;
 

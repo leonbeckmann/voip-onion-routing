@@ -7,7 +7,7 @@ use openssl::rsa::Rsa;
 use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{IpAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread::sleep;
 use std::time::Duration;
 use tempdir::TempDir;
@@ -16,6 +16,8 @@ use onion_lib::api_protocol::messages::{
     OnionError, OnionMessageHeader, OnionTunnelBuild, OnionTunnelData, OnionTunnelDestroy,
     OnionTunnelIncoming, OnionTunnelReady,
 };
+use onion_lib::p2p_protocol::rps_api::{RpsPeer, ONION_PORT, RPS_PEER, RPS_QUERY};
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -98,21 +100,83 @@ fn write_msg(msg_type: u16, data: Vec<u8>, stream: &mut TcpStream) {
     stream.write_all(data.as_slice()).unwrap();
 }
 
+fn run_rps_api(
+    addr: SocketAddr,
+    port_hop1: u16,
+    port_hop2: u16,
+    key_hop1: Vec<u8>,
+    key_hop2: Vec<u8>,
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(addr)?;
+
+    let ip = IpAddr::from_str("127.0.0.1").unwrap();
+    let port = 1234;
+    let mut port_map_hop1 = HashMap::new();
+    port_map_hop1.insert(ONION_PORT, port_hop1);
+    let mut port_map_hop2 = HashMap::new();
+    port_map_hop2.insert(ONION_PORT, port_hop2);
+
+    let hop1 = RpsPeer::new(ip.clone(), port, port_map_hop1, key_hop1);
+    let hop2 = RpsPeer::new(ip, port, port_map_hop2, key_hop2);
+
+    let hops = vec![hop1, hop2];
+
+    std::thread::spawn(move || {
+        let mut next_peer = 0;
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    let mut buf = [0u8; OnionMessageHeader::hdr_size()];
+                    stream.read_exact(&mut buf).unwrap();
+
+                    // parse buf the onion_msg_hdr
+                    let hdr = OnionMessageHeader::from(&buf);
+
+                    if hdr.msg_type != RPS_QUERY {
+                        continue;
+                    }
+
+                    let peer_raw = hops.get(next_peer).unwrap().to_be_vec();
+                    let hdr = OnionMessageHeader::new(
+                        (peer_raw.len() + OnionMessageHeader::hdr_size()) as u16,
+                        RPS_PEER,
+                    )
+                    .to_be_vec();
+
+                    stream.write_all(hdr.as_ref()).unwrap();
+                    stream.write_all(peer_raw.as_ref()).unwrap();
+
+                    next_peer = (next_peer + 1) % 2;
+                }
+                Err(_) => {
+                    return;
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 #[test]
 fn integration_test() {
     // enable logging
-    env::set_var("RUST_LOG", "trace");
+    env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     log::info!("Starting integration test");
 
-    // run alice and bob
+    // run alice and bob and hopa
     let dir = TempDir::new("onion-test").unwrap();
 
     let config_file_alice = dir.path().join("alice.config");
     let key_file_alice = dir.path().join("alice.key");
     let config_file_bob = dir.path().join("bob.config");
     let key_file_bob = dir.path().join("bob.key");
+    let config_file_hop1 = dir.path().join("hop1.config");
+    let key_file_hop1 = dir.path().join("hop1.key");
+    let config_file_hop2 = dir.path().join("hop2.config");
+    let key_file_hop2 = dir.path().join("hop2.key");
 
     // create RSA keys
     let alice_key = Rsa::generate(4096).unwrap();
@@ -120,6 +184,12 @@ fn integration_test() {
 
     let bob_key = Rsa::generate(4096).unwrap();
     let bob_pub_pem = bob_key.public_key_to_pem().unwrap();
+
+    let hop1_key = Rsa::generate(4096).unwrap();
+    let hop1_pub_pem = hop1_key.public_key_to_pem().unwrap();
+
+    let hop2_key = Rsa::generate(4096).unwrap();
+    let hop2_pub_pem = hop2_key.public_key_to_pem().unwrap();
 
     log::info!("TEST: Starting peer alice ..");
     run_peer(
@@ -139,6 +209,26 @@ fn integration_test() {
         config_file_bob,
         &key_file_bob,
         bob_pub_pem,
+    );
+
+    log::info!("TEST: Starting peer hop1 ..");
+    run_peer(
+        "4001",
+        "127.0.0.1:4002",
+        "127.0.0.1:4003",
+        config_file_hop1,
+        &key_file_hop1,
+        hop1_pub_pem,
+    );
+
+    log::info!("TEST: Starting peer hop2 ..");
+    run_peer(
+        "5001",
+        "127.0.0.1:5002",
+        "127.0.0.1:5003",
+        config_file_hop2,
+        &key_file_hop2,
+        hop2_pub_pem,
     );
 
     // connect to alice from CM/CI
@@ -166,6 +256,18 @@ fn integration_test() {
     // get keys from Alice and Bob
     let _alice_host_key_der = alice_key.public_key_to_der().unwrap();
     let bob_host_key_der = bob_key.public_key_to_der().unwrap();
+    let hop1_host_key_der = hop1_key.public_key_to_der().unwrap();
+    let hop2_host_key_der = hop2_key.public_key_to_der().unwrap();
+
+    // run rps api
+    run_rps_api(
+        SocketAddr::from_str("127.0.0.1:2003").unwrap(),
+        4001,
+        5001,
+        hop1_host_key_der,
+        hop2_host_key_der,
+    )
+    .unwrap();
 
     // TEST: destroy non-existent tunnel id
 
