@@ -6,7 +6,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
-    oneshot, Mutex,
+    oneshot, Mutex, Notify,
 };
 
 use openssl::sha;
@@ -34,6 +34,13 @@ pub enum TunnelResult {
     Failure(ProtocolError),
 }
 
+#[derive(PartialEq)]
+pub enum FsmLockState {
+    HandshakeDone,
+    Processing,
+    WaitForEvent,
+}
+
 /*
  *  An enum send by the FSM to the tunnel via an mpsc channel. IncomingData will be passed to the
  *  user. IncomingTunnelCompletion signals the tunnel mgmt layer that the tunnel is connected and
@@ -52,10 +59,12 @@ pub(crate) struct OnionTunnel {
     event_tx: Sender<FsmEvent>,                   // sending events to the fsm
     tunnel_id: TunnelId,                          // unique tunnel id
     tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // tunnel registry for tunnel mgmt
+    fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
 }
 
 // TODO private keys
 impl OnionTunnel {
+    #[allow(clippy::too_many_arguments)]
     async fn new_tunnel(
         listeners: Arc<Mutex<HashSet<ConnectionId>>>,
         listeners_available: Arc<Mutex<bool>>,
@@ -64,6 +73,7 @@ impl OnionTunnel {
         tunnel_id: TunnelId,
         mut mgmt_rx: Receiver<IncomingEventMessage>,
         api_interface: Weak<ApiInterface>,
+        fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     ) {
         // clone the sender for init
         let event_tx_clone = event_tx.clone();
@@ -74,6 +84,7 @@ impl OnionTunnel {
             event_tx,
             tunnel_id,
             tunnel_registry: tunnel_registry.clone(),
+            fsm_lock,
         };
 
         // start management task that manages tunnel cleanup and listener notification
@@ -205,6 +216,7 @@ impl OnionTunnel {
         log::debug!("Create new initiator tunnel with new ID={:?}", tunnel_id);
 
         // create initiator FSM
+        let fsm_lock = Arc::new((Mutex::new(FsmLockState::WaitForEvent), Notify::new()));
         let mut fsm = InitiatorStateMachine::new(
             hops,
             tunnel_result_tx,
@@ -213,6 +225,7 @@ impl OnionTunnel {
             tunnel_id,
             mgmt_tx,
             event_tx.clone(),
+            fsm_lock.clone(),
         );
 
         // run the fsm
@@ -235,6 +248,7 @@ impl OnionTunnel {
             tunnel_id,
             mgmt_rx,
             api_interface,
+            fsm_lock,
         )
         .await;
         tunnel_id
@@ -261,6 +275,7 @@ impl OnionTunnel {
         log::debug!("Create new target tunnel with new ID={:?}", tunnel_id);
 
         // create target FSM
+        let fsm_lock = Arc::new((Mutex::new(FsmLockState::WaitForEvent), Notify::new()));
         let mut fsm = TargetStateMachine::new(
             frame_ids,
             socket,
@@ -268,6 +283,7 @@ impl OnionTunnel {
             tunnel_id,
             mgmt_tx,
             event_tx.clone(),
+            fsm_lock.clone(),
         );
 
         // run the fsm
@@ -283,6 +299,7 @@ impl OnionTunnel {
             tunnel_id,
             mgmt_rx,
             api_interface,
+            fsm_lock,
         )
         .await;
         tunnel_id
@@ -293,6 +310,21 @@ impl OnionTunnel {
     }
 
     pub(crate) async fn forward_event(&self, e: FsmEvent) -> Result<(), P2pError> {
+        // we have to ensure that we do not send messages to the fsm until the previous message has been processed
+        // otherwise there would be a race condition when the ClientHello of the next hop is available
+        // before the handshake_result has been sent to the FSM
+        // once the fsm_lock_state is HandshakeDone, there is no race condition anymore
+        let (lock, notifier) = &*self.fsm_lock;
+        let mut state = lock.lock().await;
+        while *state == FsmLockState::Processing {
+            // this is allowed since if notify is called before notified().await, the permit is stored
+            drop(state);
+            notifier.notified().await;
+            state = lock.lock().await;
+        }
+        if *state == FsmLockState::WaitForEvent {
+            *state = FsmLockState::Processing;
+        }
         log::trace!(
             "Tunnel={:?}: Forward event=({:?}) to FSM",
             self.tunnel_id,

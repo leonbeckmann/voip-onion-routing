@@ -8,7 +8,7 @@ use crate::p2p_protocol::onion_tunnel::message_codec::DataType::AppData;
 use crate::p2p_protocol::onion_tunnel::message_codec::{
     InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
 };
-use crate::p2p_protocol::onion_tunnel::{IncomingEventMessage, Peer, TunnelResult};
+use crate::p2p_protocol::onion_tunnel::{FsmLockState, IncomingEventMessage, Peer, TunnelResult};
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, Notify};
 
 type IV = Bytes;
 
@@ -29,6 +29,7 @@ pub(super) struct InitiatorStateMachine {
     listener_tx: Sender<IncomingEventMessage>,
     tunnel_id: TunnelId,
     hops: Vec<Peer>,
+    fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
 }
 
 impl InitiatorStateMachine {
@@ -41,6 +42,7 @@ impl InitiatorStateMachine {
         tunnel_id: TunnelId,
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
+        fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     ) -> Self {
         assert!(!hops.is_empty());
         let (next_hop, _) = hops.first().unwrap();
@@ -53,6 +55,7 @@ impl InitiatorStateMachine {
             listener_tx,
             tunnel_id,
             hops,
+            fsm_lock,
         }
     }
 }
@@ -62,6 +65,7 @@ pub(super) struct TargetStateMachine {
     event_tx: Sender<FsmEvent>, // only for cloning purpose to pass the sender to the handshake fsm
     codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     tunnel_id: TunnelId,
+    fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
 }
 
 impl TargetStateMachine {
@@ -72,6 +76,7 @@ impl TargetStateMachine {
         tunnel_id: TunnelId,
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
+        fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     ) -> Self {
         TargetStateMachine {
             listener_tx,
@@ -80,8 +85,16 @@ impl TargetStateMachine {
                 socket, source, frame_ids, tunnel_id,
             )))),
             tunnel_id,
+            fsm_lock,
         }
     }
+}
+
+async fn free_fsm_lock(fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>) {
+    let (lock, notifier) = &*fsm_lock;
+    let mut state = lock.lock().await;
+    *state = FsmLockState::HandshakeDone;
+    notifier.notify_one();
 }
 
 #[async_trait]
@@ -391,6 +404,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
         let tunnel_id = self.tunnel_id;
         let peers = self.hops.clone();
         let final_result_tx = self.event_tx.clone();
+        let fsm_lock = self.fsm_lock.clone();
 
         // create a channel used by the main FSM to communicate with the handshake fsm
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
@@ -447,8 +461,12 @@ impl FiniteStateMachine for InitiatorStateMachine {
                 );
 
                 // create the handshake fsm for connecting to current_peer
-                let mut handshake_fsm =
-                    HandshakeStateMachine::<Client>::new(codec.clone(), tunnel_id, next_hop);
+                let mut handshake_fsm = HandshakeStateMachine::<Client>::new(
+                    codec.clone(),
+                    tunnel_id,
+                    next_hop,
+                    fsm_lock.clone(),
+                );
 
                 // create a channel for hooking the handshake results
                 let (hooked_result_tx, mut hooked_result_rx) = tokio::sync::mpsc::channel(32);
@@ -601,7 +619,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
         res: Result<IsTargetEndpoint, ProtocolError>,
     ) -> Result<State, ProtocolError> {
         let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
-        match res {
+        let res = match res {
             Ok(_) => {
                 log::debug!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 let _ = tunnel_result_tx.send(TunnelResult::Connected);
@@ -612,7 +630,9 @@ impl FiniteStateMachine for InitiatorStateMachine {
                 let _ = tunnel_result_tx.send(TunnelResult::Failure(e.clone()));
                 Err(e)
             }
-        }
+        };
+        free_fsm_lock(self.fsm_lock.clone()).await;
+        res
     }
 
     fn get_listener(&mut self) -> Sender<IncomingEventMessage> {
@@ -636,8 +656,12 @@ impl FiniteStateMachine for TargetStateMachine {
             "Tunnel={:?}: Initialize the handshake protocol as a non-initiator",
             self.tunnel_id
         );
-        let mut handshake_fsm =
-            HandshakeStateMachine::<Server>::new(self.codec.clone(), self.tunnel_id, None);
+        let mut handshake_fsm = HandshakeStateMachine::<Server>::new(
+            self.codec.clone(),
+            self.tunnel_id,
+            None,
+            self.fsm_lock.clone(),
+        );
 
         // create a channel for communicating with the handshake protocol
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -663,7 +687,7 @@ impl FiniteStateMachine for TargetStateMachine {
         &mut self,
         res: Result<IsTargetEndpoint, ProtocolError>,
     ) -> Result<State, ProtocolError> {
-        match res {
+        let res = match res {
             Ok(is_target_endpoint) => {
                 log::debug!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 if is_target_endpoint {
@@ -678,7 +702,9 @@ impl FiniteStateMachine for TargetStateMachine {
                 log::warn!("Tunnel={:?}: Handshake failure: {:?}", self.tunnel_id, e);
                 Err(e)
             }
-        }
+        };
+        free_fsm_lock(self.fsm_lock.clone()).await;
+        res
     }
 
     fn get_listener(&mut self) -> Sender<IncomingEventMessage> {

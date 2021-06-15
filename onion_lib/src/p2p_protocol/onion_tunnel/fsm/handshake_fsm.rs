@@ -4,6 +4,7 @@ use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, Protoco
 use crate::p2p_protocol::onion_tunnel::message_codec::{
     DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
 };
+use crate::p2p_protocol::onion_tunnel::FsmLockState;
 use crate::p2p_protocol::TunnelId;
 use bytes::Bytes;
 use std::convert::{TryFrom, TryInto};
@@ -12,7 +13,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::timeout;
 
 pub(super) struct Client;
@@ -51,6 +52,7 @@ pub struct HandshakeStateMachine<PT> {
     message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     tunnel_id: TunnelId,
     next_hop: Option<SocketAddr>,
+    fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
@@ -58,13 +60,24 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
         tunnel_id: TunnelId,
         next_hop: Option<SocketAddr>,
+        fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     ) -> Self {
         Self {
             _phantom: Default::default(),
             message_codec,
             tunnel_id,
             next_hop,
+            fsm_lock,
         }
+    }
+
+    pub async fn free_fsm_lock(&self) {
+        let (lock, notifier) = &*self.fsm_lock;
+        let mut state = lock.lock().await;
+        if *state == FsmLockState::Processing {
+            *state = FsmLockState::WaitForEvent;
+        }
+        notifier.notify_one();
     }
 
     pub async fn action_init(&mut self) -> Result<HandshakeState, ProtocolError> {
@@ -372,6 +385,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                         new_state
                     );
                     current_state = new_state;
+                    self.free_fsm_lock().await;
                 }
                 Err(e) => {
                     log::warn!("Tunnel={:?}: Handshake failure: {:?}", self.tunnel_id, e);
