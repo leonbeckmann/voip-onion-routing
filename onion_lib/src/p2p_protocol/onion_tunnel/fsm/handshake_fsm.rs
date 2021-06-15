@@ -1,6 +1,6 @@
 use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, ServerHello};
 use crate::p2p_protocol::onion_tunnel::crypto::CryptoContext;
-use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
+use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::message_codec::{
     DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
 };
@@ -29,8 +29,6 @@ impl PeerType for Client {
 impl PeerType for Server {
     const INIT_STATE: HandshakeState = HandshakeState::WaitForClientHello;
 }
-
-// TODO we need a crypto context that holds the key, manages the iv and encrypts / decrypts data
 
 #[derive(Debug, PartialEq)]
 pub enum HandshakeState {
@@ -74,7 +72,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let client_hello = ClientHello::new();
         // TODO fill client hello
         log::trace!(
-            "Tunnel{:?}: Initialize handshake fsm: Send ClientHello={:?} via message codec",
+            "Tunnel={:?}: Initialize handshake fsm: Send ClientHello=({:?}) via message codec",
             self.tunnel_id,
             client_hello
         );
@@ -91,8 +89,8 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         data: ClientHello,
     ) -> Result<HandshakeState, ProtocolError> {
         // set backward frame id on the target endpoint
-        log::trace!(
-            "Tunnel{:?}: Process incoming ClientHello={:?}",
+        log::debug!(
+            "Tunnel={:?}: Process incoming ClientHello=({:?})",
             self.tunnel_id,
             data
         );
@@ -108,7 +106,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         codec.add_crypto_context(cc);
 
         log::trace!(
-            "Tunnel{:?}: Send ServerHello={:?} via message codec",
+            "Tunnel={:?}: Send ServerHello=({:?}) via message codec",
             self.tunnel_id,
             server_hello
         );
@@ -124,8 +122,8 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         data: ServerHello,
     ) -> Result<(), ProtocolError> {
         let mut codec = self.message_codec.lock().await;
-        log::trace!(
-            "Tunnel{:?}: Process incoming ServerHello={:?}",
+        log::debug!(
+            "Tunnel={:?}: Process incoming ServerHello=({:?})",
             self.tunnel_id,
             data
         );
@@ -157,7 +155,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             }
         }
         log::trace!(
-            "Tunnel{:?}: Send RoutingInformation={:?} via message codec",
+            "Tunnel={:?}: Send RoutingInformation=({:?}) via message codec",
             self.tunnel_id,
             data
         );
@@ -171,8 +169,14 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     pub async fn action_recv_routing(
         &mut self,
         routing: RoutingInformation,
-    ) -> Result<(), ProtocolError> {
+    ) -> Result<IsTargetEndpoint, ProtocolError> {
         // get target endpoint
+        log::debug!(
+            "Tunnel={:?}: Process incoming RoutingInformation=({:?})",
+            self.tunnel_id,
+            routing
+        );
+
         let mut codec_guard = self.message_codec.lock().await;
         let target_endpoint = match (*codec_guard).as_any().downcast_mut::<TargetEndpoint>() {
             None => {
@@ -192,13 +196,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 self.tunnel_id
             );
             target_endpoint.lock_as_target_endpoint().await;
-            Ok(())
+            Ok(true)
         } else {
             // parse socket addr
-            log::trace!(
-                "Tunnel={:?}: Parsing routing information ...",
-                self.tunnel_id
-            );
             let addr = match u16::try_from(routing.nextHopPort) {
                 Ok(port) => match routing.nextHopAddr.len() {
                     4 => {
@@ -232,7 +232,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             let new_codec = Box::new(IntermediateHopCodec::from(target_endpoint, addr));
             *codec_guard = new_codec;
 
-            Ok(())
+            Ok(false)
         }
     }
 
@@ -266,7 +266,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 },
                 Err(_) => {
                     // timeout occurred
-                    log::trace!(
+                    log::warn!(
                         "Tunnel={:?}: Send handshake_result=Err(timeout)",
                         self.tunnel_id
                     );
@@ -320,7 +320,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                                     "Tunnel={:?}: Send handshake_result=ok",
                                     self.tunnel_id
                                 );
-                                let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(()))).await;
+                                let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(false))).await;
                                 return;
                             }
                             Err(e) => Err(e),
@@ -339,12 +339,14 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 HandshakeState::WaitForRoutingInformation => match event {
                     HandshakeEvent::RoutingInformation(data) => {
                         match self.action_recv_routing(data).await {
-                            Ok(_) => {
+                            Ok(is_target_endpoint) => {
                                 log::trace!(
                                     "Tunnel={:?}: Send handshake_result=ok",
                                     self.tunnel_id
                                 );
-                                let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(()))).await;
+                                let _ = event_tx
+                                    .send(FsmEvent::HandshakeResult(Ok(is_target_endpoint)))
+                                    .await;
                                 return;
                             }
                             Err(e) => Err(e),

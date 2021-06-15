@@ -69,7 +69,7 @@ impl P2pInterface {
                         match TunnelFrame::parse_from_bytes(&buf[0..size]) {
                             Ok(frame) => {
                                 // check if data available, which should always be the case
-                                log::debug!("UDP packet successfully parsed to TunnelFrame");
+                                log::trace!("UDP packet successfully parsed to TunnelFrame");
                                 let frame_message = match frame.message {
                                     None => {
                                         log::warn!("TunnelFrame is empty, drop the packet");
@@ -92,7 +92,7 @@ impl P2pInterface {
                                         self.api_interface.clone(),
                                     )
                                     .await;
-                                    log::debug!("New target tunnel has tunnel ID {:?}", tunnel_id);
+                                    log::trace!("New target tunnel has tunnel ID {:?}", tunnel_id);
                                     (tunnel_id, Direction::Forward)
                                 } else {
                                     // not a new tunnel request, get corresponding tunnel id from frame id
@@ -131,7 +131,7 @@ impl P2pInterface {
                                     }
                                     Some(tunnel) => {
                                         // forward message to tunnel
-                                        log::debug!(
+                                        log::trace!(
                                             "Froward the parsed frame to the tunnel (ID {:?})",
                                             tunnel_id
                                         );
@@ -268,11 +268,11 @@ impl P2pInterface {
         let tunnel = tunnels.get(&tunnel_id);
         match tunnel {
             Some(tunnel) => {
-                log::debug!("Send data via tunnel with ID={:?}", tunnel_id);
+                log::debug!("Tunnel={:?}: Send data", tunnel_id);
                 tunnel.send(data).await
             }
             None => {
-                log::debug!("Cannot send data due to unknown tunnel ID={:?}", tunnel_id);
+                log::warn!("Cannot send data due to unknown tunnel ID={:?}", tunnel_id);
                 Err(P2pError::InvalidTunnelId(tunnel_id))
             }
         }

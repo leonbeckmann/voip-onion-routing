@@ -58,6 +58,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
             }
 
             // shutdown peer
+            log::debug!("Shutdown P2P interface");
             let (lock, c_var) = &*close_cond_p2p;
             let mut is_closed = lock.lock().unwrap();
             *is_closed = true;
@@ -72,6 +73,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
             }
 
             // shutdown peer
+            log::debug!("Shutdown API interface");
             let (lock, c_var) = &*close_cond_api;
             let mut is_closed = lock.lock().unwrap();
             *is_closed = true;
@@ -84,6 +86,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
         while !*is_closed {
             is_closed = c_var.wait(is_closed).unwrap();
         }
+        log::debug!("Shutdown peer");
     });
 }
 

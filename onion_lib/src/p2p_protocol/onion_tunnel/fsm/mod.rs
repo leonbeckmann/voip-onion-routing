@@ -31,7 +31,6 @@ pub(super) struct InitiatorStateMachine {
     hops: Vec<Peer>,
 }
 
-// TODO fill fsm
 impl InitiatorStateMachine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -118,19 +117,31 @@ pub(super) trait FiniteStateMachine {
                 }
                 match data.message.unwrap() {
                     HandshakeData_oneof_message::clientHello(data) => {
+                        log::trace!(
+                            "Tunnel={:?}: Successfully parsed to ClientHello",
+                            self.tunnel_id()
+                        );
                         HandshakeEvent::ClientHello(data)
                     }
                     HandshakeData_oneof_message::serverHello(data) => {
+                        log::trace!(
+                            "Tunnel={:?}: Successfully parsed to ServerHello",
+                            self.tunnel_id()
+                        );
                         HandshakeEvent::ServerHello(data)
                     }
                     HandshakeData_oneof_message::routing(data) => {
+                        log::trace!(
+                            "Tunnel={:?}: Successfully parsed to RoutingInformation",
+                            self.tunnel_id()
+                        );
                         HandshakeEvent::RoutingInformation(data)
                     }
                 }
             }
             ProcessedData::IncomingData(_) => {
                 log::warn!(
-                    "Tunnel={:?}: Not expecting incooming application data in connecting state",
+                    "Tunnel={:?}: Not expecting incoming application data in connecting state",
                     self.tunnel_id()
                 );
                 return Err(ProtocolError::UnexpectedMessageType);
@@ -205,7 +216,7 @@ pub(super) trait FiniteStateMachine {
 
     async fn action_close(&mut self) -> Result<State, ProtocolError> {
         // all connection listeners have left
-        log::trace!(
+        log::debug!(
             "Tunnel={:?}: Received close event, notify tunnel peers and shutdown tunnel",
             self.tunnel_id()
         );
@@ -227,7 +238,7 @@ pub(super) trait FiniteStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<(), ProtocolError>,
+        res: Result<IsTargetEndpoint, ProtocolError>,
     ) -> Result<State, ProtocolError>;
 
     const INIT_STATE: State = State::Closed;
@@ -333,20 +344,20 @@ pub(super) trait FiniteStateMachine {
             match res {
                 Ok(new_state) => {
                     log::trace!(
-                        "Tunnel={:?}: Switch to new state {:?}",
+                        "Tunnel={:?}: Switch to state {:?}",
                         self.tunnel_id(),
                         new_state
                     );
                     current_state = new_state;
                 }
                 Err(e) => {
-                    log::warn!("Tunnel={:?}: FSM failure: {:?}", e, self.tunnel_id());
+                    log::warn!("Tunnel={:?}: FSM failure: {:?}", self.tunnel_id(), e);
                     current_state = State::Terminated;
                 }
             }
 
             if current_state == State::Terminated {
-                log::trace!("Tunnel={:?}: Terminate FSM", self.tunnel_id());
+                log::debug!("Tunnel={:?}: Terminate FSM", self.tunnel_id());
                 return;
             }
         }
@@ -370,7 +381,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
     #[allow(clippy::single_match)]
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'start'
-        log::trace!(
+        log::debug!(
             "Tunnel={:?}: Initialize the handshake protocol as an initiator",
             self.tunnel_id
         );
@@ -428,8 +439,8 @@ impl FiniteStateMachine for InitiatorStateMachine {
                     None => (true, None),
                     Some((addr, _)) => (false, Some(*addr)),
                 };
-                log::trace!(
-                    "Tunnel={:?}: current_peer={:?}, next_hop={:?}",
+                log::debug!(
+                    "Tunnel={:?}: Initiate handshake to current_peer={:?} with next_hop={:?}",
                     tunnel_id,
                     (*current_peer).0,
                     next_hop
@@ -490,7 +501,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                 // send the init
                 if event_hooked_tx.send(HandshakeEvent::Init).await.is_err() {
                     // cannot send data
-                    log::trace!(
+                    log::warn!(
                         "Tunnel={:?}: Cannot start the handshake, send handshake failure to FSM",
                         tunnel_id
                     );
@@ -515,18 +526,18 @@ impl FiniteStateMachine for InitiatorStateMachine {
                                 FsmEvent::HandshakeResult(result) => match result {
                                     Ok(_) => {
                                         if target {
-                                            log::trace!("Tunnel={:?}: Received handshake_result=ok for the last hop", tunnel_id);
+                                            log::debug!("Tunnel={:?}: Received handshake_result=ok for the target hop", tunnel_id);
                                             let _ = final_result_tx
-                                                .send(FsmEvent::HandshakeResult(Ok(())))
+                                                .send(FsmEvent::HandshakeResult(Ok(true)))
                                                 .await;
                                             return;
                                         } else {
-                                            log::trace!("Tunnel={:?}: Received handshake_result=ok for intermediate hop", tunnel_id);
+                                            log::debug!("Tunnel={:?}: Received handshake_result=ok for intermediate hop", tunnel_id);
                                             break;
                                         }
                                     }
                                     Err(e) => {
-                                        log::trace!("Tunnel={:?}: Received handshake_result=err, transfer to FSM", tunnel_id);
+                                        log::warn!("Tunnel={:?}: Received handshake_result=err, transfer to FSM", tunnel_id);
                                         let _ = final_result_tx
                                             .send(FsmEvent::HandshakeResult(Err(e)))
                                             .await;
@@ -551,7 +562,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                             }
                             InitiatorEvent::FsmClosure => {
                                 // FSM has been closed
-                                log::trace!(
+                                log::warn!(
                                     "Tunnel={:?}: FSM closure, shutdown handshake",
                                     tunnel_id
                                 );
@@ -559,7 +570,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                             }
                             InitiatorEvent::HandshakeFsmClosure => {
                                 // Handshake FSM failed without reply
-                                log::trace!(
+                                log::warn!(
                                     "Tunnel={:?}: Handshake FSM closure, shutdown handshake",
                                     tunnel_id
                                 );
@@ -577,8 +588,8 @@ impl FiniteStateMachine for InitiatorStateMachine {
 
     async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
         // target sends closure, notify hops
-        log::trace!(
-            "Tunnel={:?}: Received closure from target peer, notify hops amd close tunnel",
+        log::debug!(
+            "Tunnel={:?}: Received closure from target peer, notify hops and close tunnel",
             self.tunnel_id
         );
         self.endpoint_codec.lock().await.close(d, false).await;
@@ -587,12 +598,12 @@ impl FiniteStateMachine for InitiatorStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<(), ProtocolError>,
+        res: Result<IsTargetEndpoint, ProtocolError>,
     ) -> Result<State, ProtocolError> {
         let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
         match res {
             Ok(_) => {
-                log::trace!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
+                log::debug!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 let _ = tunnel_result_tx.send(TunnelResult::Connected);
                 Ok(State::Connected)
             }
@@ -621,7 +632,7 @@ impl FiniteStateMachine for TargetStateMachine {
 
     async fn action_init(&mut self) -> Result<State, ProtocolError> {
         // start the handshake fsm in state 'WaitForClientHello'
-        log::trace!(
+        log::debug!(
             "Tunnel={:?}: Initialize the handshake protocol as a non-initiator",
             self.tunnel_id
         );
@@ -640,7 +651,7 @@ impl FiniteStateMachine for TargetStateMachine {
 
     async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
         // receives close from initiator peer
-        log::trace!(
+        log::debug!(
             "Tunnel={:?}: Received closure from initiator peer, close tunnel",
             self.tunnel_id
         );
@@ -650,15 +661,17 @@ impl FiniteStateMachine for TargetStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<(), ProtocolError>,
+        res: Result<IsTargetEndpoint, ProtocolError>,
     ) -> Result<State, ProtocolError> {
         match res {
-            Ok(_) => {
-                log::trace!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
-                let _ = self
-                    .listener_tx
-                    .send(IncomingEventMessage::IncomingTunnelCompletion)
-                    .await;
+            Ok(is_target_endpoint) => {
+                log::debug!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
+                if is_target_endpoint {
+                    let _ = self
+                        .listener_tx
+                        .send(IncomingEventMessage::IncomingTunnelCompletion)
+                        .await;
+                }
                 Ok(State::Connected)
             }
             Err(e) => {
@@ -721,12 +734,14 @@ pub(super) enum State {
     Terminated,
 }
 
+type IsTargetEndpoint = bool;
+
 #[derive(Debug)]
 pub enum FsmEvent {
     Init,  // Start the FSM
     Close, // Close the Tunnel
     RecvClose(Direction),
-    Send(Vec<u8>),                              // Send Data via the Tunnel
-    IncomingFrame((Bytes, Direction, IV)),      // Received data frame
-    HandshakeResult(Result<(), ProtocolError>), // HandshakeResult from handshake fsm
+    Send(Vec<u8>),                         // Send Data via the Tunnel
+    IncomingFrame((Bytes, Direction, IV)), // Received data frame
+    HandshakeResult(Result<IsTargetEndpoint, ProtocolError>), // HandshakeResult from handshake fsm
 }

@@ -9,6 +9,8 @@ use tokio::sync::{
     oneshot, Mutex,
 };
 
+use openssl::sha;
+
 use crate::api_protocol::ApiInterface;
 use crate::p2p_protocol::onion_tunnel::fsm::{
     FiniteStateMachine, FsmEvent, InitiatorStateMachine, ProtocolError, TargetStateMachine,
@@ -170,9 +172,22 @@ impl OnionTunnel {
     ) -> TunnelId {
         // select intermediate hops via rps module and hop count
         let mut hops: Vec<Peer> = vec![];
-        for _ in 0..hop_count {
-            // TODO catch error
-            let peer = rps_get_peer(rps_api_address).await.unwrap();
+        for i in 0..hop_count {
+            let peer = match rps_get_peer(rps_api_address).await {
+                Ok(peer) => {
+                    log::debug!(
+                        "{:?}. intermediate peer: (addr={:?}, identity={:?})",
+                        i + 1,
+                        peer.0,
+                        sha::sha256(peer.1.as_ref())
+                    );
+                    peer
+                }
+                Err(_) => {
+                    // TODO handle error
+                    panic!("Error occurred");
+                }
+            };
             hops.push(peer);
         }
 
@@ -187,7 +202,7 @@ impl OnionTunnel {
 
         // create new tunnel id
         let tunnel_id = get_id();
-        log::trace!("Create new initiator tunnel with new ID={:?}", tunnel_id);
+        log::debug!("Create new initiator tunnel with new ID={:?}", tunnel_id);
 
         // create initiator FSM
         let mut fsm = InitiatorStateMachine::new(
@@ -243,7 +258,7 @@ impl OnionTunnel {
 
         // create new tunnel id
         let tunnel_id = get_id();
-        log::trace!("Create new target tunnel with new ID={:?}", tunnel_id);
+        log::debug!("Create new target tunnel with new ID={:?}", tunnel_id);
 
         // create target FSM
         let mut fsm = TargetStateMachine::new(
@@ -278,7 +293,11 @@ impl OnionTunnel {
     }
 
     pub(crate) async fn forward_event(&self, e: FsmEvent) -> Result<(), P2pError> {
-        log::trace!("Tunnel={:?}: Forward event={:?} to FSM", self.tunnel_id, e);
+        log::trace!(
+            "Tunnel={:?}: Forward event=({:?}) to FSM",
+            self.tunnel_id,
+            e
+        );
         if self.event_tx.send(e).await.is_err() {
             log::warn!("Tunnel={:?}: Cannot forward event to FSM", self.tunnel_id);
             Err(P2pError::TunnelClosed)

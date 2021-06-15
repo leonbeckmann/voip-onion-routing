@@ -304,6 +304,7 @@ fn integration_test() {
     assert_eq!(error.tunnel_id, 20);
     assert_eq!(error.request_type, ONION_TUNNEL_DATA);
 
+    sleep(Duration::from_secs(1));
     // TEST: request new tunnel from alice to bob
 
     log::info!("TEST: Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
@@ -369,26 +370,28 @@ fn integration_test() {
     let tunnel_destroy = OnionTunnelDestroy::new(alice_to_bob_tunnel).to_be_vec();
     write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
 
-    /*
     sleep(Duration::from_secs(1));
 
     // TEST: cannot send data from Alice to Bob anymore
-    log::info!("TEST: Send data from Alice to Bob via old tunnel and expect failure");
-    let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, "test".as_bytes().to_vec()).to_be_vec();
+    /*log::info!("TEST: Send data from Alice to Bob via old tunnel and expect failure");
+    let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, message_ping.to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
     let (hdr, data) = read_msg(&mut alice_api);
     assert_eq!(hdr.msg_type, ONION_ERROR);
     let error = OnionError::try_from(data).unwrap();
     assert_eq!(error.tunnel_id, alice_to_bob_tunnel);
-    assert_eq!(error.request_type, ONION_TUNNEL_DATA);
+    assert_eq!(error.request_type, ONION_TUNNEL_DATA);*/
 
     // TEST: cannot send data from Bob to Alice anymore
     log::info!("TEST: Send data from Bob to Alice via old tunnel and expect failure");
-    let tunnel_data = OnionTunnelData::new(bob_from_alice_tunnel, "test".as_bytes().to_vec()).to_be_vec();
+    let tunnel_data =
+        OnionTunnelData::new(bob_from_alice_tunnel, "test".as_bytes().to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut bob_api);
     let (hdr, data) = read_msg(&mut bob_api);
     assert_eq!(hdr.msg_type, ONION_ERROR);
     let error = OnionError::try_from(data).unwrap();
     assert_eq!(error.tunnel_id, bob_from_alice_tunnel);
-    assert_eq!(error.request_type, ONION_TUNNEL_DATA);*/
+    assert_eq!(error.request_type, ONION_TUNNEL_DATA);
+
+    sleep(Duration::from_secs(1));
 }

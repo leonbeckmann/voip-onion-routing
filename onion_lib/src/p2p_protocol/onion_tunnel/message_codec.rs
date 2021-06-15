@@ -53,9 +53,12 @@ impl RawData {
         }
     }
 
-    fn deserialize(raw: &[u8]) -> Result<Self, ProtocolError> {
+    fn deserialize(raw: &[u8], tunnel_id: TunnelId) -> Result<Self, ProtocolError> {
         if raw.len() != (PAYLOAD_SIZE as usize) {
-            // TODO do we want to terminate here?
+            log::warn!(
+                "Tunnel={:?}: Received packet with invalid payload size. Disconnect",
+                tunnel_id
+            );
             return Err(ProtocolError::InvalidPacketLength);
         }
         // we have padding_size, so we are safe here
@@ -91,6 +94,7 @@ impl RawData {
 
 type IV = Bytes;
 // TODO make closing procedure safe
+// TODO close hops and endpoints on handshake failures
 
 /**
  *  P2pCodec responsible for encryption, message padding and writing messages to the socket
@@ -263,6 +267,7 @@ impl TargetEndpoint {
 
     pub async fn lock_as_target_endpoint(&mut self) {
         // this endpoint is the target and will not be transferred to an intermediate_hop
+        log::trace!("Tunnel={:?}: Lock target hop", self.tunnel_id);
 
         // remove unnecessary frame_ids from registry
         let mut frames = self.frame_ids.lock().await;
@@ -290,7 +295,7 @@ pub(crate) struct IntermediateHopCodec {
     next_hop: SocketAddr,
     prev_hop: SocketAddr,
     frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
-    _tunnel_id: TunnelId,
+    tunnel_id: TunnelId,
     forward_frame_id: FrameId,  // frame id for forward packages
     backward_frame_id: FrameId, // frame id for backward packages
     own_frame_ids: Vec<(FrameId, Direction)>,
@@ -305,7 +310,7 @@ impl IntermediateHopCodec {
             next_hop,
             prev_hop: target.prev_hop,
             frame_ids: target.frame_ids.clone(),
-            _tunnel_id: target.tunnel_id,
+            tunnel_id: target.tunnel_id,
             forward_frame_id: 1,
             backward_frame_id: target.backward_frame_id,
             own_frame_ids: target.own_frame_ids.to_owned(),
@@ -335,6 +340,11 @@ impl P2pCodec for InitiatorEndpoint {
 
         let ready_bytes = match data {
             DataType::AppData(data) => {
+                log::debug!(
+                    "Tunnel={:?}: Send encrypted application data to next hop {:?}",
+                    self.tunnel_id,
+                    self.next_hop
+                );
                 let mut app_data = ApplicationData::new();
                 app_data.set_data(Bytes::from(data));
                 let data = app_data.write_to_bytes().unwrap();
@@ -369,6 +379,12 @@ impl P2pCodec for InitiatorEndpoint {
                     }
                 };
                 client_hello.set_backwardFrameId(id);
+                log::debug!(
+                    "Tunnel={:?}: Send ClientHello={:?} to next hop {:?}",
+                    self.tunnel_id,
+                    client_hello,
+                    self.next_hop
+                );
 
                 // prepare frame
                 let mut handshake = HandshakeData::new();
@@ -385,6 +401,12 @@ impl P2pCodec for InitiatorEndpoint {
                 data
             }
             DataType::RoutingInformation(data) => {
+                log::debug!(
+                    "Tunnel={:?}: Send RoutingInformation={:?} to next hop {:?}",
+                    self.tunnel_id,
+                    data,
+                    self.next_hop
+                );
                 let mut handshake = HandshakeData::new();
                 handshake.set_routing(data);
                 let data = handshake.write_to_bytes().unwrap();
@@ -400,7 +422,10 @@ impl P2pCodec for InitiatorEndpoint {
                 data
             }
             _ => {
-                log::warn!("Invalid write action in initiator codec");
+                log::warn!(
+                    "Tunnel={:?}: Invalid write action in initiator codec",
+                    self.tunnel_id
+                );
                 return Err(ProtocolError::CodecUnsupportedAction);
             }
         };
@@ -411,7 +436,7 @@ impl P2pCodec for InitiatorEndpoint {
         // write to stream
         if let Err(e) = self.socket.send_to(data.as_ref(), self.next_hop).await {
             return Err(ProtocolError::IOError(format!(
-                "Cannot write frame via codec: {:?}",
+                "Cannot write frame via initiator codec: {:?}",
                 e
             )));
         }
@@ -427,21 +452,40 @@ impl P2pCodec for InitiatorEndpoint {
     ) -> Result<ProcessedData, ProtocolError> {
         // expected incoming data or incoming handshake, process and return
 
+        log::trace!(
+            "Tunnel={:?}: Process incoming data at initiator hop",
+            self.tunnel_id
+        );
         // decrypt from next hop to target using iv and cc
         let mut dec_data = data.to_vec();
-        for cc in self.crypto_contexts.iter() {
-            dec_data = cc.decrypt(data.as_ref(), iv.as_ref());
+        if !self.crypto_contexts.is_empty() {
+            log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
+            for cc in self.crypto_contexts.iter() {
+                dec_data = cc.decrypt(data.as_ref(), iv.as_ref());
+            }
         }
 
         // deserialize data
-        let raw_data = RawData::deserialize(dec_data.as_ref())?;
+        let raw_data = RawData::deserialize(dec_data.as_ref(), self.tunnel_id)?;
         match raw_data.message_type {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
-                Ok(data) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
+                Ok(data) => {
+                    log::trace!(
+                        "Tunnel={:?}: Initiator receives application data",
+                        self.tunnel_id
+                    );
+                    Ok(ProcessedData::IncomingData(data.data.to_vec()))
+                }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
             HANDSHAKE_DATA => match HandshakeData::parse_from_bytes(raw_data.data.as_ref()) {
-                Ok(data) => Ok(ProcessedData::HandshakeData(data)),
+                Ok(data) => {
+                    log::trace!(
+                        "Tunnel={:?}: Initiator receives handshake data",
+                        self.tunnel_id
+                    );
+                    Ok(ProcessedData::HandshakeData(data))
+                }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
             _ => return Err(ProtocolError::UnexpectedMessageType),
@@ -450,6 +494,11 @@ impl P2pCodec for InitiatorEndpoint {
 
     async fn close(&mut self, _: Direction, initiator: bool) {
         if initiator {
+            log::debug!(
+                "Tunnel={:?}: At initiator send close to {:?} (forward)",
+                self.tunnel_id,
+                self.next_hop
+            );
             send_close(self.forward_frame_id, self.next_hop, self.socket.clone()).await;
         }
     }
@@ -472,6 +521,10 @@ impl P2pCodec for InitiatorEndpoint {
     }
 
     fn add_crypto_context(&mut self, cc: CryptoContext) {
+        log::trace!(
+            "Tunnel={:?}: Add crypto context to initiator codec",
+            self.tunnel_id
+        );
         self.crypto_contexts.push(cc)
     }
 }
@@ -491,6 +544,11 @@ impl P2pCodec for TargetEndpoint {
 
         let ready_bytes = match data {
             DataType::AppData(data) => {
+                log::debug!(
+                    "Tunnel={:?}: Send encrypted application data to prev hop {:?}",
+                    self.tunnel_id,
+                    self.prev_hop
+                );
                 let mut app_data = ApplicationData::new();
                 app_data.set_data(Bytes::from(data));
                 let data = app_data.write_to_bytes().unwrap();
@@ -519,6 +577,13 @@ impl P2pCodec for TargetEndpoint {
                 server_hello.set_forwardFrameId(new_forward_id);
                 server_hello.set_backwardFrameId(new_backward_id);
 
+                log::debug!(
+                    "Tunnel={:?}: Send ServerHello=({:?}) to/via prev hop {:?}",
+                    self.tunnel_id,
+                    server_hello,
+                    self.prev_hop
+                );
+
                 // prepare frame
                 let mut handshake = HandshakeData::new();
                 handshake.set_serverHello(server_hello);
@@ -526,7 +591,10 @@ impl P2pCodec for TargetEndpoint {
                 RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize()
             }
             _ => {
-                log::warn!("Invalid write action in target codec");
+                log::warn!(
+                    "Tunnel={:?}: Invalid write action in target codec",
+                    self.tunnel_id
+                );
                 return Err(ProtocolError::CodecUnsupportedAction);
             }
         };
@@ -537,7 +605,7 @@ impl P2pCodec for TargetEndpoint {
         // write to stream
         if let Err(e) = self.socket.send_to(data.as_ref(), self.prev_hop).await {
             return Err(ProtocolError::IOError(format!(
-                "Cannot write frame via codec: {:?}",
+                "Cannot write frame via target codec: {:?}",
                 e
             )));
         }
@@ -552,21 +620,38 @@ impl P2pCodec for TargetEndpoint {
         iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
         // expect incoming data, handshake or encrypted handshake, process and return
+        log::trace!(
+            "Tunnel={:?}: Process incoming data at target hop",
+            self.tunnel_id
+        );
 
         // if the crypto_context has already been set, we expect encrypted data
         let mut data = data.to_vec();
         if let Some(cc) = &self.crypto_context {
             // decrypt using keys and iv
+            log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
             data = cc.decrypt(data.as_ref(), iv.as_ref());
         }
-        let raw_data = RawData::deserialize(data.as_ref())?;
+        let raw_data = RawData::deserialize(data.as_ref(), self.tunnel_id)?;
         match raw_data.message_type {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
-                Ok(data) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
+                Ok(data) => {
+                    log::trace!(
+                        "Tunnel={:?}: Target receives application data",
+                        self.tunnel_id
+                    );
+                    Ok(ProcessedData::IncomingData(data.data.to_vec()))
+                }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
             HANDSHAKE_DATA => match HandshakeData::parse_from_bytes(raw_data.data.as_ref()) {
-                Ok(data) => Ok(ProcessedData::HandshakeData(data)),
+                Ok(data) => {
+                    log::trace!(
+                        "Tunnel={:?}: Target receives handshake data",
+                        self.tunnel_id
+                    );
+                    Ok(ProcessedData::HandshakeData(data))
+                }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
             _ => return Err(ProtocolError::UnexpectedMessageType),
@@ -575,6 +660,11 @@ impl P2pCodec for TargetEndpoint {
 
     async fn close(&mut self, _: Direction, initiator: bool) {
         if initiator {
+            log::debug!(
+                "Tunnel={:?}: At target send close to {:?} (backward)",
+                self.prev_hop,
+                self.prev_hop
+            );
             send_close(self.backward_frame_id, self.prev_hop, self.socket.clone()).await;
         }
     }
@@ -589,6 +679,10 @@ impl P2pCodec for TargetEndpoint {
 
     fn add_crypto_context(&mut self, cc: CryptoContext) {
         if self.crypto_context.is_none() {
+            log::trace!(
+                "Tunnel={:?}: Set the crypto context of this target codec",
+                self.tunnel_id
+            );
             self.crypto_context = Some(cc);
         }
     }
@@ -597,7 +691,7 @@ impl P2pCodec for TargetEndpoint {
 #[async_trait]
 impl P2pCodec for IntermediateHopCodec {
     async fn write(&mut self, _data: DataType) -> Result<(), ProtocolError> {
-        log::warn!("Invalid write action in intermediate_hop codec");
+        log::warn!("Write action not supported for intermediate hop codec");
         return Err(ProtocolError::CodecUnsupportedAction);
     }
 
@@ -607,13 +701,23 @@ impl P2pCodec for IntermediateHopCodec {
         data: Bytes,
         iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
+        log::trace!(
+            "Tunnel={:?}: Process incoming data at intermediate hop",
+            self.tunnel_id
+        );
         if data.len() != (PAYLOAD_SIZE as usize) {
-            // TODO do we want to terminate here?
+            // disconnect immediately due to size error
+            log::warn!(
+                "Tunnel={:?}: Received packet with invalid payload size. Disconnect",
+                self.tunnel_id
+            );
             return Err(ProtocolError::InvalidPacketLength);
         }
+
         if d == Direction::Backward && self.forward_frame_id == 1 {
-            // seems to be the unencrypted server_hello of the next hop, catch the forward id
-            let raw_data = RawData::deserialize(data.as_ref())?;
+            // seems to be the unencrypted server_hello for the next hop, catch the forward id
+            log::trace!("Tunnel={:?}: Received data containing the ServerHello from the next hop, extract forward ID", self.tunnel_id);
+            let raw_data = RawData::deserialize(data.as_ref(), self.tunnel_id)?;
             if raw_data.message_type != HANDSHAKE_DATA {
                 return Err(ProtocolError::UnexpectedMessageType);
             }
@@ -635,6 +739,7 @@ impl P2pCodec for IntermediateHopCodec {
         let mut frame = TunnelFrame::new();
         let (mut frame, addr) = match d {
             Direction::Forward => {
+                log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
                 let decrypted_data = self.crypto_context.decrypt(data.as_ref(), iv.as_ref());
                 frame.set_frameId(self.forward_frame_id);
@@ -643,6 +748,7 @@ impl P2pCodec for IntermediateHopCodec {
             }
             Direction::Backward => {
                 // encrypt using iv and key
+                log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
                 let encrypted_data = self.crypto_context.encrypt(data.as_ref(), iv.as_ref());
                 frame.set_frameId(self.backward_frame_id);
                 frame.set_data(Bytes::from(encrypted_data));
@@ -656,7 +762,7 @@ impl P2pCodec for IntermediateHopCodec {
         // write to stream
         if let Err(e) = self.socket.send_to(data.as_ref(), addr).await {
             return Err(ProtocolError::IOError(format!(
-                "Cannot write frame via codec: {:?}",
+                "Cannot write frame via intermediate codec: {:?}",
                 e
             )));
         }
@@ -671,6 +777,12 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Forward => (self.next_hop, self.forward_frame_id),
             Direction::Backward => (self.prev_hop, self.backward_frame_id),
         };
+        log::debug!(
+            "Tunnel={:?}: At intermediate hop send close to {:?} ({:?})",
+            self.tunnel_id,
+            addr,
+            d
+        );
         send_close(frame_id, addr, self.socket.clone()).await;
     }
 
