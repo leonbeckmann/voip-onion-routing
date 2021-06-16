@@ -1,8 +1,7 @@
 extern crate anyhow;
 extern crate onion_lib;
-use env_logger;
+
 use ini::Ini;
-use log;
 use openssl::rsa::Rsa;
 use std::env;
 use std::fs::File;
@@ -169,7 +168,7 @@ fn run_rps_api(
 #[test]
 fn integration_test() {
     // enable logging
-    env::set_var("RUST_LOG", "debug");
+    env::set_var("RUST_LOG", "trace");
     env_logger::init();
 
     log::info!("Starting integration test");
