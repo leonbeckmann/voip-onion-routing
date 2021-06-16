@@ -123,30 +123,27 @@ impl P2pInterface {
                                     }
                                 };
 
-                                let tunnels = self.onion_tunnels.clone();
-                                tokio::spawn(async move {
-                                    let mut tunnels = tunnels.lock().await;
-                                    match tunnels.get(&tunnel_id) {
-                                        None => {
-                                            log::warn!(
-                                                "Received frame for not available tunnel with id {:?}",
-                                                tunnel_id
-                                            );
+                                let mut tunnels = self.onion_tunnels.lock().await;
+                                match tunnels.get(&tunnel_id) {
+                                    None => {
+                                        log::warn!(
+                                            "Received frame for not available tunnel with id {:?}",
+                                            tunnel_id
+                                        );
+                                    }
+                                    Some(tunnel) => {
+                                        // forward message to tunnel
+                                        log::trace!(
+                                            "Froward the parsed frame to the tunnel (ID {:?})",
+                                            tunnel_id
+                                        );
+                                        if tunnel.forward_event(event).await.is_err() {
+                                            // tunnel has been closed, remove tunnel from registry
+                                            log::warn!("Cannot forward the parsed frame since the tunnel (ID {:?}) has been closed", tunnel_id);
+                                            let _ = tunnels.remove(&tunnel_id);
                                         }
-                                        Some(tunnel) => {
-                                            // forward message to tunnel
-                                            log::trace!(
-                                                "Froward the parsed frame to the tunnel (ID {:?})",
-                                                tunnel_id
-                                            );
-                                            if tunnel.forward_event(event).await.is_err() {
-                                                // tunnel has been closed, remove tunnel from registry
-                                                log::warn!("Cannot forward the parsed frame since the tunnel (ID {:?}) has been closed", tunnel_id);
-                                                let _ = tunnels.remove(&tunnel_id);
-                                            }
-                                        }
-                                    };
-                                });
+                                    }
+                                };
                             }
                             Err(_) => {
                                 log::warn!(

@@ -58,10 +58,9 @@ pub(crate) type Peer = (SocketAddr, Vec<u8>);
 pub(crate) struct OnionTunnel {
     listeners: Arc<Mutex<HashSet<ConnectionId>>>, // all the api connection listeners
     listeners_available: Arc<Mutex<bool>>,        // are the listeners set, important for managing
-    event_tx: Sender<FsmEvent>,                   // sending events to the fsm
     tunnel_id: TunnelId,                          // unique tunnel id
     tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // tunnel registry for tunnel mgmt
-    fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+    lifo_event_sender: Sender<FsmEvent>,
 }
 
 impl OnionTunnel {
@@ -79,13 +78,14 @@ impl OnionTunnel {
         // clone the sender for init
         let event_tx_clone = event_tx.clone();
 
+        let (lifo_event_sender, mut lifo_event_receiver) = tokio::sync::mpsc::channel(32);
+
         let tunnel = OnionTunnel {
             listeners: listeners.clone(),
             listeners_available: listeners_available.clone(),
-            event_tx,
             tunnel_id,
             tunnel_registry: tunnel_registry.clone(),
-            fsm_lock,
+            lifo_event_sender,
         };
 
         // start management task that manages tunnel cleanup and listener notification
@@ -160,6 +160,56 @@ impl OnionTunnel {
         if let Err(_e) = event_tx_clone.send(FsmEvent::Init).await {
             // TODO handle error
         }
+
+        // run tunnel_event_listener
+        tokio::spawn(async move {
+            loop {
+                // recv the next incoming event from udp stream or onion api
+                let event = match lifo_event_receiver.recv().await {
+                    None => {
+                        log::trace!("Tunnel={:?}: Event listener received closure", tunnel_id);
+                        return;
+                    }
+                    Some(e) => {
+                        log::trace!(
+                            "Tunnel={:?}: Event listener received incoming event for FSM",
+                            tunnel_id
+                        );
+                        e
+                    }
+                };
+
+                // we have to ensure that we do not send messages to the fsm until the previous message has been processed
+                // otherwise there would be a race condition when the ClientHello of the next hop is available
+                // before the handshake_result has been sent to the FSM
+                // once the fsm_lock_state is HandshakeDone, there is no race condition anymore
+                log::trace!("Tunnel={:?}: Event listener will wait until the fsm is waiting for a new event", tunnel_id);
+                let (lock, notifier) = &*fsm_lock;
+                let mut state = lock.lock().await;
+                while *state == FsmLockState::Processing {
+                    // this is allowed since if notify is called before notified().await, the permit is stored
+                    drop(state);
+                    notifier.notified().await;
+                    state = lock.lock().await;
+                }
+                // now we are either in HandshakeDone or WaitForEvent
+                assert!(*state != FsmLockState::Processing);
+                if *state == FsmLockState::WaitForEvent {
+                    *state = FsmLockState::Processing;
+                }
+                drop(state);
+
+                // send the event to the FSM
+                log::trace!(
+                    "Tunnel={:?}: Event listener forwards the event to the FSM",
+                    tunnel_id
+                );
+                if event_tx.send(event).await.is_err() {
+                    log::warn!("Tunnel={:?}: Cannot forward event to fsm", tunnel_id);
+                    return;
+                }
+            }
+        });
 
         // register tunnel at registry
         let mut tunnels = tunnel_registry.lock().await;
@@ -319,28 +369,16 @@ impl OnionTunnel {
     }
 
     pub(crate) async fn forward_event(&self, e: FsmEvent) -> Result<(), P2pError> {
-        // we have to ensure that we do not send messages to the fsm until the previous message has been processed
-        // otherwise there would be a race condition when the ClientHello of the next hop is available
-        // before the handshake_result has been sent to the FSM
-        // once the fsm_lock_state is HandshakeDone, there is no race condition anymore
-        let (lock, notifier) = &*self.fsm_lock;
-        let mut state = lock.lock().await;
-        while *state == FsmLockState::Processing {
-            // this is allowed since if notify is called before notified().await, the permit is stored
-            drop(state);
-            notifier.notified().await;
-            state = lock.lock().await;
-        }
-        if *state == FsmLockState::WaitForEvent {
-            *state = FsmLockState::Processing;
-        }
         log::trace!(
-            "Tunnel={:?}: Forward event=({:?}) to FSM",
+            "Tunnel={:?}: Forward event=({:?}) to tunnel",
             self.tunnel_id,
             e
         );
-        if self.event_tx.send(e).await.is_err() {
-            log::warn!("Tunnel={:?}: Cannot forward event to FSM", self.tunnel_id);
+        if self.lifo_event_sender.send(e).await.is_err() {
+            log::warn!(
+                "Tunnel={:?}: Cannot forward event to tunnel",
+                self.tunnel_id
+            );
             Err(P2pError::TunnelClosed)
         } else {
             Ok(())
