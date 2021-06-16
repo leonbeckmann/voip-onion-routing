@@ -18,7 +18,7 @@ use onion_lib::api_protocol::messages::{
 use onion_lib::p2p_protocol::rps_api::{RpsPeer, ONION_PORT, RPS_PEER, RPS_QUERY};
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 const ONION_TUNNEL_BUILD: u16 = 560; // incoming for tunnel build in next round
@@ -29,13 +29,14 @@ const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tu
 const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
 const _ONION_COVER: u16 = 566; // send cover traffic to random peer
 
+#[allow(clippy::too_many_arguments)]
 fn run_peer(
     p2p_port: &str,
     onion_api_addr: &str,
     rps_api_addr: &str,
     config_file: PathBuf,
-    key_file: &PathBuf,
-    priv_key_file: &PathBuf,
+    key_file: &Path,
+    priv_key_file: &Path,
     pub_pem: Vec<u8>,
     priv_pem: Vec<u8>,
 ) {
@@ -123,7 +124,7 @@ fn run_rps_api(
     let mut port_map_hop2 = HashMap::new();
     port_map_hop2.insert(ONION_PORT, port_hop2);
 
-    let hop1 = RpsPeer::new(ip.clone(), port, port_map_hop1, key_hop1);
+    let hop1 = RpsPeer::new(ip, port, port_map_hop1, key_hop1);
     let hop2 = RpsPeer::new(ip, port, port_map_hop2, key_hop2);
 
     let hops = vec![hop1, hop2];
