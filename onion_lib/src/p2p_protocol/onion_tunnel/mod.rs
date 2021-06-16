@@ -18,9 +18,11 @@ use crate::p2p_protocol::onion_tunnel::fsm::{
 use crate::p2p_protocol::{ConnectionId, Direction, P2pError};
 
 use super::{FrameId, TunnelId};
+use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoContext;
 use crate::p2p_protocol::rps_api::rps_get_peer;
+use std::time::Duration;
 
-pub(crate) mod crypto;
+pub mod crypto;
 pub(crate) mod fsm;
 pub(crate) mod message_codec;
 
@@ -62,7 +64,6 @@ pub(crate) struct OnionTunnel {
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
 }
 
-// TODO private keys
 impl OnionTunnel {
     #[allow(clippy::too_many_arguments)]
     async fn new_tunnel(
@@ -180,6 +181,8 @@ impl OnionTunnel {
         rps_api_address: SocketAddr,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
         api_interface: Weak<ApiInterface>,
+        local_crypto_context: Arc<HandshakeCryptoContext>,
+        handshake_timeout: Duration,
     ) -> TunnelId {
         // select intermediate hops via rps module and hop count
         let mut hops: Vec<Peer> = vec![];
@@ -226,6 +229,8 @@ impl OnionTunnel {
             mgmt_tx,
             event_tx.clone(),
             fsm_lock.clone(),
+            local_crypto_context,
+            handshake_timeout,
         );
 
         // run the fsm
@@ -263,6 +268,8 @@ impl OnionTunnel {
         source: SocketAddr,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
         api_interface: Weak<ApiInterface>,
+        local_crypto_context: Arc<HandshakeCryptoContext>,
+        handshake_timeout: Duration,
     ) -> TunnelId {
         // create a channel for handing events to the fsm
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -284,6 +291,8 @@ impl OnionTunnel {
             mgmt_tx,
             event_tx.clone(),
             fsm_lock.clone(),
+            local_crypto_context,
+            handshake_timeout,
         );
 
         // run the fsm

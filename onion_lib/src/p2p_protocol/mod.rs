@@ -1,5 +1,5 @@
 mod messages;
-mod onion_tunnel;
+pub mod onion_tunnel;
 pub mod rps_api;
 
 use crate::api_protocol::ApiInterface;
@@ -90,6 +90,8 @@ impl P2pInterface {
                                         addr,
                                         self.onion_tunnels.clone(),
                                         self.api_interface.clone(),
+                                        self.config.crypto_context.clone(),
+                                        self.config.handshake_message_timeout,
                                     )
                                     .await;
                                     log::trace!("New target tunnel has tunnel ID {:?}", tunnel_id);
@@ -210,6 +212,8 @@ impl P2pInterface {
             self.config.rps_api_address,
             tx,
             self.api_interface.clone(),
+            self.config.crypto_context.clone(),
+            self.config.handshake_message_timeout,
         )
         .await;
 

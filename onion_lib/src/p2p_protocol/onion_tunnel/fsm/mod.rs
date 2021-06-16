@@ -1,6 +1,7 @@
 mod handshake_fsm;
 
 use crate::p2p_protocol::messages::p2p_messages::HandshakeData_oneof_message;
+use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoContext;
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
@@ -15,6 +16,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -30,6 +32,8 @@ pub(super) struct InitiatorStateMachine {
     tunnel_id: TunnelId,
     hops: Vec<Peer>,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+    local_crypto_context: Arc<HandshakeCryptoContext>,
+    handshake_timeout: Duration,
 }
 
 impl InitiatorStateMachine {
@@ -43,6 +47,8 @@ impl InitiatorStateMachine {
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+        local_crypto_context: Arc<HandshakeCryptoContext>,
+        handshake_timeout: Duration,
     ) -> Self {
         assert!(!hops.is_empty());
         let (next_hop, _) = hops.first().unwrap();
@@ -56,6 +62,8 @@ impl InitiatorStateMachine {
             tunnel_id,
             hops,
             fsm_lock,
+            local_crypto_context,
+            handshake_timeout,
         }
     }
 }
@@ -66,9 +74,12 @@ pub(super) struct TargetStateMachine {
     codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     tunnel_id: TunnelId,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+    local_crypto_context: Arc<HandshakeCryptoContext>,
+    handshake_timeout: Duration,
 }
 
 impl TargetStateMachine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
         socket: Arc<UdpSocket>,
@@ -77,6 +88,8 @@ impl TargetStateMachine {
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+        local_crypto_context: Arc<HandshakeCryptoContext>,
+        handshake_timeout: Duration,
     ) -> Self {
         TargetStateMachine {
             listener_tx,
@@ -86,6 +99,8 @@ impl TargetStateMachine {
             )))),
             tunnel_id,
             fsm_lock,
+            local_crypto_context,
+            handshake_timeout,
         }
     }
 }
@@ -405,6 +420,8 @@ impl FiniteStateMachine for InitiatorStateMachine {
         let peers = self.hops.clone();
         let final_result_tx = self.event_tx.clone();
         let fsm_lock = self.fsm_lock.clone();
+        let cc = self.local_crypto_context.clone();
+        let handshake_timeout = self.handshake_timeout;
 
         // create a channel used by the main FSM to communicate with the handshake fsm
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
@@ -466,6 +483,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                     tunnel_id,
                     next_hop,
                     fsm_lock.clone(),
+                    cc.clone(),
                 );
 
                 // create a channel for hooking the handshake results
@@ -510,9 +528,10 @@ impl FiniteStateMachine for InitiatorStateMachine {
                 });
 
                 // run the handshake fsm
+                let handshake_timeout = handshake_timeout;
                 tokio::spawn(async move {
                     handshake_fsm
-                        .run(event_hooked_rx, hooked_result_tx.clone())
+                        .run(event_hooked_rx, hooked_result_tx.clone(), handshake_timeout)
                         .await
                 });
 
@@ -661,6 +680,7 @@ impl FiniteStateMachine for TargetStateMachine {
             self.tunnel_id,
             None,
             self.fsm_lock.clone(),
+            self.local_crypto_context.clone(),
         );
 
         // create a channel for communicating with the handshake protocol
@@ -668,7 +688,12 @@ impl FiniteStateMachine for TargetStateMachine {
 
         // run the handshake state machine async
         let fsm_event_tx = self.event_tx.clone();
-        tokio::spawn(async move { handshake_fsm.run(event_rx, fsm_event_tx).await });
+        let handshake_timeout = self.handshake_timeout;
+        tokio::spawn(async move {
+            handshake_fsm
+                .run(event_rx, fsm_event_tx, handshake_timeout)
+                .await
+        });
 
         Ok(State::Connecting(SenderWrapper { event_tx }))
     }

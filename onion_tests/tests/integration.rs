@@ -36,12 +36,17 @@ fn run_peer(
     rps_api_addr: &str,
     config_file: PathBuf,
     key_file: &PathBuf,
+    priv_key_file: &PathBuf,
     pub_pem: Vec<u8>,
+    priv_pem: Vec<u8>,
 ) {
     // create rsa files
     let mut rsa_pem = File::create(&key_file).unwrap();
     rsa_pem.write_all(pub_pem.as_slice()).unwrap();
     rsa_pem.sync_all().unwrap();
+    let mut rsa_priv_pem = File::create(&priv_key_file).unwrap();
+    rsa_priv_pem.write_all(priv_pem.as_slice()).unwrap();
+    rsa_priv_pem.sync_all().unwrap();
 
     // write to config file
     let mut config = Ini::new();
@@ -53,7 +58,10 @@ fn run_peer(
         .set("p2p_port", p2p_port)
         .set("p2p_hostname", "127.0.0.1")
         .set("hop_count", "2")
-        .set("api_address", onion_api_addr);
+        .set("api_address", onion_api_addr)
+        .set("round_time", "100")
+        .set("private_hostkey", priv_key_file.to_str().unwrap())
+        .set("handshake_timeout", "3000");
     config
         .with_section(Some("rps"))
         .set("api_address", rps_api_addr);
@@ -171,25 +179,33 @@ fn integration_test() {
 
     let config_file_alice = dir.path().join("alice.config");
     let key_file_alice = dir.path().join("alice.key");
+    let priv_key_file_alice = dir.path().join("alice_priv.key");
     let config_file_bob = dir.path().join("bob.config");
     let key_file_bob = dir.path().join("bob.key");
+    let priv_key_file_bob = dir.path().join("bob_priv.key");
     let config_file_hop1 = dir.path().join("hop1.config");
     let key_file_hop1 = dir.path().join("hop1.key");
+    let priv_key_file_hop1 = dir.path().join("hop1_priv.key");
     let config_file_hop2 = dir.path().join("hop2.config");
     let key_file_hop2 = dir.path().join("hop2.key");
+    let priv_key_file_hop2 = dir.path().join("hop2_priv.key");
 
     // create RSA keys
     let alice_key = Rsa::generate(4096).unwrap();
     let alice_pub_pem = alice_key.public_key_to_pem().unwrap();
+    let alice_priv_pem = alice_key.private_key_to_pem().unwrap();
 
     let bob_key = Rsa::generate(4096).unwrap();
     let bob_pub_pem = bob_key.public_key_to_pem().unwrap();
+    let bob_priv_pem = bob_key.private_key_to_pem().unwrap();
 
     let hop1_key = Rsa::generate(4096).unwrap();
     let hop1_pub_pem = hop1_key.public_key_to_pem().unwrap();
+    let hop1_priv_pem = hop1_key.private_key_to_pem().unwrap();
 
     let hop2_key = Rsa::generate(4096).unwrap();
     let hop2_pub_pem = hop2_key.public_key_to_pem().unwrap();
+    let hop2_priv_pem = hop2_key.private_key_to_pem().unwrap();
 
     log::info!("TEST: Starting peer alice ..");
     run_peer(
@@ -198,7 +214,9 @@ fn integration_test() {
         "127.0.0.1:2003",
         config_file_alice,
         &key_file_alice,
+        &priv_key_file_alice,
         alice_pub_pem,
+        alice_priv_pem,
     );
 
     log::info!("TEST: Starting peer bob ..");
@@ -208,7 +226,9 @@ fn integration_test() {
         "127.0.0.1:3003",
         config_file_bob,
         &key_file_bob,
+        &priv_key_file_bob,
         bob_pub_pem,
+        bob_priv_pem,
     );
 
     log::info!("TEST: Starting peer hop1 ..");
@@ -218,7 +238,9 @@ fn integration_test() {
         "127.0.0.1:4003",
         config_file_hop1,
         &key_file_hop1,
+        &priv_key_file_hop1,
         hop1_pub_pem,
+        hop1_priv_pem,
     );
 
     log::info!("TEST: Starting peer hop2 ..");
@@ -228,7 +250,9 @@ fn integration_test() {
         "127.0.0.1:5003",
         config_file_hop2,
         &key_file_hop2,
+        &priv_key_file_hop2,
         hop2_pub_pem,
+        hop2_priv_pem,
     );
 
     // connect to alice from CM/CI

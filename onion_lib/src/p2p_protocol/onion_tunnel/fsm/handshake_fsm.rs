@@ -1,5 +1,5 @@
 use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, ServerHello};
-use crate::p2p_protocol::onion_tunnel::crypto::CryptoContext;
+use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, HandshakeCryptoContext};
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::message_codec::{
     DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
@@ -53,6 +53,7 @@ pub struct HandshakeStateMachine<PT> {
     tunnel_id: TunnelId,
     next_hop: Option<SocketAddr>,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+    _crypto_context: Arc<HandshakeCryptoContext>,
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
@@ -61,6 +62,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         tunnel_id: TunnelId,
         next_hop: Option<SocketAddr>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+        crypto_context: Arc<HandshakeCryptoContext>,
     ) -> Self {
         Self {
             _phantom: Default::default(),
@@ -68,6 +70,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             tunnel_id,
             next_hop,
             fsm_lock,
+            _crypto_context: crypto_context,
         }
     }
 
@@ -83,7 +86,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     pub async fn action_init(&mut self) -> Result<HandshakeState, ProtocolError> {
         // create client hello and give it to message codec
         let client_hello = ClientHello::new();
-        // TODO fill client hello
+        // TODO fill client hello: use self._crypto_context
         log::trace!(
             "Tunnel={:?}: Initialize handshake fsm: Send ClientHello=({:?}) via message codec",
             self.tunnel_id,
@@ -112,9 +115,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // create server hello and give it to message_codec
         let server_hello = ServerHello::new();
-        // TODO fill server_hello with information for secure key exchange
+        // TODO fill server_hello with information for secure key exchange: use self._crypto_context
 
-        // TODO crate cc with key and cipher
+        // TODO crate cc with symmetric key and cipher
         let cc = CryptoContext::new();
         codec.add_crypto_context(cc);
 
@@ -253,10 +256,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         &mut self,
         mut event_rx: Receiver<HandshakeEvent>,
         event_tx: Sender<FsmEvent>,
+        timeout_duration: Duration,
     ) {
         let mut current_state = PT::INIT_STATE;
-        // TODO make timeout configurable
-        let timeout_duration = Duration::from_millis(3000);
 
         log::trace!(
             "Tunnel={:?}: Run handshake FSM in INIT_STATE={:?}",
