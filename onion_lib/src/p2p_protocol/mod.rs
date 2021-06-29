@@ -134,7 +134,7 @@ impl P2pInterface {
                                     Some(tunnel) => {
                                         // forward message to tunnel
                                         log::trace!(
-                                            "Froward the parsed frame to the tunnel (ID {:?})",
+                                            "Forward the parsed frame to the tunnel (ID {:?})",
                                             tunnel_id
                                         );
                                         if tunnel.forward_event(event).await.is_err() {
