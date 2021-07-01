@@ -74,6 +74,11 @@ impl RawData {
         let padding_len = u16::from_le_bytes(padding_size);
         let message_type = message_type_buf[0];
         if message_type != APP_DATA && message_type != HANDSHAKE_DATA {
+            log::warn!(
+                "Tunnel={:?}: Invalid message type: {}",
+                tunnel_id,
+                message_type
+            );
             return Err(ProtocolError::UnexpectedMessageType);
         }
         let data_len = (PAYLOAD_SIZE - size_of::<u16>() - size_of::<u8>()) as u16 - padding_len;
