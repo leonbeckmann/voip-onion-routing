@@ -336,15 +336,8 @@ impl P2pCodec for InitiatorEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
         frame.set_frameId(self.forward_frame_id);
-        let iv = if let Some(cc) = self.crypto_contexts.first() {
-            let iv = cc.get_iv();
-            frame.set_iv(Bytes::copy_from_slice(iv.as_ref()));
-            Some(iv)
-        } else {
-            None
-        };
 
-        let ready_bytes_vec = match data {
+        let iv_data_bytes = match data {
             DataType::AppData(data) => {
                 // fragmentation
                 let mut chunks = vec![];
@@ -355,15 +348,18 @@ impl P2pCodec for InitiatorEndpoint {
                     let mut raw_data =
                         RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and keys using the crypto contexts
-                    assert!(iv.is_some());
-                    if let Some(iv) = iv.as_ref() {
-                        // at least one cc available, use same iv for all encryption with different keys
-                        for cc in self.crypto_contexts.iter().rev() {
-                            raw_data = cc.encrypt(raw_data.as_ref(), iv);
-                        }
+                    let mut iv = vec![0; 16];
+                    openssl::rand::rand_bytes(&mut iv);
+    
+                    assert!(!self.crypto_contexts.is_empty());
+                    // encrypt via iv and keys using the crypto contexts
+                    for cc in self.crypto_contexts.iter().rev() {
+                        let (iv_, data_) = cc.encrypt(&iv, &raw_data);
+                        iv = iv_;
+                        raw_data = data_;
                     }
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
-                    chunks.push(raw_data);
+                    chunks.push((iv, raw_data));
                 }
                 log::debug!(
                     "Tunnel={:?}: Send encrypted application data ({:?} fragment(s)) to next hop {:?}.",
@@ -371,6 +367,7 @@ impl P2pCodec for InitiatorEndpoint {
                     chunks.len(),
                     self.next_hop
                 );
+
                 chunks
             }
             DataType::ClientHello(mut client_hello) => {
@@ -405,15 +402,17 @@ impl P2pCodec for InitiatorEndpoint {
                 handshake.set_clientHello(client_hello);
                 let data = handshake.write_to_bytes().unwrap();
                 let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
+                let mut iv = vec![0; 16];
+                openssl::rand::rand_bytes(&mut iv);
+
                 // encrypt via iv and keys using the crypto contexts
-                if let Some(iv) = iv {
-                    // at least one cc available, use same iv for all encryption with different keys
-                    for cc in self.crypto_contexts.iter().rev() {
-                        data = cc.encrypt(data.as_ref(), iv.as_ref());
-                    }
+                for cc in self.crypto_contexts.iter().rev() {
+                    let (iv_, data_) = cc.encrypt(&iv, &data);
+                    iv = iv_;
+                    data = data_;
                 }
                 assert_eq!(data.len(), PAYLOAD_SIZE);
-                vec![data]
+                vec![(iv, data)]
             }
             DataType::RoutingInformation(data) => {
                 log::debug!(
@@ -426,16 +425,17 @@ impl P2pCodec for InitiatorEndpoint {
                 handshake.set_routing(data);
                 let data = handshake.write_to_bytes().unwrap();
                 let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
+                let mut iv = vec![0; 16];
+                openssl::rand::rand_bytes(&mut iv);
+                
                 // encrypt via iv and keys using the crypto contexts
-                assert!(iv.is_some());
-                if let Some(iv) = iv {
-                    // at least one cc available, use same iv for all encryption with different keys
-                    for cc in self.crypto_contexts.iter().rev() {
-                        data = cc.encrypt(data.as_ref(), iv.as_ref());
-                    }
+                for cc in self.crypto_contexts.iter().rev() {
+                    let (iv_, data_) = cc.encrypt(&iv, &data);
+                    iv = iv_;
+                    data = data_;
                 }
                 assert_eq!(data.len(), PAYLOAD_SIZE);
-                vec![data]
+                vec![(iv, data)]
             }
             _ => {
                 log::warn!(
@@ -447,7 +447,8 @@ impl P2pCodec for InitiatorEndpoint {
         };
 
         // write fragmented frames
-        for data in ready_bytes_vec {
+        for (iv, data) in iv_data_bytes {
+            frame.set_iv(Bytes::from(iv));
             frame.set_data(Bytes::from(data));
             let data = frame.write_to_bytes().unwrap();
 
@@ -470,6 +471,7 @@ impl P2pCodec for InitiatorEndpoint {
         iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
         // expected incoming data or incoming handshake, process and return
+        let mut iv = iv.to_vec();
 
         log::trace!(
             "Tunnel={:?}: Process incoming data at initiator hop",
@@ -480,7 +482,9 @@ impl P2pCodec for InitiatorEndpoint {
         if !self.crypto_contexts.is_empty() {
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
             for cc in self.crypto_contexts.iter() {
-                dec_data = cc.decrypt(data.as_ref(), iv.as_ref());
+                let (iv_, data_) = cc.decrypt(&iv, &data);
+                iv = iv_;
+                dec_data = data_;
             }
         }
 
@@ -553,15 +557,8 @@ impl P2pCodec for TargetEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
         frame.set_frameId(self.backward_frame_id);
-        let iv = if let Some(cc) = &self.crypto_context {
-            let iv = cc.get_iv();
-            frame.set_iv(Bytes::copy_from_slice(iv.as_ref()));
-            Some(iv)
-        } else {
-            None
-        };
 
-        let ready_bytes_vec = match data {
+        let iv_data_bytes = match data {
             DataType::AppData(data) => {
                 // fragmentation
                 let mut chunks = vec![];
@@ -572,16 +569,13 @@ impl P2pCodec for TargetEndpoint {
                     let mut raw_data =
                         RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and key
-                    assert!(iv.is_some() && self.crypto_context.is_some());
-                    if let Some(iv) = iv.as_ref() {
-                        raw_data = self
-                            .crypto_context
-                            .as_ref()
-                            .unwrap()
-                            .encrypt(raw_data.as_ref(), iv);
-                    }
+                    let mut iv = vec![0; 16];
+                    openssl::rand::rand_bytes(&mut iv);
+                    assert!(self.crypto_context.is_some());
+                    let (iv, raw_data) = self.crypto_context.as_ref().unwrap().encrypt(&iv, &raw_data);
+
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
-                    chunks.push(raw_data)
+                    chunks.push((iv, raw_data));
                 }
                 log::debug!(
                     "Tunnel={:?}: Send encrypted application data ({:?} fragment(s)) to prev hop {:?}",
@@ -617,7 +611,7 @@ impl P2pCodec for TargetEndpoint {
                 let data = handshake.write_to_bytes().unwrap();
                 let raw_data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
                 assert_eq!(raw_data.len(), PAYLOAD_SIZE);
-                vec![raw_data]
+                vec![(vec![], raw_data)]
             }
             _ => {
                 log::warn!(
@@ -628,7 +622,8 @@ impl P2pCodec for TargetEndpoint {
             }
         };
 
-        for data in ready_bytes_vec {
+        for (iv, data) in iv_data_bytes {
+            frame.set_iv(Bytes::from(iv));
             frame.set_data(Bytes::from(data));
             let data = frame.write_to_bytes().unwrap();
 
@@ -661,7 +656,8 @@ impl P2pCodec for TargetEndpoint {
         if let Some(cc) = &self.crypto_context {
             // decrypt using keys and iv
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
-            data = cc.decrypt(data.as_ref(), iv.as_ref());
+            let (_iv, data_) = cc.decrypt(&iv, &data);
+            data = data_;
         }
         let raw_data = RawData::deserialize(data.as_ref(), self.tunnel_id)?;
         match raw_data.message_type {
@@ -715,6 +711,11 @@ impl P2pCodec for TargetEndpoint {
                 self.tunnel_id
             );
             self.crypto_context = Some(cc);
+        } else {
+            log::warn!(
+                "Tunnel={:?}: Crypto context of this target codec already set",
+                self.tunnel_id
+            );
         }
     }
 }
@@ -772,21 +773,22 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Forward => {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
-                let decrypted_data = self.crypto_context.decrypt(data.as_ref(), iv.as_ref());
+                let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data);
                 frame.set_frameId(self.forward_frame_id);
+                frame.set_iv(Bytes::from(iv));
                 frame.set_data(Bytes::from(decrypted_data));
                 (frame, self.next_hop)
             }
             Direction::Backward => {
                 // encrypt using iv and key
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
-                let encrypted_data = self.crypto_context.encrypt(data.as_ref(), iv.as_ref());
+                let (iv, encrypted_data) = self.crypto_context.encrypt(&iv, &data);
                 frame.set_frameId(self.backward_frame_id);
+                frame.set_iv(Bytes::from(iv));
                 frame.set_data(Bytes::from(encrypted_data));
                 (frame, self.prev_hop)
             }
         };
-        frame.set_iv(iv);
 
         let data = frame.write_to_bytes().unwrap();
 
