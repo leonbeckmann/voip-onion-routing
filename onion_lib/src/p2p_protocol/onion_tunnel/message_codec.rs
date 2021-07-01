@@ -4,7 +4,7 @@ use crate::p2p_protocol::messages::p2p_messages::{
     ApplicationData, ClientHello, Close, HandshakeData, RoutingInformation, ServerHello,
     TunnelFrame,
 };
-use crate::p2p_protocol::onion_tunnel::crypto::CryptoContext;
+use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, IVSIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
@@ -348,7 +348,7 @@ impl P2pCodec for InitiatorEndpoint {
                     let mut raw_data =
                         RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and keys using the crypto contexts
-                    let mut iv = vec![0; 16];
+                    let mut iv = vec![0; IVSIZE];
                     openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                     // Unecrypted data transfer is not allowed
                     assert!(!self.crypto_contexts.is_empty());
@@ -402,7 +402,7 @@ impl P2pCodec for InitiatorEndpoint {
                 handshake.set_clientHello(client_hello);
                 let data = handshake.write_to_bytes().unwrap();
                 let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
-                let mut iv = vec![0; 16];
+                let mut iv = vec![0; IVSIZE];
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
 
                 // encrypt via iv and keys using the crypto contexts
@@ -425,7 +425,7 @@ impl P2pCodec for InitiatorEndpoint {
                 handshake.set_routing(data);
                 let data = handshake.write_to_bytes().unwrap();
                 let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
-                let mut iv = vec![0; 16];
+                let mut iv = vec![0; IVSIZE];
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
 
                 // encrypt via iv and keys using the crypto contexts
@@ -448,8 +448,8 @@ impl P2pCodec for InitiatorEndpoint {
 
         // write fragmented frames
         for (iv, data) in iv_data_bytes {
-            frame.set_iv(Bytes::from(iv));
-            frame.set_data(Bytes::from(data));
+            frame.set_iv(iv.into());
+            frame.set_data(data.into());
             let data = frame.write_to_bytes().unwrap();
 
             // write to stream
@@ -569,7 +569,7 @@ impl P2pCodec for TargetEndpoint {
                     let raw_data =
                         RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and key
-                    let mut iv = vec![0; 16];
+                    let mut iv = vec![0; IVSIZE];
                     openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                     // Unecrypted data transfer is not allowed
                     assert!(self.crypto_context.is_some());
@@ -607,7 +607,7 @@ impl P2pCodec for TargetEndpoint {
                 );
 
                 // prepare frame
-                let mut iv = vec![0; 16];
+                let mut iv = vec![0; IVSIZE];
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                 let mut handshake = HandshakeData::new();
                 handshake.set_serverHello(server_hello);
@@ -626,8 +626,8 @@ impl P2pCodec for TargetEndpoint {
         };
 
         for (iv, data) in iv_data_bytes {
-            frame.set_iv(Bytes::from(iv));
-            frame.set_data(Bytes::from(data));
+            frame.set_iv(iv.into());
+            frame.set_data(data.into());
             let data = frame.write_to_bytes().unwrap();
 
             // write to stream
@@ -778,8 +778,8 @@ impl P2pCodec for IntermediateHopCodec {
                 // decrypt using iv and key
                 let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data);
                 frame.set_frameId(self.forward_frame_id);
-                frame.set_iv(Bytes::from(iv));
-                frame.set_data(Bytes::from(decrypted_data));
+                frame.set_iv(iv.into());
+                frame.set_data(decrypted_data.into());
                 (frame, self.next_hop)
             }
             Direction::Backward => {
@@ -787,8 +787,8 @@ impl P2pCodec for IntermediateHopCodec {
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
                 let (iv, encrypted_data) = self.crypto_context.encrypt(&iv, &data);
                 frame.set_frameId(self.backward_frame_id);
-                frame.set_iv(Bytes::from(iv));
-                frame.set_data(Bytes::from(encrypted_data));
+                frame.set_iv(iv.into());
+                frame.set_data(encrypted_data.into());
                 (frame, self.prev_hop)
             }
         };

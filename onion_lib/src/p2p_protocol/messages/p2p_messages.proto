@@ -28,6 +28,7 @@ message HandshakeData {
 message ClientHello {
   // frameId used for communicating with the source
   uint64 backwardFrameId = 1;
+  bytes ecdh_public_key = 2;
 }
 
 message ServerHello {
@@ -35,6 +36,7 @@ message ServerHello {
   uint64 backwardFrameId = 1;
   // used for telling the source how to address the peer
   uint64 forwardFrameId = 2;
+  bytes ecdh_public_key = 3;
 }
 
 message RoutingInformation {

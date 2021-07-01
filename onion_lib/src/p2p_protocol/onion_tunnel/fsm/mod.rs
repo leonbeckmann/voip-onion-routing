@@ -747,6 +747,8 @@ pub enum ProtocolError {
     UnexpectedMessageType,
     #[error("Received empty message")]
     EmptyMessage,
+    #[error("ECDH key exchange failed during handshake")]
+    HandshakeECDHFailure,
     #[error("Cannot pass message to the handshake protocol")]
     HandshakeSendFailure,
     #[error("Handshake timeout occurred")]

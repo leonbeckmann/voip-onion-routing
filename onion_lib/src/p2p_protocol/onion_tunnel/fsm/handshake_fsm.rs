@@ -1,5 +1,5 @@
 use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, ServerHello};
-use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, HandshakeCryptoContext};
+use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, HandshakeCryptoContext, KEYSIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::message_codec::{
     DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
@@ -7,6 +7,11 @@ use crate::p2p_protocol::onion_tunnel::message_codec::{
 use crate::p2p_protocol::onion_tunnel::FsmLockState;
 use crate::p2p_protocol::TunnelId;
 use bytes::Bytes;
+use openssl::derive::Deriver;
+use openssl::ec::EcGroup;
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, Private};
+use openssl::sha::sha256;
 use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
@@ -54,6 +59,7 @@ pub struct HandshakeStateMachine<PT> {
     next_hop: Option<SocketAddr>,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     _crypto_context: Arc<HandshakeCryptoContext>,
+    ecdh_private_key: Option<PKey<Private>>,
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
@@ -71,6 +77,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             next_hop,
             fsm_lock,
             _crypto_context: crypto_context,
+            ecdh_private_key: None,
         }
     }
 
@@ -84,9 +91,18 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     }
 
     pub async fn action_init(&mut self) -> Result<HandshakeState, ProtocolError> {
+        // Generate new ECDH key pair
+        let initiator_key =
+            openssl::ec::EcKey::generate(&EcGroup::from_curve_name(Nid::SECP256K1).unwrap())
+                .unwrap();
+        let initiator_key = PKey::from_ec_key(initiator_key).unwrap();
+        let initiator_pub_der = initiator_key.public_key_to_der().unwrap();
+        self.ecdh_private_key = Some(initiator_key);
+
         // create client hello and give it to message codec
-        let client_hello = ClientHello::new();
-        // TODO fill client hello: use self._crypto_context
+        let mut client_hello = ClientHello::new();
+        client_hello.set_ecdh_public_key(initiator_pub_der.into());
+
         log::trace!(
             "Tunnel={:?}: Initialize handshake fsm: Send ClientHello=({:?}) via message codec",
             self.tunnel_id,
@@ -110,15 +126,33 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             self.tunnel_id,
             data
         );
+
+        // Generate new ECDH key pair
+        let receiver_key =
+            openssl::ec::EcKey::generate(&EcGroup::from_curve_name(Nid::SECP256K1).unwrap())
+                .unwrap();
+        let receiver_key = PKey::from_ec_key(receiver_key).unwrap();
+        let receiver_pub_der = receiver_key.public_key_to_der().unwrap();
+
+        // Returns if the key or the format is invalid
+        let initiator_pub = PKey::public_key_from_der(&data.ecdh_public_key)
+            .map_err(|_| ProtocolError::HandshakeECDHFailure)?;
+
+        // Derive shared secret
+        let mut deriver = Deriver::new(&receiver_key).unwrap();
+        deriver.set_peer(&initiator_pub).unwrap();
+        let shared_secret = deriver.derive_to_vec().unwrap();
+        let encryption_key = sha256(&shared_secret);
+
         let mut codec = self.message_codec.lock().await;
         codec.set_backward_frame_id(data.backwardFrameId);
 
         // create server hello and give it to message_codec
-        let server_hello = ServerHello::new();
-        // TODO fill server_hello with information for secure key exchange: use self._crypto_context
+        let mut server_hello = ServerHello::new();
+        server_hello.set_ecdh_public_key(receiver_pub_der.into());
 
-        // TODO crate cc with symmetric key and cipher
-        let cc = CryptoContext::new();
+        // Create crypto context based on secure key exchange
+        let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
         codec.add_crypto_context(cc);
 
         log::trace!(
@@ -144,8 +178,22 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             data
         );
 
-        // TODO create crypto context based on secure key exchange
-        let cc = CryptoContext::new();
+        // Returns if the key or the format is invalid
+        let receiver_pub = PKey::public_key_from_der(&data.ecdh_public_key)
+            .map_err(|_| ProtocolError::HandshakeECDHFailure)?;
+
+        // This makes sure that the private key is dropped after ECDH finished
+        let initiator_key = self.ecdh_private_key.clone().unwrap();
+        self.ecdh_private_key = None;
+
+        // Derive shared secret
+        let mut deriver = Deriver::new(&initiator_key).unwrap();
+        deriver.set_peer(&receiver_pub).unwrap();
+        let shared_secret = deriver.derive_to_vec().unwrap();
+        let encryption_key = sha256(&shared_secret);
+
+        // Create crypto context based on secure key exchange
+        let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
 
         codec.set_forward_frame_id(data.forwardFrameId);
         codec.set_backward_frame_id(data.backwardFrameId);
