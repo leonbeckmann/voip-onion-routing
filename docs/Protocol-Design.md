@@ -134,14 +134,14 @@ the peer. This requires some additional management overhead and storage overhead
 
 ## Onion Handshake Protocol
 
-1. Alice selects an elliptic curve, generator point **G** and a secret **a**
+1. Alice selects an elliptic curve **E**, generator point **G** and a secret **a**
 2. Alice calculates the public ECDHE parameter **a * G**
-3. Alice sends **{curve, G, aG}** to Bob
+3. Alice sends **{E, G, aG}** to Bob
 4. Bob generates a secret **b** and calculates the public ECDHE parameter **b * G**
 5. Bob generates the shared secret **s = b * aG**
 6. Bob derives encryption keys and MAC keys from **s** using a KDF   
 7. Bob generates a challenge **c** for the challenge response
-8. Bob generates a signature **Sig = sign(SHA256({bG, c, curve, G, aG}))** using his private identity key
+8. Bob generates a signature **Sig = sign(SHA256({bG, c, E, G, aG}))** using his private identity key
 9. Bob encrypts the signature Sig using the encryption key from Bob to Alice
 10. Bob sends {bG, c, Sig_enc} to Alice
 11. Alice calculates the shared secret **s = a * bG**
