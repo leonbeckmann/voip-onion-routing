@@ -19,8 +19,8 @@ use tokio::sync::Mutex;
 pub(crate) const PAYLOAD_SIZE: usize = 1024;
 const RAW_META_DATA_SIZE: usize = size_of::<u8>() + size_of::<u16>();
 const PROTOBUF_APP_META_LEN: usize = 17; // buffer for protobuf meta information
-// maximum of data within a single packet
-const EFFECTIVE_PACKET_SIZE : usize = PAYLOAD_SIZE - RAW_META_DATA_SIZE - PROTOBUF_APP_META_LEN;
+                                         // maximum of data within a single packet
+const EFFECTIVE_PACKET_SIZE: usize = PAYLOAD_SIZE - RAW_META_DATA_SIZE - PROTOBUF_APP_META_LEN;
 
 pub enum ProcessedData {
     TransferredToNextHop,
@@ -352,7 +352,8 @@ impl P2pCodec for InitiatorEndpoint {
                     let mut app_data = ApplicationData::new();
                     app_data.set_data(Bytes::copy_from_slice(data_chunk));
                     let raw_data = app_data.write_to_bytes().unwrap();
-                    let mut raw_data = RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
+                    let mut raw_data =
+                        RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and keys using the crypto contexts
                     assert!(iv.is_some());
                     if let Some(iv) = iv.as_ref() {
@@ -568,7 +569,8 @@ impl P2pCodec for TargetEndpoint {
                     let mut app_data = ApplicationData::new();
                     app_data.set_data(Bytes::copy_from_slice(data_chunk));
                     let raw_data = app_data.write_to_bytes().unwrap();
-                    let mut raw_data = RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
+                    let mut raw_data =
+                        RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and key
                     assert!(iv.is_some() && self.crypto_context.is_some());
                     if let Some(iv) = iv.as_ref() {
