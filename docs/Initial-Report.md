@@ -53,7 +53,7 @@ We have selected Rust as our programming language. Beside the fact that both of 
 ## License
 For selecting the best fitting license for our software project, we first have to check the licences of our used libraries to avoid and licence issues with that: here all our libraries are either released via MIT License or Apache Licence 2.0.
 
-For a high compability with all those libraries we choose Apache License 2.0 for our project.
+For a high compatibility with all those libraries we choose Apache License 2.0 for our project.
 
 ## Programming Experience
 
