@@ -388,6 +388,24 @@ fn integration_test() {
     assert_eq!(incoming.data.as_slice(), message_pong);
     log::info!("TEST: Alice has received PONG");
 
+    // send fragmented data from Alice to Bob
+    log::info!("TEST: Request fragmented TunnelData from Alice to Bob");
+    let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
+    let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, message.to_vec()).to_be_vec();
+    write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
+
+    // expect incoming data in Bob's API
+    let mut collected_incoming_data = vec![];
+    for _ in 0..2 {
+        let (hdr, data) = read_msg(&mut bob_api);
+        assert_eq!(hdr.msg_type, ONION_TUNNEL_DATA);
+        let mut incoming = Box::<OnionTunnelData>::try_from(data).unwrap();
+        assert_eq!(incoming.tunnel_id, bob_from_alice_tunnel);
+        collected_incoming_data.append(incoming.data.as_mut())
+    }
+    assert_eq!(collected_incoming_data, message);
+    log::info!("TEST: Bob has received fragmented data");
+
     // TEST: destroy the connection via alice
 
     log::info!("TEST: Request TunnelDestroy from Alice");

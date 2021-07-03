@@ -170,7 +170,6 @@ through the partially established tunnels.
 
 ## Future Work
 - Rounds
-- Packet fragmentation
 - Cover traffic  
 - Robustness
 - Improving Test coverage (at the moment 80%)

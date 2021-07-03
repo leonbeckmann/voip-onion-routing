@@ -16,7 +16,11 @@ use std::mem::size_of;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
-pub(crate) const PAYLOAD_SIZE: u16 = 1024;
+pub(crate) const PAYLOAD_SIZE: usize = 1024;
+const RAW_META_DATA_SIZE: usize = size_of::<u8>() + size_of::<u16>();
+const PROTOBUF_APP_META_LEN: usize = 17; // buffer for protobuf meta information
+// maximum of data within a single packet
+const EFFECTIVE_PACKET_SIZE : usize = PAYLOAD_SIZE - RAW_META_DATA_SIZE - PROTOBUF_APP_META_LEN;
 
 pub enum ProcessedData {
     TransferredToNextHop,
@@ -42,9 +46,10 @@ const APP_DATA: u8 = 1;
 const HANDSHAKE_DATA: u8 = 2;
 
 impl RawData {
-    // TODO assert data small enough, else send multiple frames
     fn new(len: u16, message_type: u8, data: Vec<u8>) -> Self {
-        let padding_len = len - (data.len() as u16) - 3;
+        let data_len = (data.len() + RAW_META_DATA_SIZE) as u16;
+        assert!(len >= data_len);
+        let padding_len = len - data_len;
         Self {
             padding_len,
             message_type,
@@ -54,7 +59,7 @@ impl RawData {
     }
 
     fn deserialize(raw: &[u8], tunnel_id: TunnelId) -> Result<Self, ProtocolError> {
-        if raw.len() != (PAYLOAD_SIZE as usize) {
+        if raw.len() != PAYLOAD_SIZE {
             log::warn!(
                 "Tunnel={:?}: Received packet with invalid payload size. Disconnect",
                 tunnel_id
@@ -71,7 +76,7 @@ impl RawData {
         if message_type != APP_DATA && message_type != HANDSHAKE_DATA {
             return Err(ProtocolError::UnexpectedMessageType);
         }
-        let data_len = PAYLOAD_SIZE - padding_len - (size_of::<u16>() + size_of::<u8>()) as u16;
+        let data_len = (PAYLOAD_SIZE - size_of::<u16>() - size_of::<u8>()) as u16 - padding_len;
         let (data, _padding) = data_buf.split_at(data_len as usize);
         Ok(RawData {
             padding_len,
@@ -88,6 +93,7 @@ impl RawData {
         buf.push(self.message_type);
         buf.append(&mut self.data);
         buf.append(&mut self.padding);
+        assert_eq!(buf.len(), PAYLOAD_SIZE);
         buf
     }
 }
@@ -338,26 +344,33 @@ impl P2pCodec for InitiatorEndpoint {
             None
         };
 
-        let ready_bytes = match data {
+        let ready_bytes_vec = match data {
             DataType::AppData(data) => {
+                // fragmentation
+                let mut chunks = vec![];
+                for data_chunk in data.chunks(EFFECTIVE_PACKET_SIZE) {
+                    let mut app_data = ApplicationData::new();
+                    app_data.set_data(Bytes::copy_from_slice(data_chunk));
+                    let raw_data = app_data.write_to_bytes().unwrap();
+                    let mut raw_data = RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
+                    // encrypt via iv and keys using the crypto contexts
+                    assert!(iv.is_some());
+                    if let Some(iv) = iv.as_ref() {
+                        // at least one cc available, use same iv for all encryption with different keys
+                        for cc in self.crypto_contexts.iter().rev() {
+                            raw_data = cc.encrypt(raw_data.as_ref(), iv);
+                        }
+                    }
+                    assert_eq!(raw_data.len(), PAYLOAD_SIZE);
+                    chunks.push(raw_data);
+                }
                 log::debug!(
-                    "Tunnel={:?}: Send encrypted application data to next hop {:?}",
+                    "Tunnel={:?}: Send encrypted application data ({:?} fragment(s)) to next hop {:?}.",
                     self.tunnel_id,
+                    chunks.len(),
                     self.next_hop
                 );
-                let mut app_data = ApplicationData::new();
-                app_data.set_data(Bytes::from(data));
-                let data = app_data.write_to_bytes().unwrap();
-                let mut data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
-                // encrypt via iv and keys using the crypto contexts
-                assert!(iv.is_some());
-                if let Some(iv) = iv {
-                    // at least one cc available, use same iv for all encryption with different keys
-                    for cc in self.crypto_contexts.iter().rev() {
-                        data = cc.encrypt(data.as_ref(), iv.as_ref());
-                    }
-                }
-                data
+                chunks
             }
             DataType::ClientHello(mut client_hello) => {
                 // calculate frame_id
@@ -390,7 +403,7 @@ impl P2pCodec for InitiatorEndpoint {
                 let mut handshake = HandshakeData::new();
                 handshake.set_clientHello(client_hello);
                 let data = handshake.write_to_bytes().unwrap();
-                let mut data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
+                let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
                 // encrypt via iv and keys using the crypto contexts
                 if let Some(iv) = iv {
                     // at least one cc available, use same iv for all encryption with different keys
@@ -398,7 +411,8 @@ impl P2pCodec for InitiatorEndpoint {
                         data = cc.encrypt(data.as_ref(), iv.as_ref());
                     }
                 }
-                data
+                assert_eq!(data.len(), PAYLOAD_SIZE);
+                vec![data]
             }
             DataType::RoutingInformation(data) => {
                 log::debug!(
@@ -410,7 +424,7 @@ impl P2pCodec for InitiatorEndpoint {
                 let mut handshake = HandshakeData::new();
                 handshake.set_routing(data);
                 let data = handshake.write_to_bytes().unwrap();
-                let mut data = RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize();
+                let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
                 // encrypt via iv and keys using the crypto contexts
                 assert!(iv.is_some());
                 if let Some(iv) = iv {
@@ -419,7 +433,8 @@ impl P2pCodec for InitiatorEndpoint {
                         data = cc.encrypt(data.as_ref(), iv.as_ref());
                     }
                 }
-                data
+                assert_eq!(data.len(), PAYLOAD_SIZE);
+                vec![data]
             }
             _ => {
                 log::warn!(
@@ -430,15 +445,18 @@ impl P2pCodec for InitiatorEndpoint {
             }
         };
 
-        frame.set_data(Bytes::from(ready_bytes));
-        let data = frame.write_to_bytes().unwrap();
+        // write fragmented frames
+        for data in ready_bytes_vec {
+            frame.set_data(Bytes::from(data));
+            let data = frame.write_to_bytes().unwrap();
 
-        // write to stream
-        if let Err(e) = self.socket.send_to(data.as_ref(), self.next_hop).await {
-            return Err(ProtocolError::IOError(format!(
-                "Cannot write frame via initiator codec: {:?}",
-                e
-            )));
+            // write to stream
+            if let Err(e) = self.socket.send_to(data.as_ref(), self.next_hop).await {
+                return Err(ProtocolError::IOError(format!(
+                    "Cannot write frame via initiator codec: {:?}",
+                    e
+                )));
+            }
         }
 
         Ok(())
@@ -542,27 +560,34 @@ impl P2pCodec for TargetEndpoint {
             None
         };
 
-        let ready_bytes = match data {
+        let ready_bytes_vec = match data {
             DataType::AppData(data) => {
+                // fragmentation
+                let mut chunks = vec![];
+                for data_chunk in data.chunks(EFFECTIVE_PACKET_SIZE) {
+                    let mut app_data = ApplicationData::new();
+                    app_data.set_data(Bytes::copy_from_slice(data_chunk));
+                    let raw_data = app_data.write_to_bytes().unwrap();
+                    let mut raw_data = RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
+                    // encrypt via iv and key
+                    assert!(iv.is_some() && self.crypto_context.is_some());
+                    if let Some(iv) = iv.as_ref() {
+                        raw_data = self
+                            .crypto_context
+                            .as_ref()
+                            .unwrap()
+                            .encrypt(raw_data.as_ref(), iv);
+                    }
+                    assert_eq!(raw_data.len(), PAYLOAD_SIZE);
+                    chunks.push(raw_data)
+                }
                 log::debug!(
-                    "Tunnel={:?}: Send encrypted application data to prev hop {:?}",
+                    "Tunnel={:?}: Send encrypted application data ({:?} fragment(s)) to prev hop {:?}",
                     self.tunnel_id,
+                    chunks.len(),
                     self.prev_hop
                 );
-                let mut app_data = ApplicationData::new();
-                app_data.set_data(Bytes::from(data));
-                let data = app_data.write_to_bytes().unwrap();
-                let mut data = RawData::new(PAYLOAD_SIZE, APP_DATA, data).serialize();
-                // encrypt via iv and key
-                assert!(iv.is_some() && self.crypto_context.is_some());
-                if let Some(iv) = iv {
-                    data = self
-                        .crypto_context
-                        .as_ref()
-                        .unwrap()
-                        .encrypt(data.as_ref(), iv.as_ref());
-                }
-                data
+                chunks
             }
             DataType::ServerHello(mut server_hello) => {
                 // calculate frame_ids
@@ -588,7 +613,9 @@ impl P2pCodec for TargetEndpoint {
                 let mut handshake = HandshakeData::new();
                 handshake.set_serverHello(server_hello);
                 let data = handshake.write_to_bytes().unwrap();
-                RawData::new(PAYLOAD_SIZE, HANDSHAKE_DATA, data).serialize()
+                let raw_data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
+                assert_eq!(raw_data.len(), PAYLOAD_SIZE);
+                vec![raw_data]
             }
             _ => {
                 log::warn!(
@@ -599,15 +626,17 @@ impl P2pCodec for TargetEndpoint {
             }
         };
 
-        frame.set_data(Bytes::from(ready_bytes));
-        let data = frame.write_to_bytes().unwrap();
+        for data in ready_bytes_vec {
+            frame.set_data(Bytes::from(data));
+            let data = frame.write_to_bytes().unwrap();
 
-        // write to stream
-        if let Err(e) = self.socket.send_to(data.as_ref(), self.prev_hop).await {
-            return Err(ProtocolError::IOError(format!(
-                "Cannot write frame via target codec: {:?}",
-                e
-            )));
+            // write to stream
+            if let Err(e) = self.socket.send_to(data.as_ref(), self.prev_hop).await {
+                return Err(ProtocolError::IOError(format!(
+                    "Cannot write frame via target codec: {:?}",
+                    e
+                )));
+            }
         }
 
         Ok(())
@@ -705,7 +734,7 @@ impl P2pCodec for IntermediateHopCodec {
             "Tunnel={:?}: Process incoming data at intermediate hop",
             self.tunnel_id
         );
-        if data.len() != (PAYLOAD_SIZE as usize) {
+        if data.len() != PAYLOAD_SIZE {
             // disconnect immediately due to size error
             log::warn!(
                 "Tunnel={:?}: Received packet with invalid payload size. Disconnect",
