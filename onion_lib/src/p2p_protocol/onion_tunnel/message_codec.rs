@@ -487,7 +487,7 @@ impl P2pCodec for InitiatorEndpoint {
         if !self.crypto_contexts.is_empty() {
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
             for cc in self.crypto_contexts.iter() {
-                let (iv_, data_) = cc.decrypt(&iv, &data);
+                let (iv_, data_) = cc.decrypt(&iv, &dec_data);
                 iv = iv_;
                 dec_data = data_;
             }
