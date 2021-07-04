@@ -1,12 +1,13 @@
+use openssl::error::ErrorStack;
 use openssl::pkey::{Private, Public};
 use openssl::rsa::Rsa;
-use openssl::symm::Cipher;
+use openssl::symm::{Cipher, Crypter, Mode};
 
 pub(crate) const KEYSIZE: usize = 16;
 pub(crate) const IVSIZE: usize = 16;
 
 const DATA_CIPHER: fn() -> Cipher = openssl::symm::Cipher::aes_128_ctr;
-const IV_CIPHER: fn() -> Cipher = openssl::symm::Cipher::aes_128_ctr;
+const IV_CIPHER: fn() -> Cipher = openssl::symm::Cipher::aes_128_ecb;
 
 #[derive(Debug, Clone)]
 pub struct CryptoContext {
@@ -27,14 +28,14 @@ impl CryptoContext {
         let enc_data = openssl::symm::encrypt(DATA_CIPHER(), &self.key, Some(iv), data).unwrap();
 
         // encrypt iv
-        let enc_iv = openssl::symm::encrypt(IV_CIPHER(), &[0; 16], Some(&self.key), iv).unwrap();
+        let enc_iv = encrypt_no_pad(IV_CIPHER(), &self.key, None, iv).unwrap();
 
         (enc_iv, enc_data)
     }
 
     pub fn decrypt(&self, iv: &[u8], data: &[u8]) -> (Vec<u8>, Vec<u8>) {
         // decrypt iv
-        let dec_iv = openssl::symm::decrypt(IV_CIPHER(), &[0; 16], Some(&self.key), iv).unwrap();
+        let dec_iv = decrypt_no_pad(IV_CIPHER(), &self.key, None, iv).unwrap();
 
         // decrypt data
         let dec_data =
@@ -59,6 +60,36 @@ impl HandshakeCryptoContext {
     }
 }
 
+fn encrypt_no_pad(
+    t: Cipher,
+    key: &[u8],
+    iv: Option<&[u8]>,
+    data: &[u8],
+) -> Result<Vec<u8>, ErrorStack> {
+    let mut c = Crypter::new(t, Mode::Encrypt, key, iv)?;
+    c.pad(false);
+    let mut out = vec![0; data.len() + t.block_size()];
+    let count = c.update(data, &mut out)?;
+    let rest = c.finalize(&mut out[count..])?;
+    out.truncate(count + rest);
+    Ok(out)
+}
+
+pub fn decrypt_no_pad(
+    t: Cipher,
+    key: &[u8],
+    iv: Option<&[u8]>,
+    data: &[u8],
+) -> Result<Vec<u8>, ErrorStack> {
+    let mut c = Crypter::new(t, Mode::Decrypt, key, iv)?;
+    c.pad(false);
+    let mut out = vec![0; data.len() + t.block_size()];
+    let count = c.update(data, &mut out)?;
+    let rest = c.finalize(&mut out[count..])?;
+    out.truncate(count + rest);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, IVSIZE, KEYSIZE};
@@ -71,9 +102,9 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto TextSome Crypto Text".to_vec();
 
-        let crypt1 = CryptoContext::new(sym_key1.clone());
-        let crypt2 = CryptoContext::new(sym_key2.clone());
-        let crypt3 = CryptoContext::new(sym_key3.clone());
+        let crypt1 = CryptoContext::new(sym_key1);
+        let crypt2 = CryptoContext::new(sym_key2);
+        let crypt3 = CryptoContext::new(sym_key3);
 
         let (enc_iv, enc_data) = crypt1.encrypt(&iv, &data);
         let (enc_iv, enc_data) = crypt2.encrypt(&enc_iv, &enc_data);
@@ -96,9 +127,9 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto Text".to_vec();
 
-        let crypt1 = CryptoContext::new(sym_key1.clone());
-        let crypt2 = CryptoContext::new(sym_key2.clone());
-        let crypt3 = CryptoContext::new(sym_key3.clone());
+        let crypt1 = CryptoContext::new(sym_key1);
+        let crypt2 = CryptoContext::new(sym_key2);
+        let crypt3 = CryptoContext::new(sym_key3);
 
         let (enc_iv, enc_data) = crypt1.encrypt(&iv, &data);
         let (enc_iv, enc_data) = crypt2.encrypt(&enc_iv, &enc_data);
@@ -119,7 +150,7 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto TextSome Crypto Text".to_vec();
 
-        let crypt = CryptoContext::new(sym_key.clone());
+        let crypt = CryptoContext::new(sym_key);
         let (enc_iv, enc_data) = crypt.encrypt(&iv, &data);
 
         // Assert length
@@ -133,7 +164,7 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto Text".to_vec();
 
-        let crypt = CryptoContext::new(sym_key.clone());
+        let crypt = CryptoContext::new(sym_key);
         let (enc_iv, enc_data) = crypt.encrypt(&iv, &data);
 
         // Assert length
