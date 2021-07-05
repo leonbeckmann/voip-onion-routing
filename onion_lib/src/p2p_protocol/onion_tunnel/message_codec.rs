@@ -578,7 +578,11 @@ impl P2pCodec for TargetEndpoint {
                     openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                     // Unecrypted data transfer is not allowed
                     assert!(self.crypto_context.is_some());
-                    let (iv, raw_data) = self.crypto_context.as_ref().unwrap().encrypt(&iv, &raw_data);
+                    let (iv, raw_data) = self
+                        .crypto_context
+                        .as_ref()
+                        .unwrap()
+                        .encrypt(&iv, &raw_data);
 
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
                     chunks.push((iv, raw_data));
