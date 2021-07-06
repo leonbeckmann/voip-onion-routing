@@ -90,7 +90,7 @@ impl P2pInterface {
                                         addr,
                                         self.onion_tunnels.clone(),
                                         self.api_interface.clone(),
-                                        self.config.crypto_context.clone(),
+                                        self.config.crypto_config.clone(),
                                         self.config.handshake_message_timeout,
                                     )
                                     .await;
@@ -209,7 +209,7 @@ impl P2pInterface {
             self.config.rps_api_address,
             tx,
             self.api_interface.clone(),
-            self.config.crypto_context.clone(),
+            self.config.crypto_config.clone(),
             self.config.handshake_message_timeout,
         )
         .await;

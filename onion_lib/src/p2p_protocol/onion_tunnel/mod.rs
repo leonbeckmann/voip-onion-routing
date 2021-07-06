@@ -18,7 +18,7 @@ use crate::p2p_protocol::onion_tunnel::fsm::{
 use crate::p2p_protocol::{ConnectionId, Direction, P2pError};
 
 use super::{FrameId, TunnelId};
-use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoContext;
+use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use crate::p2p_protocol::rps_api::rps_get_peer;
 use std::time::Duration;
 
@@ -231,7 +231,7 @@ impl OnionTunnel {
         rps_api_address: SocketAddr,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
         api_interface: Weak<ApiInterface>,
-        local_crypto_context: Arc<HandshakeCryptoContext>,
+        local_crypto_context: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
     ) -> TunnelId {
         // select intermediate hops via rps module and hop count
@@ -318,7 +318,7 @@ impl OnionTunnel {
         source: SocketAddr,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
         api_interface: Weak<ApiInterface>,
-        local_crypto_context: Arc<HandshakeCryptoContext>,
+        local_crypto_context: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
     ) -> TunnelId {
         // create a channel for handing events to the fsm

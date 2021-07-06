@@ -1,7 +1,15 @@
+use std::sync::Arc;
+
+use openssl::derive::Deriver;
+use openssl::ec::EcGroup;
 use openssl::error::ErrorStack;
-use openssl::pkey::{Private, Public};
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, Private, Public};
 use openssl::rsa::Rsa;
+use openssl::sha::sha256;
 use openssl::symm::{Cipher, Crypter, Mode};
+
+use super::fsm::ProtocolError;
 
 pub(crate) const KEYSIZE: usize = 16;
 pub(crate) const IVSIZE: usize = 16;
@@ -46,17 +54,63 @@ impl CryptoContext {
 }
 
 #[derive(Debug)]
-pub struct HandshakeCryptoContext {
+pub struct HandshakeCryptoConfig {
     private_host_key: Rsa<Private>,
     pub public_host_key: Rsa<Public>,
 }
 
-impl HandshakeCryptoContext {
+impl HandshakeCryptoConfig {
     pub fn new(public_host_key: Rsa<Public>, private_host_key: Rsa<Private>) -> Self {
         Self {
             private_host_key,
             public_host_key,
         }
+    }
+}
+
+
+#[derive(Debug)]
+pub struct HandshakeCryptoContext {
+    crypto_config: Arc<HandshakeCryptoConfig>,
+    ecdh_private_key: Option<PKey<Private>>,
+}
+
+impl HandshakeCryptoContext {
+    pub fn new(crypto_config: Arc<HandshakeCryptoConfig>) -> Self {
+        Self {
+            crypto_config,
+            ecdh_private_key: None,
+        }
+    }
+
+    pub fn init_ecdh(&mut self) -> Vec<u8> {
+        // Generate new ECDH key pair
+        let initiator_key =
+            openssl::ec::EcKey::generate(&EcGroup::from_curve_name(Nid::SECP256K1).unwrap())
+                .unwrap();
+        let initiator_key = PKey::from_ec_key(initiator_key).unwrap();
+        let initiator_pub_der = initiator_key.public_key_to_der().unwrap();
+        self.ecdh_private_key = Some(initiator_key);
+
+        initiator_pub_der
+    }
+
+    pub fn finish_ecdh(&mut self, ecdh_public_key: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        // Returns if the key or the format is invalid
+        let receiver_pub = PKey::public_key_from_der(ecdh_public_key)
+            .map_err(|_| ProtocolError::HandshakeECDHFailure)?;
+
+        let initiator_key = self.ecdh_private_key.clone().unwrap();
+        // This makes sure that the private key is dropped after ECDH finished
+        self.ecdh_private_key = None;
+
+        // Derive shared secret
+        let mut deriver = Deriver::new(&initiator_key).unwrap();
+        deriver.set_peer(&receiver_pub).unwrap();
+        let shared_secret = deriver.derive_to_vec().unwrap();
+        let encryption_key = sha256(&shared_secret);
+
+        Ok(encryption_key.to_vec())
     }
 }
 

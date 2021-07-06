@@ -1,6 +1,6 @@
 extern crate ini;
 
-use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoContext;
+use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use ini::Ini;
 use openssl::rsa::Rsa;
 use std::fmt::Formatter;
@@ -14,7 +14,7 @@ use std::time::Duration;
 pub struct OnionConfiguration {
     pub p2p_port: u16,
     pub p2p_hostname: String,
-    pub crypto_context: Arc<HandshakeCryptoContext>,
+    pub crypto_config: Arc<HandshakeCryptoConfig>,
     pub hop_count: u8,
     pub onion_api_address: SocketAddr,
     pub rps_api_address: SocketAddr,
@@ -205,7 +205,7 @@ impl OnionConfiguration {
         Ok(OnionConfiguration {
             p2p_port,
             p2p_hostname,
-            crypto_context: Arc::new(HandshakeCryptoContext::new(host_key, private_host_key)),
+            crypto_config: Arc::new(HandshakeCryptoConfig::new(host_key, private_host_key)),
             hop_count,
             onion_api_address,
             rps_api_address,

@@ -1,7 +1,7 @@
 mod handshake_fsm;
 
 use crate::p2p_protocol::messages::p2p_messages::HandshakeData_oneof_message;
-use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoContext;
+use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
@@ -32,7 +32,7 @@ pub(super) struct InitiatorStateMachine {
     tunnel_id: TunnelId,
     hops: Vec<Peer>,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
-    local_crypto_context: Arc<HandshakeCryptoContext>,
+    local_crypto_config: Arc<HandshakeCryptoConfig>,
     handshake_timeout: Duration,
 }
 
@@ -47,7 +47,7 @@ impl InitiatorStateMachine {
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
-        local_crypto_context: Arc<HandshakeCryptoContext>,
+        local_crypto_config: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
     ) -> Self {
         assert!(!hops.is_empty());
@@ -62,7 +62,7 @@ impl InitiatorStateMachine {
             tunnel_id,
             hops,
             fsm_lock,
-            local_crypto_context,
+            local_crypto_config,
             handshake_timeout,
         }
     }
@@ -74,7 +74,7 @@ pub(super) struct TargetStateMachine {
     codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     tunnel_id: TunnelId,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
-    local_crypto_context: Arc<HandshakeCryptoContext>,
+    local_crypto_config: Arc<HandshakeCryptoConfig>,
     handshake_timeout: Duration,
 }
 
@@ -88,7 +88,7 @@ impl TargetStateMachine {
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
-        local_crypto_context: Arc<HandshakeCryptoContext>,
+        local_crypto_config: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
     ) -> Self {
         TargetStateMachine {
@@ -99,7 +99,7 @@ impl TargetStateMachine {
             )))),
             tunnel_id,
             fsm_lock,
-            local_crypto_context,
+            local_crypto_config,
             handshake_timeout,
         }
     }
@@ -420,7 +420,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
         let peers = self.hops.clone();
         let final_result_tx = self.event_tx.clone();
         let fsm_lock = self.fsm_lock.clone();
-        let cc = self.local_crypto_context.clone();
+        let cc = self.local_crypto_config.clone();
         let handshake_timeout = self.handshake_timeout;
 
         // create a channel used by the main FSM to communicate with the handshake fsm
@@ -680,7 +680,7 @@ impl FiniteStateMachine for TargetStateMachine {
             self.tunnel_id,
             None,
             self.fsm_lock.clone(),
-            self.local_crypto_context.clone(),
+            self.local_crypto_config.clone(),
         );
 
         // create a channel for communicating with the handshake protocol

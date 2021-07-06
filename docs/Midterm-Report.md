@@ -41,7 +41,7 @@ an OnionConfiguration struct using the rust-ini crate.
 pub struct OnionConfiguration {
     pub p2p_port: u16,
     pub p2p_hostname: String,
-    pub crypto_context: Arc<HandshakeCryptoContext>,    // contains local host-key pair
+    pub crypto_config: Arc<HandshakeCryptoConfig>,    // contains local host-key pair
     pub hop_count: u8,
     pub onion_api_address: SocketAddr,
     pub rps_api_address: SocketAddr,
