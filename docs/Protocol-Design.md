@@ -129,8 +129,13 @@ Another question would be if it is okay to leak how many packets with the same t
 This could leak information that help to distinguish short calls from longer calls and also real calls from
 cover traffic. 
 
-TODO Idea: Ensure dynamic tunnel ID's that only have to be used once. These ID's can be mapped to an internal tunnel ID at
+Optional Idea: Ensure dynamic tunnel ID's that only have to be used once. These ID's can be mapped to an internal tunnel ID at
 the peer. This requires some additional management overhead and storage overhead
+
+### Replay Protection
+Replay Attacks attack the Authenticity of Data, where valid transmission are repeated.
+Therefore, we have to ensure to add freshness to all type of messages, using nonces or timestamps which
+are then verified at the receiver.
 
 ## Onion Handshake Protocol
 

@@ -4,10 +4,10 @@
 
 ## Module Architecture
 
-![Logical Architecture](images/logical_structure.svg)
-
 In the following, the architecture of the onion module is described. The module is implemented
 as a fully asynchronous library using the tokio async runtime. The binary makes use of this library.
+
+![Logical Architecture](images/logical_structure.svg)
 
 ### Binary
 
@@ -16,7 +16,7 @@ and makes then use of the onion_lib to run a peer, using the given ini-config pa
 
 ### Library
 
-The onion_lib/lib.rs provides a function to run a peer, given a ini config file path:
+The onion_lib/lib.rs provides a function to run a peer, given an INI config file path:
 
 ```rust
 pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {}
@@ -50,7 +50,7 @@ pub struct OnionConfiguration {
 }
 ````
 
-### API Protocol
+### API Protocol Package
 
 The api_protocol structure is as follows:
 ```rust
@@ -111,20 +111,132 @@ pub(crate) enum OutgoingEvent {
 }
 ````
 
-### P2P Protocol
+### P2P Protocol Package
 
 The p2p_protocol structure is as follows:
 ```rust
 p2p_protocol
     |--> messages   // contains the protobuf file
-    |--> onion_tunnel
+    |--> onion_tunnel // onion tunnels, state machine and message codec
     |--> rps_api    // provides function for getting a random peer from rps
-    |--> mod.rs     // P2P_interface
+    |--> mod.rs     // P2P_interface inclusive udp listener
 ```
 
 TODO
 
 #### Peer-to-Peer Protocol Design
+
+The protocol is based on the security requirement discussion in [Protocol-Design](Protocol-Design.md). In the following,
+the protocol is shown and described for connection from an initiator Alice via an intermediate hop H to
+the target Bob:
+
+![Protocol](images/protocol.svg?raw=true)
+
+In the beginning, all, Alice, Hop and Bob have a RSA identity key pair. Further, Alice knows the public key of 
+Bob, since he is the callee recipient, and the public key of Hp (from RPS).
+
+**Step 1: ClientHello from Alice to Hop**
+
+Alice start with choosing an elliptic curve *E* and a generator point *G*. She then selects a private ECDHE
+parameter *a* and calculate her public parameter *aG*. Then she sends the *ClientHello = {E, G, aG}* to Hop.
+The ClientHello must not contain any integrity or authenticity protection, since Alice must not leak her identity to Hop. 
+Further, no replay protection is necessary since the ECDHE parameters are fresh already.
+
+**Step 2: ServerHello from Hop to Alice**
+
+The Hop receives the ClientHello from Alice and uses the provided curve and generator point to generate his own ECDHE 
+parameter pair *<h, hG>*. He then calculate the shared secret via the ECDHE *s = haG* and derives in total 4 MAC and ENC keys,
+one per direction (from Alice to Hop and from Hop to Alice, similar how TLS is doing, to have an additional protection in 
+one direction if the other direction's key is leaked). Since the Hop does not know yet, whether he is an intermediate hop or
+the target, he acts as he is the target. Therefore he creates a challenge for a Challenge-Response, which
+is used for authentication of Alice to the target. He then signs his public ECDHE parameter, the challenge and the ClientHello
+(in exactly this order for replay protection) using his private RSA identity key. Similar to the STS protocol, the signature is
+encrypted by the encryption key from Hop to Alice, to avoid that eavesdropper, who know the public key of the Hop, could
+verify the signature and leak the identity of the Hop. (This might not be that important in case of the Hop, but later the same
+procedure is done for the target Bob, where the identity should definitely be hidden). Then, the ServerHello is send back to Alice,
+containing the public ECDHE parameter, the challenge and the signature. We don't need further replay protection here, since
+the ECDHE parameter and the challenge is fresh already.
+
+**Step 3: RoutingInformation from Alice to Hop**
+Alice first calculates the shared secret and derives the same MAC and ENC keys as Hop. She then decrypts and verifies
+the signature to ensure that the data has not been changed (integrity) and the data is actually from Hop (authenticity).
+Then Alice creates the RoutingInformation, which will tell Hop that he should send the data to the address of Bob.
+This information is encrypted to ensure nobody than Hop knows the next hop and it is protected with a MAC to ensure
+the integrity of the information. Encrypted data and MAC is then send to Hop. 
+We don't need replay protection here, since the Hop only expects one RoutingInformation per session and the session keys,
+especially the MAC verification, ensure that the handshake would fail when RoutingInformation
+from an old session are send here.
+
+**Step 4: Processing RoutingInformation at Hop**
+
+The hop first verifies the MAC and then decrypts the routing information, which tells him that he is an intermediate hop
+and all the data should be transmitted to the peer at Bob's address.
+
+**Step 5: ClientHello from Alice to Bob**
+
+Alice then uses the same generator element and elliptic curve to create a new ECDHE parameter pair <a2, a2G>, similar to 
+Step 1. She then encrypts the ClientHello for Bob, using the ENC key from Alice to Hop (or when there are multiple hops, one enc per hop).
+This encrypted ClientHello will then be send to Hop.
+Again, no replay protection is required here, since the ECDHE parameters are fresh. Further, no integrity protection
+between Alice and the Hop is necessary, we only provide integrity protection from end-to-end (Alice-to-Bob). If the
+ClientHello would have been modified, the handshake would fail.
+
+**Step 6: Hop delegates data to Bob**
+
+Hop then receives the encrypted ClientHello, decrypts it using his ENC key with Alice and sends the data
+to Bob.
+
+**Step 7: ServerHello from Bob to Alice**
+
+This step is exactly the same as Step 2, where the Hop is replaced by Bob and the ServerHello is send
+back to the Hop (source address of the ClientHello).
+
+**Step 8: Hop delegates data to Alice**
+
+Hop then receives the plain ServerHello, encrypts it using his ENC key with Alice and sends the data
+to Alice.
+
+**Step 9: RoutingInformation from Alice to Bob**
+
+Very similar to Step 3 with some additional steps: First of all, the ServerHello is encrypted by the tunnel hops, thus
+the data first have to be decrypted using the ENC keys with the hops. Since Bob is the target,
+the challenge of Bob has to be answered by signing the challenge using the private RSA identity key from Alice.
+This is done for proving authenticity from Alice to Bob. The signature and the public identity key are then
+packed into the RoutingInformation packet, which is encrypted end-to-end using the ENC key to Bob. Further the MAC is 
+calculated. Then the encrypted data and the MAC is tunneled via the hops.
+
+**Step 10: Hop delegates encrypted RoutingInformation to Bob**
+
+Hop then receives the double encrypted RoutingInformation, decrypts it using his ENC key with Alice and sends the data
+to Bob.
+
+**Step 11: Processing RoutingInformation at Bob** 
+
+Similar to Step 4, but now Bob is the target, so he will verify the challenge response. On success, the connection
+is established and ready for application data.
+
+**Step 12: Application Data between Alice and Bob**
+
+We obviously need confidentiality by end-to-end encryption, anonymity by tunneling, integrity by MACs on the 
+encrypted application data between Alice and Bob and replay protection. Authenticity is already ensured due to the 
+handshake design. This is where some additional challenges come in. First of all, we need any kind of nonce or timestamp
+within the data to ensure replay protection. Further, the MAC must not be trackable through the tunnel, to keep the anonymity.
+For this, the MAC has also be encrypted by each hop, such that it will change after each hop.
+Another challenge is the IV, which also must not be trackable. Since the packet length must be preserved by each hop
+and the padding length is a confidential information which has to be encrypted between the two ends, we cannot simply 
+add multiple IVs to a packet, one per hop. Pre-shared IVs are also not an option, due to the the statelessness of UDP 
+(We cannot say which IV is used for the next incoming package when we ensure that the IV is changed for each message).
+ECB mode is also not an option since otherwise, patterns in messages can be tracked over multiple hops.
+
+Due to the injectivity of symmetric encryption mechanisms (e.g. AES) there is a quite elegant solution for this problem:
+When Alice (or Bob) chooses a fresh IV, this IV can simply be encrypted by the encryption key
+and will form another fresh IV (injectivity: enc(iv1) == enc(iv2) ==> iv1 == iv2). Therefore, we can simply
+encrypt the single-block 16-byte IV via ECB (without padding) per hop. So when Alice creates an IV iv, then the message
+to Bob can be encrypted using this iv. Afterwards, the iv is encrypted by the same encryption key using ECB. This new iv
+is then used for the next hop and so on.
+
+
+#### Peer-to-Peer Protocol Implementation
 
 The p2p protocol is designed as a finite state machine (FSM), consisting of two components:
 The Handshake FSM and the Main FSM. Using a FSM eliminates unexpected / unhandled cases, since for every state
@@ -163,17 +275,41 @@ is updated after each successful handshake to an intermediate hop, such that the
 through the partially established tunnels.
 
 #### Handshake FSM
+TODO
 
-- message formats
-- message explanation
-- exception handling
+### Message format
+TODO
+
+### Exception Handling
+TODO
 
 ## Future Work
-- Rounds
-- Cover traffic  
+- Add Rounds
+- Add Cover traffic  
 - Robustness
 - Improving Test coverage (at the moment 80%)
 
 ## Workload Distribution
 
+#### Leon
+- Implementation of the API protocol
+- Implementation of the ConfigParser
+- Implementation RPS API
+- Design and Implementation FSM, Handshake FSM
+- Improvements in the p2p_protocol package
+- Padding and packet fragmentation  
+- Protocol Design (together)  
+- Integration Tests
+
+#### Florian
+- Gitlab CI
+- First Draft p2p_protocol implementation
+- Dynamic tunnel identifier protocol
+- Protocol Design (together)  
+- Implementation crypto stuff
+- Unit Tests
+
 ## Effort
+Leon: 120 hours
+
+Florian: TODO
