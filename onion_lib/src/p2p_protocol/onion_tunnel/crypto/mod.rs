@@ -74,6 +74,7 @@ impl HandshakeCryptoConfig {
 pub struct HandshakeCryptoContext {
     crypto_config: Arc<HandshakeCryptoConfig>,
     ecdh_private_key: PKey<Private>,
+    challenge: Vec<u8>,
 }
 
 impl HandshakeCryptoContext {
@@ -84,9 +85,13 @@ impl HandshakeCryptoContext {
                 .unwrap();
         let ecdh_private_key = PKey::from_ec_key(ecdh_private_key).unwrap();
 
+        let mut challenge = vec![0; 32];
+        openssl::rand::rand_bytes(&mut challenge).expect("Failed to generated random challenge");
+
         Self {
             crypto_config,
             ecdh_private_key,
+            challenge,
         }
     }
 
@@ -108,16 +113,28 @@ impl HandshakeCryptoContext {
         Ok(encryption_key.to_vec())
     }
 
-    pub fn hop_sign(&self, ecdh_public_key_initiator: &[u8]) -> Vec<u8> {
+    pub fn sign(&self, data: &[u8]) -> Vec<u8> {
         // Sign the data
         let rsa_private = PKey::from_rsa(self.crypto_config.private_host_key.clone()).unwrap();
         let mut signer = Signer::new(MessageDigest::sha256(), &rsa_private).unwrap();
-        signer.update(ecdh_public_key_initiator).unwrap();
-        signer
-            .update(&self.ecdh_private_key.public_key_to_der().unwrap())
-            .unwrap();
+        signer.update(data).unwrap();
 
         signer.sign_to_vec().unwrap()
+    }
+
+    pub fn verify(&self, signer_key: Rsa<Public>, signature: &[u8], data: &[u8]) -> bool {
+        let rsa_public = PKey::from_rsa(signer_key).unwrap();
+        let mut verifier = Verifier::new(MessageDigest::sha256(), &rsa_public).unwrap();
+        verifier.update(data).unwrap();
+
+        verifier.verify(signature).unwrap()
+    }
+
+    pub fn hop_sign(&self, ecdh_public_key_initiator: &[u8]) -> Vec<u8> {
+        let mut data = ecdh_public_key_initiator.to_vec();
+        data.append(&mut self.ecdh_private_key.public_key_to_der().unwrap());
+
+        self.sign(&data)
     }
 
     pub fn initiator_verify(
@@ -127,14 +144,14 @@ impl HandshakeCryptoContext {
         ecdh_public_key_hop: &[u8],
     ) -> bool {
         // Verify the data
-        let rsa_public = PKey::from_rsa(signer_key).unwrap();
-        let mut verifier = Verifier::new(MessageDigest::sha256(), &rsa_public).unwrap();
-        verifier
-            .update(&self.ecdh_private_key.public_key_to_der().unwrap())
-            .unwrap();
-        verifier.update(ecdh_public_key_hop).unwrap();
+        let mut data = self.ecdh_private_key.public_key_to_der().unwrap();
+        data.append(&mut ecdh_public_key_hop.to_vec());
 
-        verifier.verify(signature).unwrap()
+        self.verify(signer_key, signature, &data)
+    }
+
+    pub fn get_challenge(&self) -> &[u8] {
+        &self.challenge
     }
 }
 

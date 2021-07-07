@@ -757,6 +757,8 @@ pub enum ProtocolError {
     HandshakeTimeout,
     #[error("Error decoding protobuf message. Unexpected message format")]
     ProtobufError,
+    #[error("Missing challenge response or invalid signature")]
+    InvalidChallengeResponse,
     #[error("Cannot parse routing information of next hop into SockAddr")]
     InvalidRoutingInformation,
     #[error("Cannot update codec from TargetEndpoint to IntermediateHop")]

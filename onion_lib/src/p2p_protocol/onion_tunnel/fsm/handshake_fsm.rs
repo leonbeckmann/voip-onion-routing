@@ -138,6 +138,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         server_hello.set_ecdh_public_key(receiver_pub_der.into());
         server_hello.set_iv(iv.into());
         server_hello.set_signature(signature.into());
+        server_hello.set_challenge(self.crypto_context.get_challenge().to_owned().into());
 
         log::trace!(
             "Tunnel={:?}: Send ServerHello=({:?}) via message codec",
@@ -169,13 +170,17 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         let (_, signature) = cc.decrypt(&data.iv, &data.signature);
         // Safe unwrap, because initiator always has a current_hop
-        let next_hop_key = Rsa::public_key_from_der(&self.current_hop.as_ref().unwrap().1)
+        let hop_public_key = Rsa::public_key_from_der(&self.current_hop.as_ref().unwrap().1)
             .map_err(|_| ProtocolError::HandshakeECDHFailure)?;
         if !self
             .crypto_context
-            .initiator_verify(next_hop_key, &signature, &data.ecdh_public_key)
+            .initiator_verify(hop_public_key, &signature, &data.ecdh_public_key)
         {
             // Invalid signature
+            log::warn!(
+                "Tunnel={:?}: Received invalid ECDH signature",
+                self.tunnel_id
+            );
             return Err(ProtocolError::HandshakeECDHFailure);
         }
 
@@ -183,11 +188,17 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         codec.set_backward_frame_id(data.backwardFrameId);
         codec.add_crypto_context(cc);
 
+        let challenge = data.challenge.to_vec();
+
         // create routing information and give it to message_codec
         let mut data = RoutingInformation::new();
         match self.next_hop {
             None => {
                 data.set_isEndpoint(true);
+
+                // Sign the challenge for the target peer
+                let challenge_response = self.crypto_context.sign(&challenge);
+                data.set_challenge_response(challenge_response.into());
             }
             Some(addr) => {
                 data.set_isEndpoint(false);
@@ -243,6 +254,29 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 "Tunnel={:?}: No routing information provided, peer is the target endpoint",
                 self.tunnel_id
             );
+
+            if !routing.has_challenge_response() {
+                log::warn!(
+                    "Tunnel={:?}: Missing challenge response for target endpoint",
+                    self.tunnel_id
+                );
+                return Err(ProtocolError::InvalidChallengeResponse);
+            }
+
+            // TODO: uncomment
+            /*let challenge_response = routing.get_challenge_response();
+            if !self.crypto_context.verify(
+                signer_key,
+                challenge_response,
+                self.crypto_context.get_challenge(),
+            ) {
+                log::warn!(
+                    "Tunnel={:?}: Invalid challenge response signature",
+                    self.tunnel_id
+                );
+                return Err(ProtocolError::InvalidChallengeResponse);
+            }*/
+
             target_endpoint.lock_as_target_endpoint().await;
             Ok(true)
         } else {

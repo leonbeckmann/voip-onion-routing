@@ -36,15 +36,20 @@ message ServerHello {
   uint64 backwardFrameId = 1;
   // used for telling the source how to address the peer
   uint64 forwardFrameId = 2;
+
   bytes ecdh_public_key = 3;
   bytes iv = 4;
   bytes signature = 5;
+
+  bytes challenge = 6;
 }
 
 message RoutingInformation {
   bool isEndpoint = 1;
   bytes nextHopAddr = 2;
   uint32 nextHopPort = 3;
+
+  optional bytes challenge_response = 4;
 }
 
 message ApplicationData {
