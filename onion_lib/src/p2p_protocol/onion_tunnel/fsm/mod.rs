@@ -481,6 +481,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                 let mut handshake_fsm = HandshakeStateMachine::<Client>::new(
                     codec.clone(),
                     tunnel_id,
+                    Some(current_peer.clone()),
                     next_hop,
                     fsm_lock.clone(),
                     cc.clone(),
@@ -678,6 +679,7 @@ impl FiniteStateMachine for TargetStateMachine {
         let mut handshake_fsm = HandshakeStateMachine::<Server>::new(
             self.codec.clone(),
             self.tunnel_id,
+            None,
             None,
             self.fsm_lock.clone(),
             self.local_crypto_config.clone(),

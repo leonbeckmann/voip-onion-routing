@@ -37,6 +37,8 @@ message ServerHello {
   // used for telling the source how to address the peer
   uint64 forwardFrameId = 2;
   bytes ecdh_public_key = 3;
+  bytes iv = 4;
+  bytes signature = 5;
 }
 
 message RoutingInformation {

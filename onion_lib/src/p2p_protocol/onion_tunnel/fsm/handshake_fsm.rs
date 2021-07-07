@@ -1,12 +1,15 @@
 use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, ServerHello};
-use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext, KEYSIZE};
+use crate::p2p_protocol::onion_tunnel::crypto::{
+    CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext, IVSIZE, KEYSIZE,
+};
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::message_codec::{
     DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
 };
-use crate::p2p_protocol::onion_tunnel::FsmLockState;
+use crate::p2p_protocol::onion_tunnel::{FsmLockState, Peer};
 use crate::p2p_protocol::TunnelId;
 use bytes::Bytes;
+use openssl::rsa::Rsa;
 use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
@@ -51,6 +54,7 @@ pub struct HandshakeStateMachine<PT> {
     _phantom: PhantomData<PT>,
     message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     tunnel_id: TunnelId,
+    current_hop: Option<Peer>,
     next_hop: Option<SocketAddr>,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     crypto_context: HandshakeCryptoContext,
@@ -60,6 +64,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     pub fn new(
         message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
         tunnel_id: TunnelId,
+        current_hop: Option<Peer>,
         next_hop: Option<SocketAddr>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
         crypto_config: Arc<HandshakeCryptoConfig>,
@@ -68,9 +73,10 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             _phantom: Default::default(),
             message_codec,
             tunnel_id,
+            current_hop,
             next_hop,
             fsm_lock,
-            crypto_context: HandshakeCryptoContext::new(crypto_config.clone()),
+            crypto_context: HandshakeCryptoContext::new(crypto_config),
         }
     }
 
@@ -84,7 +90,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     }
 
     pub async fn action_init(&mut self) -> Result<HandshakeState, ProtocolError> {
-        let initiator_pub_der = self.crypto_context.init_ecdh();
+        let initiator_pub_der = self.crypto_context.get_public_key();
 
         // create client hello and give it to message codec
         let mut client_hello = ClientHello::new();
@@ -113,19 +119,25 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             self.tunnel_id,
             data
         );
-        let receiver_pub_der = self.crypto_context.init_ecdh();
+        let receiver_pub_der = self.crypto_context.get_public_key();
         let encryption_key = self.crypto_context.finish_ecdh(&data.ecdh_public_key)?;
+        let signature = self.crypto_context.hop_sign(&data.ecdh_public_key);
 
         let mut codec = self.message_codec.lock().await;
         codec.set_backward_frame_id(data.backwardFrameId);
 
+        // Create crypto context based on secure key exchange
+        let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
+        let mut iv = vec![0; IVSIZE];
+        openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
+        let (iv, signature) = cc.encrypt(&[0; IVSIZE], &signature);
+        codec.add_crypto_context(cc);
+
         // create server hello and give it to message_codec
         let mut server_hello = ServerHello::new();
         server_hello.set_ecdh_public_key(receiver_pub_der.into());
-
-        // Create crypto context based on secure key exchange
-        let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
-        codec.add_crypto_context(cc);
+        server_hello.set_iv(iv.into());
+        server_hello.set_signature(signature.into());
 
         log::trace!(
             "Tunnel={:?}: Send ServerHello=({:?}) via message codec",
@@ -154,6 +166,18 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // Create crypto context based on secure key exchange
         let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
+
+        let (_, signature) = cc.decrypt(&data.iv, &data.signature);
+        // Safe unwrap, because initiator always has a current_hop
+        let next_hop_key = Rsa::public_key_from_der(&self.current_hop.as_ref().unwrap().1)
+            .map_err(|_| ProtocolError::HandshakeECDHFailure)?;
+        if !self
+            .crypto_context
+            .initiator_verify(next_hop_key, &signature, &data.ecdh_public_key)
+        {
+            // Invalid signature
+            return Err(ProtocolError::HandshakeECDHFailure);
+        }
 
         codec.set_forward_frame_id(data.forwardFrameId);
         codec.set_backward_frame_id(data.backwardFrameId);
