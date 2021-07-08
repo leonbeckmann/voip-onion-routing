@@ -35,7 +35,20 @@ impl CryptoContext {
         }
     }
 
-    pub fn encrypt(&self, iv: &[u8], data: &[u8], _start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+    pub fn encrypt(
+        &self,
+        iv: Option<&[u8]>,
+        data: &[u8],
+        _start_to_end: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut iv_store = vec![0; IVSIZE];
+        let iv = if let Some(iv) = iv {
+            iv
+        } else {
+            openssl::rand::rand_bytes(&mut iv_store).expect("Failed to generated random IV");
+            &iv_store
+        };
+
         // TODO: enable
         let start_to_end = false;
         // encrypt data
@@ -244,9 +257,9 @@ mod tests {
         let crypt2 = CryptoContext::new(sym_key2);
         let crypt3 = CryptoContext::new(sym_key3);
 
-        let (enc_iv, enc_data) = crypt1.encrypt(&iv, &data, false);
-        let (enc_iv, enc_data) = crypt2.encrypt(&enc_iv, &enc_data, false);
-        let (enc_iv, enc_data) = crypt3.encrypt(&enc_iv, &enc_data, false);
+        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false);
+        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
+        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false);
 
         let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false);
         let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false);
@@ -269,9 +282,9 @@ mod tests {
         let crypt2 = CryptoContext::new(sym_key2);
         let crypt3 = CryptoContext::new(sym_key3);
 
-        let (enc_iv, enc_data) = crypt1.encrypt(&iv, &data, false);
-        let (enc_iv, enc_data) = crypt2.encrypt(&enc_iv, &enc_data, false);
-        let (enc_iv, enc_data) = crypt3.encrypt(&enc_iv, &enc_data, false);
+        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false);
+        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
+        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false);
 
         let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false);
         let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false);
@@ -295,9 +308,9 @@ mod tests {
         let crypt2 = CryptoContext::new(sym_key2);
         let crypt3 = CryptoContext::new(sym_key3);
 
-        let (enc_iv, enc_data) = crypt1.encrypt(&iv, &data, true);
-        let (enc_iv, enc_data) = crypt2.encrypt(&enc_iv, &enc_data, false);
-        let (enc_iv, enc_data) = crypt3.encrypt(&enc_iv, &enc_data, false);
+        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, true);
+        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
+        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false);
 
         let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false);
         let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false);
@@ -343,7 +356,7 @@ mod tests {
         let data = b"Some Crypto TextSome Crypto Text".to_vec();
 
         let crypt = CryptoContext::new(sym_key);
-        let (enc_iv, enc_data) = crypt.encrypt(&iv, &data, false);
+        let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false);
 
         // Assert length
         assert_eq!(iv.len(), enc_iv.len());
@@ -357,7 +370,7 @@ mod tests {
         let data = b"Some Crypto Text".to_vec();
 
         let crypt = CryptoContext::new(sym_key);
-        let (enc_iv, enc_data) = crypt.encrypt(&iv, &data, false);
+        let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false);
 
         // Assert length
         assert_eq!(iv.len(), enc_iv.len());

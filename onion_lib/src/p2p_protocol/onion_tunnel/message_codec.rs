@@ -368,14 +368,13 @@ impl P2pCodec for InitiatorEndpoint {
                     let mut raw_data =
                         RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and keys using the crypto contexts
-                    let mut iv = vec![0; IVSIZE];
-                    openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                     // Unecrypted data transfer is not allowed
                     assert!(!self.crypto_contexts.is_empty());
                     // encrypt via iv and keys using the crypto contexts
+                    let mut iv: Option<Vec<u8>> = None;
                     for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
-                        let (iv_, data_) = cc.encrypt(&iv, &raw_data, i == 0);
-                        iv = iv_;
+                        let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0);
+                        iv = Some(iv_);
                         raw_data = data_;
                     }
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
@@ -422,13 +421,12 @@ impl P2pCodec for InitiatorEndpoint {
                 handshake.set_clientHello(client_hello);
                 let data = handshake.write_to_bytes().unwrap();
                 let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
-                let mut iv = vec![0; IVSIZE];
-                openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
 
                 // encrypt via iv and keys using the crypto contexts
+                let mut iv: Option<Vec<u8>> = None;
                 for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
-                    let (iv_, data_) = cc.encrypt(&iv, &data, i == 0);
-                    iv = iv_;
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0);
+                    iv = Some(iv_);
                     data = data_;
                 }
                 assert_eq!(data.len(), PAYLOAD_SIZE);
@@ -445,13 +443,12 @@ impl P2pCodec for InitiatorEndpoint {
                 handshake.set_routing(data);
                 let data = handshake.write_to_bytes().unwrap();
                 let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
-                let mut iv = vec![0; IVSIZE];
-                openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
 
                 // encrypt via iv and keys using the crypto contexts
+                let mut iv: Option<Vec<u8>> = None;
                 for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
-                    let (iv_, data_) = cc.encrypt(&iv, &data, i == 0);
-                    iv = iv_;
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0);
+                    iv = Some(iv_);
                     data = data_;
                 }
                 assert_eq!(data.len(), PAYLOAD_SIZE);
@@ -468,6 +465,8 @@ impl P2pCodec for InitiatorEndpoint {
 
         // write fragmented frames
         for (iv, data) in iv_data_bytes {
+            // Lazily evaluated else only create vec when needed
+            let iv = iv.unwrap_or_else(|| vec![0; IVSIZE]);
             frame.set_iv(iv.into());
             frame.set_data(data.into());
             let data = frame.write_to_bytes().unwrap();
@@ -589,15 +588,13 @@ impl P2pCodec for TargetEndpoint {
                     let raw_data =
                         RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
                     // encrypt via iv and key
-                    let mut iv = vec![0; IVSIZE];
-                    openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                     // Unecrypted data transfer is not allowed
                     assert!(self.crypto_context.is_some());
                     let (iv, raw_data) = self
                         .crypto_context
                         .as_ref()
                         .unwrap()
-                        .encrypt(&iv, &raw_data, true);
+                        .encrypt(None, &raw_data, true);
 
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
                     chunks.push((iv, raw_data));
@@ -810,7 +807,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Backward => {
                 // encrypt using iv and key
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
-                let (iv, encrypted_data) = self.crypto_context.encrypt(&iv, &data, false);
+                let (iv, encrypted_data) = self.crypto_context.encrypt(Some(&iv), &data, false);
                 frame.set_frameId(self.backward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());

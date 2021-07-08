@@ -1,6 +1,9 @@
-use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, RoutingInformation_oneof_optional_challenge_response, ServerHello};
+use crate::p2p_protocol::messages::p2p_messages::{
+    ClientHello, RoutingInformation, RoutingInformation_oneof_optional_challenge_response,
+    ServerHello,
+};
 use crate::p2p_protocol::onion_tunnel::crypto::{
-    CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext, IVSIZE, KEYSIZE,
+    CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext, KEYSIZE,
 };
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::message_codec::{
@@ -128,9 +131,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // Create crypto context based on secure key exchange
         let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
-        let mut iv = vec![0; IVSIZE];
-        openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
-        let (iv, signature) = cc.encrypt(&iv, &signature, false);
+        let (iv, signature) = cc.encrypt(None, &signature, false);
         codec.add_crypto_context(cc);
 
         // create server hello and give it to message_codec
@@ -255,7 +256,10 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 self.tunnel_id
             );
 
-            if let Some(RoutingInformation_oneof_optional_challenge_response::challenge_response(_challenge_response)) = routing.optional_challenge_response {
+            if let Some(RoutingInformation_oneof_optional_challenge_response::challenge_response(
+                _challenge_response,
+            )) = routing.optional_challenge_response
+            {
                 // TODO: uncomment
                 /*if !self.crypto_context.verify(
                     signer_key,
