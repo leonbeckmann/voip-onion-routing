@@ -372,7 +372,7 @@ impl P2pCodec for InitiatorEndpoint {
                     assert!(!self.crypto_contexts.is_empty());
                     // encrypt via iv and keys using the crypto contexts
                     let mut iv: Option<Vec<u8>> = None;
-                    for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
+                    for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
                         let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0);
                         iv = Some(iv_);
                         raw_data = data_;
@@ -424,7 +424,7 @@ impl P2pCodec for InitiatorEndpoint {
 
                 // encrypt via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
-                for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
+                for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
                     let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0);
                     iv = Some(iv_);
                     data = data_;
@@ -446,7 +446,7 @@ impl P2pCodec for InitiatorEndpoint {
 
                 // encrypt via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
-                for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
+                for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
                     let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0);
                     iv = Some(iv_);
                     data = data_;
@@ -500,7 +500,7 @@ impl P2pCodec for InitiatorEndpoint {
         let mut dec_data = data.to_vec();
         if !self.crypto_contexts.is_empty() {
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
-            for (i, cc) in self.crypto_contexts.iter().rev().enumerate().rev() {
+            for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate().rev() {
                 let (iv_, data_) = cc.decrypt(&iv, &dec_data, i == 0);
                 iv = iv_;
                 dec_data = data_;
@@ -592,7 +592,7 @@ impl P2pCodec for TargetEndpoint {
                     assert!(self.crypto_context.is_some());
                     let (iv, raw_data) = self
                         .crypto_context
-                        .as_ref()
+                        .as_mut()
                         .unwrap()
                         .encrypt(None, &raw_data, true);
 
@@ -677,7 +677,7 @@ impl P2pCodec for TargetEndpoint {
 
         // if the crypto_context has already been set, we expect encrypted data
         let mut data = data.to_vec();
-        if let Some(cc) = &self.crypto_context {
+        if let Some(cc) = &mut self.crypto_context {
             // decrypt using keys and iv
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
             let (_iv, data_) = cc.decrypt(&iv, &data, true);

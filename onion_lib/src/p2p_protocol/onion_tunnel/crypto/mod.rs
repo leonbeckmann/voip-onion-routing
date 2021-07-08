@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use openssl::derive::Deriver;
@@ -24,6 +25,7 @@ const IV_CIPHER: fn() -> Cipher = openssl::symm::Cipher::aes_128_ecb;
 #[derive(Debug, Clone)]
 pub struct CryptoContext {
     key: Vec<u8>,
+    used_ivs: HashSet<Vec<u8>>,
 }
 
 impl CryptoContext {
@@ -32,11 +34,12 @@ impl CryptoContext {
         assert_eq!(encryption_key.len(), KEYSIZE);
         Self {
             key: encryption_key,
+            used_ivs: HashSet::new(),
         }
     }
 
     pub fn encrypt(
-        &self,
+        &mut self,
         iv: Option<&[u8]>,
         data: &[u8],
         _start_to_end: bool,
@@ -48,6 +51,11 @@ impl CryptoContext {
             openssl::rand::rand_bytes(&mut iv_store).expect("Failed to generated random IV");
             &iv_store
         };
+
+        if !self.used_ivs.insert(iv.to_vec()) {
+            // TODO: handle same IV used multiple times
+            todo!("ERROR");
+        }
 
         // TODO: enable
         let start_to_end = false;
@@ -76,7 +84,12 @@ impl CryptoContext {
         (enc_iv, enc_data)
     }
 
-    pub fn decrypt(&self, iv: &[u8], data: &[u8], _start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+    pub fn decrypt(&mut self, iv: &[u8], data: &[u8], _start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+        if !self.used_ivs.insert(iv.to_vec()) {
+            // TODO: handle same IV used multiple times
+            todo!("ERROR");
+        }
+
         // TODO: enable
         let start_to_end = false;
         // decrypt iv
@@ -253,9 +266,9 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto TextSome Crypto Text".to_vec();
 
-        let crypt1 = CryptoContext::new(sym_key1);
-        let crypt2 = CryptoContext::new(sym_key2);
-        let crypt3 = CryptoContext::new(sym_key3);
+        let mut crypt1 = CryptoContext::new(sym_key1);
+        let mut crypt2 = CryptoContext::new(sym_key2);
+        let mut crypt3 = CryptoContext::new(sym_key3);
 
         let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false);
         let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
@@ -278,9 +291,9 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto Text".to_vec();
 
-        let crypt1 = CryptoContext::new(sym_key1);
-        let crypt2 = CryptoContext::new(sym_key2);
-        let crypt3 = CryptoContext::new(sym_key3);
+        let mut crypt1 = CryptoContext::new(sym_key1);
+        let mut crypt2 = CryptoContext::new(sym_key2);
+        let mut crypt3 = CryptoContext::new(sym_key3);
 
         let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false);
         let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
@@ -304,9 +317,9 @@ mod tests {
         let mut data = vec![0; AUTHSIZE];
         data.append(&mut b"Some Crypto TextSome Crypto Text".to_vec());
 
-        let crypt1 = CryptoContext::new(sym_key1);
-        let crypt2 = CryptoContext::new(sym_key2);
-        let crypt3 = CryptoContext::new(sym_key3);
+        let mut crypt1 = CryptoContext::new(sym_key1);
+        let mut crypt2 = CryptoContext::new(sym_key2);
+        let mut crypt3 = CryptoContext::new(sym_key3);
 
         let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, true);
         let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
@@ -330,9 +343,9 @@ mod tests {
         let mut data = vec![0; AUTHSIZE];
         data.append(&mut b"Some Crypto TextSome Crypto Text".to_vec());
 
-        let crypt1 = CryptoContext::new(sym_key1);
-        let crypt2 = CryptoContext::new(sym_key2);
-        let crypt3 = CryptoContext::new(sym_key3);
+        let mut crypt1 = CryptoContext::new(sym_key1);
+        let mut crypt2 = CryptoContext::new(sym_key2);
+        let mut crypt3 = CryptoContext::new(sym_key3);
 
         let (enc_iv, enc_data) = crypt1.encrypt(&iv, &data, true);
         let (enc_iv, enc_data) = crypt2.encrypt(&enc_iv, &enc_data, false);
@@ -355,7 +368,7 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto TextSome Crypto Text".to_vec();
 
-        let crypt = CryptoContext::new(sym_key);
+        let mut crypt = CryptoContext::new(sym_key);
         let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false);
 
         // Assert length
@@ -369,7 +382,7 @@ mod tests {
         let iv = vec![5; IVSIZE];
         let data = b"Some Crypto Text".to_vec();
 
-        let crypt = CryptoContext::new(sym_key);
+        let mut crypt = CryptoContext::new(sym_key);
         let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false);
 
         // Assert length

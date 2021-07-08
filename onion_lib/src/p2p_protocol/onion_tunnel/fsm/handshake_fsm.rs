@@ -130,7 +130,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         codec.set_backward_frame_id(data.backwardFrameId);
 
         // Create crypto context based on secure key exchange
-        let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
+        let mut cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
         let (iv, signature) = cc.encrypt(None, &signature, false);
         codec.add_crypto_context(cc);
 
@@ -167,7 +167,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let encryption_key = self.crypto_context.finish_ecdh(&data.ecdh_public_key)?;
 
         // Create crypto context based on secure key exchange
-        let cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
+        let mut cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
 
         let (_, signature) = cc.decrypt(&data.iv, &data.signature, false);
         // Safe unwrap, because initiator always has a current_hop
