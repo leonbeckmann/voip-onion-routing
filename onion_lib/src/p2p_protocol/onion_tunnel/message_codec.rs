@@ -16,8 +16,10 @@ use std::mem::size_of;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
-pub(crate) const PAYLOAD_SIZE: usize = 1024;
-const RAW_META_DATA_SIZE: usize = size_of::<u8>() + size_of::<u16>();
+use super::crypto::AUTHSIZE;
+
+const PAYLOAD_SIZE: usize = 1024;
+const RAW_META_DATA_SIZE: usize = AUTHSIZE + size_of::<u8>() + size_of::<u16>();
 const PROTOBUF_APP_META_LEN: usize = 17; // buffer for protobuf meta information
                                          // maximum of data within a single packet
 const EFFECTIVE_PACKET_SIZE: usize = PAYLOAD_SIZE - RAW_META_DATA_SIZE - PROTOBUF_APP_META_LEN;
@@ -66,6 +68,18 @@ impl RawData {
             );
             return Err(ProtocolError::InvalidPacketLength);
         }
+
+        let (auth_tag, raw) = raw.split_at(AUTHSIZE);
+        if auth_tag != vec![0; AUTHSIZE] {
+            print!("");
+            return Ok(RawData {
+                padding_len: 1,
+                message_type: 2,
+                data: vec![],
+                padding: vec![],
+            });
+        }
+        //debug_assert_eq!(auth_tag, vec![0; AUTHSIZE]);
         // we have padding_size, so we are safe here
         let (padding_size_buf, remainder) = raw.split_at(size_of::<u16>());
         let (message_type_buf, data_buf) = remainder.split_at(size_of::<u8>());
@@ -81,7 +95,7 @@ impl RawData {
             );
             return Err(ProtocolError::UnexpectedMessageType);
         }
-        let data_len = (PAYLOAD_SIZE - size_of::<u16>() - size_of::<u8>()) as u16 - padding_len;
+        let data_len = (PAYLOAD_SIZE - RAW_META_DATA_SIZE) as u16 - padding_len;
         let (data, _padding) = data_buf.split_at(data_len as usize);
         Ok(RawData {
             padding_len,
@@ -94,6 +108,7 @@ impl RawData {
     fn serialize(&mut self) -> Vec<u8> {
         let mut buf = vec![];
         let mut len = self.padding_len.to_le_bytes().to_vec();
+        buf.append(&mut vec![0; AUTHSIZE]);
         buf.append(&mut len);
         buf.push(self.message_type);
         buf.append(&mut self.data);
@@ -358,8 +373,8 @@ impl P2pCodec for InitiatorEndpoint {
                     // Unecrypted data transfer is not allowed
                     assert!(!self.crypto_contexts.is_empty());
                     // encrypt via iv and keys using the crypto contexts
-                    for cc in self.crypto_contexts.iter().rev() {
-                        let (iv_, data_) = cc.encrypt(&iv, &raw_data);
+                    for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
+                        let (iv_, data_) = cc.encrypt(&iv, &raw_data, i == 0);
                         iv = iv_;
                         raw_data = data_;
                     }
@@ -411,8 +426,8 @@ impl P2pCodec for InitiatorEndpoint {
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
 
                 // encrypt via iv and keys using the crypto contexts
-                for cc in self.crypto_contexts.iter().rev() {
-                    let (iv_, data_) = cc.encrypt(&iv, &data);
+                for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
+                    let (iv_, data_) = cc.encrypt(&iv, &data, i == 0);
                     iv = iv_;
                     data = data_;
                 }
@@ -434,8 +449,8 @@ impl P2pCodec for InitiatorEndpoint {
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
 
                 // encrypt via iv and keys using the crypto contexts
-                for cc in self.crypto_contexts.iter().rev() {
-                    let (iv_, data_) = cc.encrypt(&iv, &data);
+                for (i, cc) in self.crypto_contexts.iter().enumerate().rev() {
+                    let (iv_, data_) = cc.encrypt(&iv, &data, i == 0);
                     iv = iv_;
                     data = data_;
                 }
@@ -486,8 +501,8 @@ impl P2pCodec for InitiatorEndpoint {
         let mut dec_data = data.to_vec();
         if !self.crypto_contexts.is_empty() {
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
-            for cc in self.crypto_contexts.iter() {
-                let (iv_, data_) = cc.decrypt(&iv, &dec_data);
+            for (i, cc) in self.crypto_contexts.iter().rev().enumerate().rev() {
+                let (iv_, data_) = cc.decrypt(&iv, &dec_data, i == 0);
                 iv = iv_;
                 dec_data = data_;
             }
@@ -582,7 +597,7 @@ impl P2pCodec for TargetEndpoint {
                         .crypto_context
                         .as_ref()
                         .unwrap()
-                        .encrypt(&iv, &raw_data);
+                        .encrypt(&iv, &raw_data, true);
 
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
                     chunks.push((iv, raw_data));
@@ -668,9 +683,10 @@ impl P2pCodec for TargetEndpoint {
         if let Some(cc) = &self.crypto_context {
             // decrypt using keys and iv
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
-            let (_iv, data_) = cc.decrypt(&iv, &data);
+            let (_iv, data_) = cc.decrypt(&iv, &data, true);
             data = data_;
         }
+
         let raw_data = RawData::deserialize(data.as_ref(), self.tunnel_id)?;
         match raw_data.message_type {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
@@ -785,7 +801,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Forward => {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
-                let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data);
+                let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, false);
                 frame.set_frameId(self.forward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
@@ -794,7 +810,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Backward => {
                 // encrypt using iv and key
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
-                let (iv, encrypted_data) = self.crypto_context.encrypt(&iv, &data);
+                let (iv, encrypted_data) = self.crypto_context.encrypt(&iv, &data, false);
                 frame.set_frameId(self.backward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());
