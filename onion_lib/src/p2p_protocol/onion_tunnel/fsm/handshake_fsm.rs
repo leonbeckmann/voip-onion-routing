@@ -1,4 +1,4 @@
-use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, ServerHello};
+use crate::p2p_protocol::messages::p2p_messages::{ClientHello, RoutingInformation, RoutingInformation_oneof_optional_challenge_response, ServerHello};
 use crate::p2p_protocol::onion_tunnel::crypto::{
     CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext, IVSIZE, KEYSIZE,
 };
@@ -255,27 +255,26 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 self.tunnel_id
             );
 
-            if routing.get_challenge_response().is_empty() {
+            if let Some(RoutingInformation_oneof_optional_challenge_response::challenge_response(_challenge_response)) = routing.optional_challenge_response {
+                // TODO: uncomment
+                /*if !self.crypto_context.verify(
+                    signer_key,
+                    &challenge_response,
+                    self.crypto_context.get_challenge(),
+                ) {
+                    log::warn!(
+                        "Tunnel={:?}: Invalid challenge response signature",
+                        self.tunnel_id
+                    );
+                    return Err(ProtocolError::InvalidChallengeResponse);
+                }*/
+            } else {
                 log::warn!(
                     "Tunnel={:?}: Missing challenge response for target endpoint",
                     self.tunnel_id
                 );
                 return Err(ProtocolError::InvalidChallengeResponse);
             }
-
-            // TODO: uncomment
-            /*let challenge_response = routing.get_challenge_response();
-            if !self.crypto_context.verify(
-                signer_key,
-                challenge_response,
-                self.crypto_context.get_challenge(),
-            ) {
-                log::warn!(
-                    "Tunnel={:?}: Invalid challenge response signature",
-                    self.tunnel_id
-                );
-                return Err(ProtocolError::InvalidChallengeResponse);
-            }*/
 
             target_endpoint.lock_as_target_endpoint().await;
             Ok(true)

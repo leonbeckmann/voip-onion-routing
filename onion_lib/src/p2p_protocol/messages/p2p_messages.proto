@@ -49,7 +49,9 @@ message RoutingInformation {
   bytes nextHopAddr = 2;
   uint32 nextHopPort = 3;
 
-  bytes challenge_response = 4;
+  oneof optional_challenge_response {
+    bytes challenge_response = 4;
+  }
 }
 
 message ApplicationData {
