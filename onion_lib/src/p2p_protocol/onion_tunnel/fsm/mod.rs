@@ -743,7 +743,7 @@ impl FiniteStateMachine for TargetStateMachine {
     }
 }
 
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum ProtocolError {
     #[error("Received unexpected message type")]
     UnexpectedMessageType,
@@ -755,6 +755,8 @@ pub enum ProtocolError {
     HandshakeSendFailure,
     #[error("Handshake timeout occurred")]
     HandshakeTimeout,
+    #[error("Encryption or decryption failed")]
+    CryptoFailure,
     #[error("Error decoding protobuf message. Unexpected message format")]
     ProtobufError,
     #[error("Missing challenge response or invalid signature")]

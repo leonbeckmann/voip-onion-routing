@@ -131,7 +131,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // Create crypto context based on secure key exchange
         let mut cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
-        let (iv, signature) = cc.encrypt(None, &signature, false);
+        let (iv, signature) = cc.encrypt(None, &signature, false)?;
         codec.add_crypto_context(cc);
 
         // create server hello and give it to message_codec
@@ -169,7 +169,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // Create crypto context based on secure key exchange
         let mut cc = CryptoContext::new(encryption_key.split_at(KEYSIZE).0.to_vec());
 
-        let (_, signature) = cc.decrypt(&data.iv, &data.signature, false);
+        let (_, signature) = cc.decrypt(&data.iv, &data.signature, false)?;
         // Safe unwrap, because initiator always has a current_hop
         let hop_public_key = Rsa::public_key_from_der(&self.current_hop.as_ref().unwrap().1)
             .map_err(|_| ProtocolError::HandshakeECDHFailure)?;

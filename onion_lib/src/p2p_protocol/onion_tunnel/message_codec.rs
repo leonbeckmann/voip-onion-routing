@@ -373,7 +373,7 @@ impl P2pCodec for InitiatorEndpoint {
                     // encrypt via iv and keys using the crypto contexts
                     let mut iv: Option<Vec<u8>> = None;
                     for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
-                        let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0);
+                        let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0)?;
                         iv = Some(iv_);
                         raw_data = data_;
                     }
@@ -425,7 +425,7 @@ impl P2pCodec for InitiatorEndpoint {
                 // encrypt via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
                 for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
-                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0);
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0)?;
                     iv = Some(iv_);
                     data = data_;
                 }
@@ -447,7 +447,7 @@ impl P2pCodec for InitiatorEndpoint {
                 // encrypt via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
                 for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
-                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0);
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0)?;
                     iv = Some(iv_);
                     data = data_;
                 }
@@ -501,7 +501,7 @@ impl P2pCodec for InitiatorEndpoint {
         if !self.crypto_contexts.is_empty() {
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
             for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate().rev() {
-                let (iv_, data_) = cc.decrypt(&iv, &dec_data, i == 0);
+                let (iv_, data_) = cc.decrypt(&iv, &dec_data, i == 0)?;
                 iv = iv_;
                 dec_data = data_;
             }
@@ -594,7 +594,7 @@ impl P2pCodec for TargetEndpoint {
                         .crypto_context
                         .as_mut()
                         .unwrap()
-                        .encrypt(None, &raw_data, true);
+                        .encrypt(None, &raw_data, true)?;
 
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
                     chunks.push((iv, raw_data));
@@ -680,7 +680,7 @@ impl P2pCodec for TargetEndpoint {
         if let Some(cc) = &mut self.crypto_context {
             // decrypt using keys and iv
             log::trace!("Tunnel={:?}: Decrypt incoming data", self.tunnel_id);
-            let (_iv, data_) = cc.decrypt(&iv, &data, true);
+            let (_iv, data_) = cc.decrypt(&iv, &data, true)?;
             data = data_;
         }
 
@@ -798,7 +798,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Forward => {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
-                let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, false);
+                let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, false)?;
                 frame.set_frameId(self.forward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
@@ -807,7 +807,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Backward => {
                 // encrypt using iv and key
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
-                let (iv, encrypted_data) = self.crypto_context.encrypt(Some(&iv), &data, false);
+                let (iv, encrypted_data) = self.crypto_context.encrypt(Some(&iv), &data, false)?;
                 frame.set_frameId(self.backward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());

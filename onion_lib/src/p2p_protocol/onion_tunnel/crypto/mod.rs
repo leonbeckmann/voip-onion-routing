@@ -43,7 +43,7 @@ impl CryptoContext {
         iv: Option<&[u8]>,
         data: &[u8],
         _start_to_end: bool,
-    ) -> (Vec<u8>, Vec<u8>) {
+    ) -> Result<(Vec<u8>, Vec<u8>), ProtocolError> {
         let mut iv_store = vec![0; IVSIZE];
         let iv = if let Some(iv) = iv {
             iv
@@ -53,8 +53,9 @@ impl CryptoContext {
         };
 
         if !self.used_ivs.insert(iv.to_vec()) {
-            // TODO: handle same IV used multiple times
-            todo!("ERROR");
+            // Handle same IV used multiple times
+            log::warn!("Data encryption failed: Received the same IV multiple times");
+            return Err(ProtocolError::CryptoFailure);
         }
 
         // TODO: enable
@@ -81,13 +82,19 @@ impl CryptoContext {
         // encrypt iv
         let enc_iv = encrypt_no_pad(IV_CIPHER(), &self.key, None, iv).unwrap();
 
-        (enc_iv, enc_data)
+        Ok((enc_iv, enc_data))
     }
 
-    pub fn decrypt(&mut self, iv: &[u8], data: &[u8], _start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+    pub fn decrypt(
+        &mut self,
+        iv: &[u8],
+        data: &[u8],
+        _start_to_end: bool,
+    ) -> Result<(Vec<u8>, Vec<u8>), ProtocolError> {
         if !self.used_ivs.insert(iv.to_vec()) {
-            // TODO: handle same IV used multiple times
-            todo!("ERROR");
+            // Handle same IV used multiple times
+            log::warn!("Data decryption failed: Received the same IV multiple times");
+            return Err(ProtocolError::CryptoFailure);
         }
 
         // TODO: enable
@@ -97,7 +104,6 @@ impl CryptoContext {
 
         // decrypt data
         let dec_data = if start_to_end {
-            // TODO: This decryption may fail
             let mut dec_data = openssl::symm::decrypt_aead(
                 DATA_CIPHER(),
                 &self.key,
@@ -106,7 +112,10 @@ impl CryptoContext {
                 &data[AUTHSIZE..],
                 &data[0..AUTHSIZE],
             )
-            .unwrap();
+            .map_err(|_| {
+                log::warn!("Data decryption failed: Received invalid auth tag");
+                ProtocolError::CryptoFailure
+            })?;
             let mut data = vec![0; AUTHSIZE];
             data.append(&mut dec_data);
             data
@@ -114,7 +123,7 @@ impl CryptoContext {
             openssl::symm::decrypt(HOP_DATA_CIPHER(), &self.key, Some(&dec_iv), data).unwrap()
         };
 
-        (dec_iv, dec_data)
+        Ok((dec_iv, dec_data))
     }
 }
 
@@ -254,7 +263,10 @@ mod tests {
 
     use openssl::rsa::Rsa;
 
-    use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTHSIZE, IVSIZE, KEYSIZE};
+    use crate::p2p_protocol::onion_tunnel::{
+        crypto::{CryptoContext, AUTHSIZE, IVSIZE, KEYSIZE},
+        fsm::ProtocolError,
+    };
 
     use super::{HandshakeCryptoConfig, HandshakeCryptoContext};
 
@@ -270,13 +282,13 @@ mod tests {
         let mut crypt2 = CryptoContext::new(sym_key2);
         let mut crypt3 = CryptoContext::new(sym_key3);
 
-        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false);
-        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
-        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false);
+        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false).unwrap();
+        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
+        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
 
-        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false);
-        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false);
-        let (dec_iv, dec_data) = crypt1.decrypt(&dec_iv, &dec_data, false);
+        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false).unwrap();
+        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false).unwrap();
+        let (dec_iv, dec_data) = crypt1.decrypt(&dec_iv, &dec_data, false).unwrap();
 
         // Assert dec(enc(data)) == data
         assert_eq!(iv, dec_iv);
@@ -295,13 +307,13 @@ mod tests {
         let mut crypt2 = CryptoContext::new(sym_key2);
         let mut crypt3 = CryptoContext::new(sym_key3);
 
-        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false);
-        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
-        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false);
+        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, false).unwrap();
+        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
+        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
 
-        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false);
-        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false);
-        let (dec_iv, dec_data) = crypt1.decrypt(&dec_iv, &dec_data, false);
+        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false).unwrap();
+        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false).unwrap();
+        let (dec_iv, dec_data) = crypt1.decrypt(&dec_iv, &dec_data, false).unwrap();
 
         // Assert dec(enc(data)) == data
         assert_eq!(iv, dec_iv);
@@ -321,20 +333,22 @@ mod tests {
         let mut crypt2 = CryptoContext::new(sym_key2);
         let mut crypt3 = CryptoContext::new(sym_key3);
 
-        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, true);
-        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false);
-        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false);
+        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, true).unwrap();
+        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
+        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
 
-        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false);
-        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false);
-        let (dec_iv, dec_data) = crypt1.decrypt(&dec_iv, &dec_data, true);
+        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false).unwrap();
+        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false).unwrap();
+        let (dec_iv, dec_data) = crypt1.decrypt(&dec_iv, &dec_data, true).unwrap();
 
         // Assert dec(enc(data)) == data
         assert_eq!(iv, dec_iv);
         assert_eq!(data, dec_data);
     }
 
-    /*#[test]
+    // TODO: enable this test when GCM mode is enabled
+    #[test]
+    #[ignore]
     fn unit_test_data_decryptable_authenticated_invalid() {
         let sym_key1 = vec![1; KEYSIZE];
         let sym_key2 = vec![2; KEYSIZE];
@@ -347,20 +361,39 @@ mod tests {
         let mut crypt2 = CryptoContext::new(sym_key2);
         let mut crypt3 = CryptoContext::new(sym_key3);
 
-        let (enc_iv, enc_data) = crypt1.encrypt(&iv, &data, true);
-        let (enc_iv, enc_data) = crypt2.encrypt(&enc_iv, &enc_data, false);
+        let (enc_iv, enc_data) = crypt1.encrypt(Some(&iv), &data, true).unwrap();
+        let (enc_iv, enc_data) = crypt2.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
         let mut enc_data = enc_data;
         enc_data[33] += 1;
-        let (enc_iv, enc_data) = crypt3.encrypt(&enc_iv, &enc_data, false);
+        let (enc_iv, enc_data) = crypt3.encrypt(Some(&enc_iv), &enc_data, false).unwrap();
 
-        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false);
-        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false);
-        let (dec_iv, dec_data) = crypt1.decrypt(&dec_iv, &dec_data, true);
+        let (dec_iv, dec_data) = crypt3.decrypt(&enc_iv, &enc_data, false).unwrap();
+        let (dec_iv, dec_data) = crypt2.decrypt(&dec_iv, &dec_data, false).unwrap();
+        let res = crypt1.decrypt(&dec_iv, &dec_data, true);
 
-        // Assert dec(enc(data)) == data
-        assert_eq!(iv, dec_iv);
-        assert_eq!(data, dec_data);
-    }*/
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ProtocolError::CryptoFailure);
+    }
+
+    #[test]
+    fn unit_test_detect_iv_manupulation() {
+        let sym_key = vec![1; KEYSIZE];
+        let iv = vec![5; IVSIZE];
+        let mut data = vec![0; AUTHSIZE];
+        data.append(&mut b"Some Crypto TextSome Crypto Text".to_vec());
+
+        let mut crypt = CryptoContext::new(sym_key);
+
+        let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false).unwrap();
+        let res = crypt.encrypt(Some(&iv), &data, false);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ProtocolError::CryptoFailure);
+
+        let (dec_iv, dec_data) = crypt.decrypt(&enc_iv, &enc_data, false).unwrap();
+        let res = crypt.decrypt(&dec_iv, &dec_data, false);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ProtocolError::CryptoFailure);
+    }
 
     #[test]
     fn unit_test_stable_length_32b() {
@@ -369,7 +402,7 @@ mod tests {
         let data = b"Some Crypto TextSome Crypto Text".to_vec();
 
         let mut crypt = CryptoContext::new(sym_key);
-        let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false);
+        let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false).unwrap();
 
         // Assert length
         assert_eq!(iv.len(), enc_iv.len());
@@ -383,7 +416,7 @@ mod tests {
         let data = b"Some Crypto Text".to_vec();
 
         let mut crypt = CryptoContext::new(sym_key);
-        let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false);
+        let (enc_iv, enc_data) = crypt.encrypt(Some(&iv), &data, false).unwrap();
 
         // Assert length
         assert_eq!(iv.len(), enc_iv.len());
