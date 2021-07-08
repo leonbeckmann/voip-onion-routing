@@ -255,7 +255,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 self.tunnel_id
             );
 
-            if !routing.has_challenge_response() {
+            if routing.get_challenge_response().is_empty() {
                 log::warn!(
                     "Tunnel={:?}: Missing challenge response for target endpoint",
                     self.tunnel_id

@@ -35,7 +35,8 @@ impl CryptoContext {
         }
     }
 
-    pub fn encrypt(&self, iv: &[u8], data: &[u8], start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+    pub fn encrypt(&self, iv: &[u8], data: &[u8], _start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+        // TODO: enable
         let start_to_end = false;
         // encrypt data
         let enc_data = if start_to_end {
@@ -62,7 +63,8 @@ impl CryptoContext {
         (enc_iv, enc_data)
     }
 
-    pub fn decrypt(&self, iv: &[u8], data: &[u8], start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+    pub fn decrypt(&self, iv: &[u8], data: &[u8], _start_to_end: bool) -> (Vec<u8>, Vec<u8>) {
+        // TODO: enable
         let start_to_end = false;
         // decrypt iv
         let dec_iv = decrypt_no_pad(IV_CIPHER(), &self.key, None, iv).unwrap();
