@@ -133,11 +133,11 @@ the target Bob:
 ![Protocol](images/protocol.svg?raw=true)
 
 In the beginning, all, Alice, Hop and Bob have a RSA identity key pair. Further, Alice knows the public key of 
-Bob, since he is the callee recipient, and the public key of Hp (from RPS).
+Bob, since he is the callee recipient, and the public key of Hop (from RPS).
 
 **Step 1: ClientHello from Alice to Hop**
 
-Alice start with choosing an elliptic curve *E* and a generator point *G*. She then selects a private ECDHE
+Alice starts with choosing an elliptic curve *E* and a generator point *G*. She then selects a private ECDHE
 parameter *a* and calculate her public parameter *aG*. Then she sends the *ClientHello = {E, G, aG}* to Hop.
 The ClientHello must not contain any integrity or authenticity protection, since Alice must not leak her identity to Hop. 
 Further, no replay protection is necessary since the ECDHE parameters are fresh already.
@@ -158,6 +158,7 @@ containing the public ECDHE parameter, the challenge and the signature. We don't
 the ECDHE parameter and the challenge is fresh already.
 
 **Step 3: RoutingInformation from Alice to Hop**
+
 Alice first calculates the shared secret and derives the same MAC and ENC keys as Hop. She then decrypts and verifies
 the signature to ensure that the data has not been changed (integrity) and the data is actually from Hop (authenticity).
 Then Alice creates the RoutingInformation, which will tell Hop that he should send the data to the address of Bob.
@@ -252,16 +253,20 @@ The main FSM consists of four different states:
 - **Closed** is the initial state on creation. It only expects an **INIT** event, which triggers
 an init_action and then goes into the **Connecting** state on success. Each other event leads to termination.
 
+
 - **Connecting** is the state where the handshake is active. When receiving the Handshake_Result_Success event, the
 FSM goes into the state **Connected**. When receiving incoming frames that can be successfully parsed to handshake data, 
   this is passed to the handshake FSM and the FSM stays in **Connecting**. On close event, receiving closure, handshake errors, unexpected events and 
   parsing error, the FSM terminates. 
   
+
 - **Connected** is the state, where the tunnel is established and communication (sending and receiving app data) is 
   allowed. On close, received_close, sending errors, incoming_frame parsing errors or unexpected events, the
   FSM terminates.
   
+
 - **Terminated** is the final state, which has no outgoing transitions.
+
 
 Since the initiator of the tunnel and the target (hop or real target) have completely different
 init actions, the FSM is implemented as a trait with default implementations for the shared functionality, while the
@@ -275,9 +280,50 @@ is updated after each successful handshake to an intermediate hop, such that the
 through the partially established tunnels.
 
 #### Handshake FSM
-TODO
+
+![HANDSHAKE_FSM](images/handshake_fsm.svg?raw=true)
+
+The handshake FSM is used for both, client and server peer. It is distinguished by the different init state:
+Handshake FSMs on clients starts in the *Start* state, while the server side starts in the *WaitForClientHello* state.
+The FSM consists of six different states:
+
+- **Start** is the init state for the client side. It only expects the *INIT* event, which triggers the ClientHello
+  creation and forwarding to the server. On sending error, the handshake FSM goes into the *Error* state, on succes into
+  the *WaitForServerHello* state.
+  
+  
+- **WaitForClientHello** is the init state for the server side. It only expects the ClientHello. It processes the ClientHello
+  and creates the ServerHello accordingly the P2P handshake protocol. It then sends the ServerHello back to the client.
+  On any error (signing error, sending error, key exchange error), the handshake FSM terminates in the *Error* state, otherwise
+  it goes into *WaitForRoutingInformation*.
+  
+
+- **WaitForServerHello** only expects the ServerHello. It processes the ServerHello and creates the encrypted RoutingInformation
+  accordingly the P2P handshake protocol. On any error (key exchange error, signature error, sending error), the handshake FSM 
+  goes into the *Error* state, otherwise the handshake on client side is complete and the FSM is terminated in the *Success*
+  state.
+  
+
+- **WaitForRoutingInformation** only expects the encrypted RoutingInformation. It decrypts and processes the
+RoutingInformation accordingly the P2P handshake protocol and marks the tunnel either as target or as
+  intermediate hop. On any error (signature error, parsing error), the handshake FSM
+  goes into the *Error* state, otherwise the handshake on server side is complete and the FSM is terminated in the *Success*
+  state.
+  
+
+- The **Error** state is more fictive. In the implementation, it means sending the *HANDSHAKE_RESULT_ERR* event
+  to the main FSM and destroying the handshake FSM.
+  
+
+- The **Success** state is more fictive. In the implementation, it means sending the *HANDSHAKE_RESULT_OK* event
+to the main FSM and destroying the handshake FSM.
+
+If a non-final state receives a handshake timeout, a closure from the main FSM or an unexpected event, the handshake
+FSM terminated by transiting into the *Error* state immediately.
 
 ### Message format
+We use protobuf messages for the P2P protocol. 
+
 TODO
 
 ### Exception Handling
@@ -285,8 +331,11 @@ TODO
 
 ## Future Work
 - Add Rounds
-- Add Cover traffic  
+- Add Cover traffic and Dummy traffic
+- Improve closing procedure  
+- Add multiple frame IDs, which are then randomly chosen per packet
 - Robustness
+- Verify protection against timing and pattern attacks  
 - Improving Test coverage (at the moment 80%)
 
 ## Workload Distribution
