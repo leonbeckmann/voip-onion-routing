@@ -346,7 +346,6 @@ mod tests {
         assert_eq!(data, dec_data);
     }
 
-    // TODO: enable this test when GCM mode is enabled
     #[test]
     fn unit_test_data_decryptable_authenticated_invalid() {
         let sym_key1 = vec![1; KEYSIZE];
