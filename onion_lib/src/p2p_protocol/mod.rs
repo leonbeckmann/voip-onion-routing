@@ -79,7 +79,7 @@ impl P2pInterface {
                                     Some(message) => message,
                                 };
 
-                                let (tunnel_id, direction) = if frame.frameId == 1 {
+                                let (tunnel_id, direction) = if frame.frame_id == 1 {
                                     // frame id one is the initial handshake message (client_hello)
                                     log::debug!(
                                         "Frame is a new tunnel request. Create a new target tunnel"
@@ -100,7 +100,7 @@ impl P2pInterface {
                                 } else {
                                     // not a new tunnel request, get corresponding tunnel id from frame id
                                     let frame_ids = self.frame_ids.lock().await;
-                                    match frame_ids.get(&frame.frameId) {
+                                    match frame_ids.get(&frame.frame_id) {
                                         None => {
                                             // no tunnel available for the given frame
                                             log::warn!(

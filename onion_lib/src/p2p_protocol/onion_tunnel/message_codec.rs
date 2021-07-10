@@ -11,18 +11,22 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use protobuf::Message;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 use super::crypto::AUTH_SIZE;
+const PADDING_LEN_SIZE: usize = size_of::<u16>();
+const MSG_TYPE_SIZE: usize = size_of::<u8>();
+const SEQ_NR_SIZE: usize = size_of::<u32>();
 
 const PAYLOAD_SIZE: usize = 1024;
-const RAW_META_DATA_SIZE: usize = AUTH_SIZE + size_of::<u8>() + size_of::<u16>();
+const RAW_META_DATA_SIZE: usize = AUTH_SIZE + PADDING_LEN_SIZE + MSG_TYPE_SIZE;
 const PROTOBUF_APP_META_LEN: usize = 17; // buffer for protobuf meta information
                                          // maximum of data within a single packet
-const EFFECTIVE_PACKET_SIZE: usize = PAYLOAD_SIZE - RAW_META_DATA_SIZE - PROTOBUF_APP_META_LEN;
+const EFFECTIVE_PACKET_SIZE: usize =
+    PAYLOAD_SIZE - RAW_META_DATA_SIZE - PROTOBUF_APP_META_LEN - SEQ_NR_SIZE;
 
 pub enum ProcessedData {
     TransferredToNextHop,
@@ -71,7 +75,6 @@ impl RawData {
 
         let (auth_tag, raw) = raw.split_at(AUTH_SIZE);
         if auth_tag != vec![AUTH_PLACEHOLDER; AUTH_SIZE] {
-            print!("");
             return Ok(RawData {
                 padding_len: 1,
                 message_type: 2,
@@ -121,6 +124,47 @@ impl RawData {
 type IV = Bytes;
 // TODO make closing procedure safe
 // TODO close hops and endpoints on handshake failures
+
+#[derive(Debug, Clone)]
+struct SequenceNumberContext {
+    outgoing: u32,
+    newest_received: u32,
+    used_seq_nrs: HashSet<u32>,
+}
+
+impl SequenceNumberContext {
+    fn new() -> Self {
+        Self {
+            outgoing: 0,
+            newest_received: 0,
+            used_seq_nrs: HashSet::new(),
+        }
+    }
+
+    fn get_next_seq_nr(&mut self) -> u32 {
+        self.outgoing += 1;
+        self.outgoing
+    }
+
+    fn verify_incoming_seq_nr(&mut self, seq_nr: u32) -> Result<(), ProtocolError> {
+        // reject packets that are too old, window is 20 sequence numbers in the past
+        if self.newest_received >= 20 && self.newest_received - 20 > seq_nr {
+            return Err(ProtocolError::ExpiredSequenceNumber);
+        }
+
+        // reject packets with reused sequence number
+        if !self.used_seq_nrs.insert(seq_nr) {
+            return Err(ProtocolError::ReusedSequenceNumber);
+        }
+
+        // update newest received
+        if self.newest_received < seq_nr {
+            self.newest_received = seq_nr;
+        }
+
+        Ok(())
+    }
+}
 
 /**
  *  P2pCodec responsible for encryption, message padding and writing messages to the socket
@@ -219,7 +263,7 @@ fn cleanup_frames(
 
 async fn send_close(frame_id: FrameId, addr: SocketAddr, socket: Arc<UdpSocket>) {
     let mut frame = TunnelFrame::new();
-    frame.set_frameId(frame_id);
+    frame.set_frame_id(frame_id);
     frame.set_close(Close::new());
     let data = frame.write_to_bytes().unwrap();
     let _ = socket.send_to(data.as_ref(), addr).await;
@@ -235,6 +279,7 @@ pub(crate) struct InitiatorEndpoint {
     next_hop_backward_frame_id: Option<FrameId>,
     own_frame_ids: Vec<(FrameId, Direction)>,
     crypto_contexts: Vec<CryptoContext>,
+    seq_nr_context: SequenceNumberContext,
 }
 
 impl InitiatorEndpoint {
@@ -253,6 +298,7 @@ impl InitiatorEndpoint {
             next_hop_backward_frame_id: None, // used for client hellos to next hops
             own_frame_ids: vec![],
             crypto_contexts: vec![],
+            seq_nr_context: SequenceNumberContext::new(),
         }
     }
 }
@@ -271,6 +317,7 @@ pub(crate) struct TargetEndpoint {
     backward_frame_id: FrameId, // frame id for backward packages
     own_frame_ids: Vec<(FrameId, Direction)>,
     crypto_context: Option<CryptoContext>,
+    seq_nr_context: SequenceNumberContext,
 }
 
 impl TargetEndpoint {
@@ -288,6 +335,7 @@ impl TargetEndpoint {
             backward_frame_id: 0,
             own_frame_ids: vec![],
             crypto_context: None,
+            seq_nr_context: SequenceNumberContext::new(),
         }
     }
 
@@ -355,22 +403,24 @@ impl Drop for IntermediateHopCodec {
 impl P2pCodec for InitiatorEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
-        frame.set_frameId(self.forward_frame_id);
+        frame.set_frame_id(self.forward_frame_id);
 
-        let iv_data_bytes = match data {
+        let iv_data_chunks = match data {
             DataType::AppData(data) => {
                 // fragmentation
                 let mut chunks = vec![];
                 for data_chunk in data.chunks(EFFECTIVE_PACKET_SIZE) {
                     let mut app_data = ApplicationData::new();
+                    app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                     app_data.set_data(Bytes::copy_from_slice(data_chunk));
                     let raw_data = app_data.write_to_bytes().unwrap();
                     let mut raw_data =
                         RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
-                    // encrypt via iv and keys using the crypto contexts
-                    // Unecrypted data transfer is not allowed
+
+                    // Unencrypted data transfer is not allowed
                     assert!(!self.crypto_contexts.is_empty());
-                    // encrypt via iv and keys using the crypto contexts
+
+                    // layered encryption via iv and keys using the crypto contexts
                     let mut iv: Option<Vec<u8>> = None;
                     for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
                         let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0)?;
@@ -380,6 +430,7 @@ impl P2pCodec for InitiatorEndpoint {
                     assert_eq!(raw_data.len(), PAYLOAD_SIZE);
                     chunks.push((iv, raw_data));
                 }
+
                 log::debug!(
                     "Tunnel={:?}: Send encrypted application data ({:?} fragment(s)) to next hop {:?}.",
                     self.tunnel_id,
@@ -408,7 +459,7 @@ impl P2pCodec for InitiatorEndpoint {
                         id
                     }
                 };
-                client_hello.set_backwardFrameId(id);
+                client_hello.set_backward_frame_id(id);
                 log::debug!(
                     "Tunnel={:?}: Send ClientHello={:?} to next hop {:?}",
                     self.tunnel_id,
@@ -418,7 +469,7 @@ impl P2pCodec for InitiatorEndpoint {
 
                 // prepare frame
                 let mut handshake = HandshakeData::new();
-                handshake.set_clientHello(client_hello);
+                handshake.set_client_hello(client_hello);
                 let data = handshake.write_to_bytes().unwrap();
                 let mut data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
 
@@ -464,7 +515,7 @@ impl P2pCodec for InitiatorEndpoint {
         };
 
         // write fragmented frames
-        for (iv, data) in iv_data_bytes {
+        for (iv, data) in iv_data_chunks {
             // Lazily evaluated else only create vec when needed
             let iv = iv.unwrap_or_else(|| vec![0; IV_SIZE]);
             frame.set_iv(iv.into());
@@ -513,10 +564,17 @@ impl P2pCodec for InitiatorEndpoint {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
                 Ok(data) => {
                     log::trace!(
-                        "Tunnel={:?}: Initiator receives application data",
-                        self.tunnel_id
+                        "Tunnel={:?}: Initiator receives application data with sequence_number={:?}",
+                        self.tunnel_id,
+                        data.sequence_number
                     );
-                    Ok(ProcessedData::IncomingData(data.data.to_vec()))
+                    return match self
+                        .seq_nr_context
+                        .verify_incoming_seq_nr(data.sequence_number)
+                    {
+                        Ok(_) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
+                        Err(e) => Err(e),
+                    };
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
@@ -575,7 +633,7 @@ impl P2pCodec for InitiatorEndpoint {
 impl P2pCodec for TargetEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
-        frame.set_frameId(self.backward_frame_id);
+        frame.set_frame_id(self.backward_frame_id);
 
         let iv_data_bytes = match data {
             DataType::AppData(data) => {
@@ -583,6 +641,7 @@ impl P2pCodec for TargetEndpoint {
                 let mut chunks = vec![];
                 for data_chunk in data.chunks(EFFECTIVE_PACKET_SIZE) {
                     let mut app_data = ApplicationData::new();
+                    app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                     app_data.set_data(Bytes::copy_from_slice(data_chunk));
                     let raw_data = app_data.write_to_bytes().unwrap();
                     let raw_data =
@@ -617,8 +676,8 @@ impl P2pCodec for TargetEndpoint {
                     .push((new_backward_id, Direction::Backward));
                 self.own_frame_ids
                     .push((new_forward_id, Direction::Forward));
-                server_hello.set_forwardFrameId(new_forward_id);
-                server_hello.set_backwardFrameId(new_backward_id);
+                server_hello.set_forward_frame_id(new_forward_id);
+                server_hello.set_backward_frame_id(new_backward_id);
 
                 log::debug!(
                     "Tunnel={:?}: Send ServerHello=({:?}) to/via prev hop {:?}",
@@ -631,7 +690,7 @@ impl P2pCodec for TargetEndpoint {
                 let mut iv = vec![0; IV_SIZE];
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                 let mut handshake = HandshakeData::new();
-                handshake.set_serverHello(server_hello);
+                handshake.set_server_hello(server_hello);
                 let data = handshake.write_to_bytes().unwrap();
                 let raw_data = RawData::new(PAYLOAD_SIZE as u16, HANDSHAKE_DATA, data).serialize();
                 assert_eq!(raw_data.len(), PAYLOAD_SIZE);
@@ -689,10 +748,17 @@ impl P2pCodec for TargetEndpoint {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
                 Ok(data) => {
                     log::trace!(
-                        "Tunnel={:?}: Target receives application data",
-                        self.tunnel_id
+                        "Tunnel={:?}: Target receives application data with sequence_number={:?}",
+                        self.tunnel_id,
+                        data.sequence_number
                     );
-                    Ok(ProcessedData::IncomingData(data.data.to_vec()))
+                    return match self
+                        .seq_nr_context
+                        .verify_incoming_seq_nr(data.sequence_number)
+                    {
+                        Ok(_) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
+                        Err(e) => Err(e),
+                    };
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
@@ -782,10 +848,10 @@ impl P2pCodec for IntermediateHopCodec {
             }
             match HandshakeData::parse_from_bytes(raw_data.data.as_ref()) {
                 Ok(data) => {
-                    if !data.has_serverHello() {
+                    if !data.has_server_hello() {
                         return Err(ProtocolError::UnexpectedMessageType);
                     }
-                    let id = data.get_serverHello().get_forwardFrameId();
+                    let id = data.get_server_hello().get_forward_frame_id();
                     self.forward_frame_id = id;
                 }
                 Err(_) => {
@@ -801,7 +867,7 @@ impl P2pCodec for IntermediateHopCodec {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
                 let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, start_to_end)?;
-                frame.set_frameId(self.forward_frame_id);
+                frame.set_frame_id(self.forward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
                 (frame, self.next_hop)
@@ -812,7 +878,7 @@ impl P2pCodec for IntermediateHopCodec {
                 let (iv, encrypted_data) =
                     self.crypto_context
                         .encrypt(Some(&iv), &data, start_to_end)?;
-                frame.set_frameId(self.backward_frame_id);
+                frame.set_frame_id(self.backward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());
                 (frame, self.prev_hop)
@@ -850,5 +916,47 @@ impl P2pCodec for IntermediateHopCodec {
 
     fn as_any(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
+    use crate::p2p_protocol::onion_tunnel::message_codec::SequenceNumberContext;
+
+    #[test]
+    fn unit_test_sequence_number() {
+        let mut context = SequenceNumberContext::new();
+
+        // outgoing
+        assert_eq!(context.get_next_seq_nr(), 1);
+        assert_eq!(context.get_next_seq_nr(), 2);
+        assert_eq!(context.get_next_seq_nr(), 3);
+        for _ in 0..10 {
+            context.get_next_seq_nr();
+        }
+        assert_eq!(context.get_next_seq_nr(), 14);
+        assert_eq!(context.get_next_seq_nr(), 15);
+        assert_eq!(context.get_next_seq_nr(), 16);
+
+        // incoming
+        assert_eq!(context.verify_incoming_seq_nr(2), Ok(()));
+        assert_eq!(
+            context.verify_incoming_seq_nr(2),
+            Err(ProtocolError::ReusedSequenceNumber)
+        );
+        assert_eq!(context.verify_incoming_seq_nr(1), Ok(()));
+        assert_eq!(context.verify_incoming_seq_nr(7), Ok(()));
+        assert_eq!(context.verify_incoming_seq_nr(20), Ok(()));
+        assert_eq!(
+            context.verify_incoming_seq_nr(20),
+            Err(ProtocolError::ReusedSequenceNumber)
+        );
+        assert_eq!(context.verify_incoming_seq_nr(30), Ok(()));
+        assert_eq!(
+            context.verify_incoming_seq_nr(4),
+            Err(ProtocolError::ExpiredSequenceNumber)
+        );
+        assert_eq!(context.verify_incoming_seq_nr(17), Ok(()));
     }
 }

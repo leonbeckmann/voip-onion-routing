@@ -4,7 +4,7 @@ syntax = "proto3";
 message TunnelFrame {
 
   // an identifier for identifying the corresponding tunnel of this frame
-  fixed64 frameId = 1;
+  fixed64 frame_id = 1;
 
   // random, unpredictable iv used for encryption
   bytes iv = 2;
@@ -19,23 +19,23 @@ message TunnelFrame {
 message HandshakeData {
   // establish secure channel
   oneof message {
-    ClientHello clientHello = 1;
-    ServerHello serverHello = 2;
+    ClientHello client_hello = 1;
+    ServerHello server_hello = 2;
     RoutingInformation routing = 3;
   }
 }
 
 message ClientHello {
   // frameId used for communicating with the source
-  uint64 backwardFrameId = 1;
+  uint64 backward_frame_id = 1;
   bytes ecdh_public_key = 2;
 }
 
 message ServerHello {
   // used for hops to tell next hop how to address prev hop
-  uint64 backwardFrameId = 1;
+  uint64 backward_frame_id = 1;
   // used for telling the source how to address the peer
-  uint64 forwardFrameId = 2;
+  uint64 forward_frame_id = 2;
   // public ECDHE parameter
   bytes ecdh_public_key = 3;
   // challenge for client authentication
@@ -47,9 +47,9 @@ message ServerHello {
 }
 
 message RoutingInformation {
-  bool isEndpoint = 1;
-  bytes nextHopAddr = 2;
-  uint32 nextHopPort = 3;
+  bool is_endpoint = 1;
+  bytes next_hop_addr = 2;
+  uint32 next_hop_port = 3;
 
   oneof optional_challenge_response {
     bytes challenge_response = 4;
@@ -57,8 +57,8 @@ message RoutingInformation {
 }
 
 message ApplicationData {
-  // TODO nonce
-  bytes data = 1;
+  fixed32 sequence_number = 1;
+  bytes data = 2;
 }
 
 message Close {}

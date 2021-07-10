@@ -144,14 +144,14 @@ pub(super) trait FiniteStateMachine {
                     return Err(ProtocolError::EmptyMessage);
                 }
                 match data.message.unwrap() {
-                    HandshakeData_oneof_message::clientHello(data) => {
+                    HandshakeData_oneof_message::client_hello(data) => {
                         log::trace!(
                             "Tunnel={:?}: Successfully parsed to ClientHello",
                             self.tunnel_id()
                         );
                         HandshakeEvent::ClientHello(data)
                     }
-                    HandshakeData_oneof_message::serverHello(data) => {
+                    HandshakeData_oneof_message::server_hello(data) => {
                         log::trace!(
                             "Tunnel={:?}: Successfully parsed to ServerHello",
                             self.tunnel_id()
@@ -769,8 +769,12 @@ pub enum ProtocolError {
     CodecUnsupportedAction,
     #[error("IO Error occurred: {0}")]
     IOError(String),
-    #[error("Received a packet with invalid playload length")]
+    #[error("Received a packet with invalid payload length")]
     InvalidPacketLength,
+    #[error("Received application data with a reused sequence number")]
+    ReusedSequenceNumber,
+    #[error("Received application data with an expired sequence number")]
+    ExpiredSequenceNumber,
 }
 
 #[derive(Debug)]

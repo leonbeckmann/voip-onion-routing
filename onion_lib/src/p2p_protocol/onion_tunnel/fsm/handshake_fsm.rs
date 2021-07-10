@@ -140,7 +140,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // store context at codec and set backward frame id on target endpoint
         let mut codec = self.message_codec.lock().await;
-        codec.set_backward_frame_id(data.backwardFrameId);
+        codec.set_backward_frame_id(data.backward_frame_id);
         codec.add_crypto_context(cc);
 
         // create server hello and give it to message_codec
@@ -206,29 +206,29 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // update codec
         let mut codec = self.message_codec.lock().await;
-        codec.set_forward_frame_id(data.forwardFrameId);
-        codec.set_backward_frame_id(data.backwardFrameId);
+        codec.set_forward_frame_id(data.forward_frame_id);
+        codec.set_backward_frame_id(data.backward_frame_id);
         codec.add_crypto_context(cc);
 
         // create routing information and give it to message_codec
         let mut data = RoutingInformation::new();
         match self.next_hop {
             None => {
-                data.set_isEndpoint(true);
+                data.set_is_endpoint(true);
 
                 // Sign the challenge for the target peer
                 let challenge_response = self.crypto_context.sign(&challenge);
                 data.set_challenge_response(challenge_response.into());
             }
             Some(addr) => {
-                data.set_isEndpoint(false);
-                data.set_nextHopPort(addr.port() as u32);
+                data.set_is_endpoint(false);
+                data.set_next_hop_port(addr.port() as u32);
                 match addr.ip() {
                     IpAddr::V4(ip) => {
-                        data.set_nextHopAddr(Bytes::from(ip.octets().to_vec()));
+                        data.set_next_hop_addr(Bytes::from(ip.octets().to_vec()));
                     }
                     IpAddr::V6(ip) => {
-                        data.set_nextHopAddr(Bytes::from(ip.octets().to_vec()));
+                        data.set_next_hop_addr(Bytes::from(ip.octets().to_vec()));
                     }
                 };
             }
@@ -269,7 +269,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         };
 
         // check for routing
-        if routing.isEndpoint {
+        if routing.is_endpoint {
             log::debug!(
                 "Tunnel={:?}: No routing information provided, peer is the target endpoint",
                 self.tunnel_id
@@ -303,18 +303,19 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             Ok(true)
         } else {
             // parse socket addr
-            let addr = match u16::try_from(routing.nextHopPort) {
-                Ok(port) => match routing.nextHopAddr.len() {
+            let addr = match u16::try_from(routing.next_hop_port) {
+                Ok(port) => match routing.next_hop_addr.len() {
                     4 => {
                         // ipv4
-                        let slice: [u8; 4] = routing.nextHopAddr.as_ref()[0..4].try_into().unwrap();
+                        let slice: [u8; 4] =
+                            routing.next_hop_addr.as_ref()[0..4].try_into().unwrap();
                         let ipv4 = IpAddr::from(slice);
                         SocketAddr::new(ipv4, port)
                     }
                     16 => {
                         // ip6
                         let slice: [u8; 16] =
-                            routing.nextHopAddr.as_ref()[0..16].try_into().unwrap();
+                            routing.next_hop_addr.as_ref()[0..16].try_into().unwrap();
                         let ipv6 = IpAddr::from(slice);
                         SocketAddr::new(ipv6, port)
                     }
