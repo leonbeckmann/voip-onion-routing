@@ -3,7 +3,7 @@ use crate::p2p_protocol::messages::p2p_messages::{
     ServerHello,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{
-    CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext, KEYSIZE,
+    CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext,
 };
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::message_codec::{
@@ -93,6 +93,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     }
 
     pub async fn action_init(&mut self) -> Result<HandshakeState, ProtocolError> {
+        // get public ECDHE parameter
         let initiator_pub_der = self.crypto_context.get_public_key();
 
         // create client hello and give it to message codec
@@ -116,39 +117,45 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         &mut self,
         data: ClientHello,
     ) -> Result<HandshakeState, ProtocolError> {
-        // set backward frame id on the target endpoint
         log::debug!(
             "Tunnel={:?}: Process incoming ClientHello=({:?})",
             self.tunnel_id,
             data
         );
-        let receiver_pub_der = self.crypto_context.get_public_key();
-        let encryption_key = self.crypto_context.finish_ecdh(&data.ecdh_public_key)?;
-        let signature = self.crypto_context.hop_sign(&data.ecdh_public_key);
 
-        let mut codec = self.message_codec.lock().await;
-        codec.set_backward_frame_id(data.backwardFrameId);
+        // get public ECDHE parameter
+        let receiver_pub_der = self.crypto_context.get_public_key();
+
+        // calculate ECDHE shared secret
+        let shared_secret = self.crypto_context.finish_ecdh(&data.ecdh_public_key)?;
 
         // Create crypto context based on secure key exchange
-        // The encryption and decryption key part compared to the hops are exchanged here
-        let (key_decrypt, key_remainder) = encryption_key.split_at(KEYSIZE);
-        let (key_encrypt, _) = key_remainder.split_at(KEYSIZE);
-        let mut cc = CryptoContext::new(key_encrypt.to_vec(), key_decrypt.to_vec());
+        let mut cc = CryptoContext::new(shared_secret, false);
+
+        // calculate signature of handshake parameters
+        let signature = self.crypto_context.hop_sign(&data.ecdh_public_key);
+
+        // encrypt signature for anonymity
         let (iv, signature) = cc.encrypt(None, &signature, false)?;
+
+        // store context at codec and set backward frame id on target endpoint
+        let mut codec = self.message_codec.lock().await;
+        codec.set_backward_frame_id(data.backwardFrameId);
         codec.add_crypto_context(cc);
 
         // create server hello and give it to message_codec
         let mut server_hello = ServerHello::new();
         server_hello.set_ecdh_public_key(receiver_pub_der.into());
+        server_hello.set_challenge(self.crypto_context.get_challenge().to_owned().into());
         server_hello.set_iv(iv.into());
         server_hello.set_signature(signature.into());
-        server_hello.set_challenge(self.crypto_context.get_challenge().to_owned().into());
 
         log::trace!(
             "Tunnel={:?}: Send ServerHello=({:?}) via message codec",
             self.tunnel_id,
             server_hello
         );
+
         if let Err(e) = codec.write(DataType::ServerHello(server_hello)).await {
             Err(e)
         } else {
@@ -160,29 +167,35 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         &mut self,
         data: ServerHello,
     ) -> Result<(), ProtocolError> {
-        let mut codec = self.message_codec.lock().await;
         log::debug!(
             "Tunnel={:?}: Process incoming ServerHello=({:?})",
             self.tunnel_id,
             data
         );
 
-        let encryption_key = self.crypto_context.finish_ecdh(&data.ecdh_public_key)?;
+        // calculate ECDHE shared secret
+        let shared_secret = self.crypto_context.finish_ecdh(&data.ecdh_public_key)?;
 
         // Create crypto context based on secure key exchange
-        // The encryption and decryption key part compared to the initiator are exchanged here
-        let (key_encrypt, key_remainder) = encryption_key.split_at(KEYSIZE);
-        let (key_decrypt, _) = key_remainder.split_at(KEYSIZE);
-        let mut cc = CryptoContext::new(key_encrypt.to_vec(), key_decrypt.to_vec());
+        let mut cc = CryptoContext::new(shared_secret, true);
 
+        // decrypt signature
         let (_, signature) = cc.decrypt(&data.iv, &data.signature, false)?;
-        // Safe unwrap, because initiator always has a current_hop
+
+        // Get the public key of the hop. Safe unwrap, because initiator always has a current_hop
         let hop_public_key = Rsa::public_key_from_der(&self.current_hop.as_ref().unwrap().1)
             .map_err(|_| ProtocolError::HandshakeECDHFailure)?;
-        if !self
-            .crypto_context
-            .initiator_verify(hop_public_key, &signature, &data.ecdh_public_key)
-        {
+
+        // get the challenge from the server_hello
+        let challenge = data.challenge.to_vec();
+
+        // verify the signature
+        if !self.crypto_context.initiator_verify(
+            hop_public_key,
+            &signature,
+            &data.ecdh_public_key,
+            challenge.as_ref(),
+        ) {
             // Invalid signature
             log::warn!(
                 "Tunnel={:?}: Received invalid ECDH signature",
@@ -191,11 +204,11 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             return Err(ProtocolError::HandshakeECDHFailure);
         }
 
+        // update codec
+        let mut codec = self.message_codec.lock().await;
         codec.set_forward_frame_id(data.forwardFrameId);
         codec.set_backward_frame_id(data.backwardFrameId);
         codec.add_crypto_context(cc);
-
-        let challenge = data.challenge.to_vec();
 
         // create routing information and give it to message_codec
         let mut data = RoutingInformation::new();

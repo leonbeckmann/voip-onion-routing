@@ -10,7 +10,7 @@ message TunnelFrame {
   bytes iv = 2;
 
   oneof message {
-    // [padding_size: u16, data_type: u8, data, padding] encrypted
+    // auth_tag + [padding_size: u16, data_type: u8, data, padding] encrypted
     bytes data = 3;
     Close close = 4;
   }
@@ -36,12 +36,14 @@ message ServerHello {
   uint64 backwardFrameId = 1;
   // used for telling the source how to address the peer
   uint64 forwardFrameId = 2;
-
+  // public ECDHE parameter
   bytes ecdh_public_key = 3;
-  bytes iv = 4;
-  bytes signature = 5;
-
-  bytes challenge = 6;
+  // challenge for client authentication
+  bytes challenge = 4;
+  // iv for signature encryption
+  bytes iv = 5;
+  // encrypted signature
+  bytes signature = 6;
 }
 
 message RoutingInformation {
@@ -55,6 +57,7 @@ message RoutingInformation {
 }
 
 message ApplicationData {
+  // TODO nonce
   bytes data = 1;
 }
 

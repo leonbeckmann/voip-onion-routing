@@ -16,6 +16,7 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
 // hard coded packet size should not be configurable and equal for all modules
+// TODO select correct
 pub(crate) const MAX_PACKET_SIZE: usize = 2048;
 
 pub type TunnelId = u32;

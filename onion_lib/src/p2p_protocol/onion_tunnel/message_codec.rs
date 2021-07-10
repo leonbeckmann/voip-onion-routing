@@ -4,7 +4,7 @@ use crate::p2p_protocol::messages::p2p_messages::{
     ApplicationData, ClientHello, Close, HandshakeData, RoutingInformation, ServerHello,
     TunnelFrame,
 };
-use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTHPLACEHOLDER, IVSIZE};
+use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTH_PLACEHOLDER, IV_SIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
@@ -16,10 +16,10 @@ use std::mem::size_of;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
-use super::crypto::AUTHSIZE;
+use super::crypto::AUTH_SIZE;
 
 const PAYLOAD_SIZE: usize = 1024;
-const RAW_META_DATA_SIZE: usize = AUTHSIZE + size_of::<u8>() + size_of::<u16>();
+const RAW_META_DATA_SIZE: usize = AUTH_SIZE + size_of::<u8>() + size_of::<u16>();
 const PROTOBUF_APP_META_LEN: usize = 17; // buffer for protobuf meta information
                                          // maximum of data within a single packet
 const EFFECTIVE_PACKET_SIZE: usize = PAYLOAD_SIZE - RAW_META_DATA_SIZE - PROTOBUF_APP_META_LEN;
@@ -69,8 +69,8 @@ impl RawData {
             return Err(ProtocolError::InvalidPacketLength);
         }
 
-        let (auth_tag, raw) = raw.split_at(AUTHSIZE);
-        if auth_tag != vec![AUTHPLACEHOLDER; AUTHSIZE] {
+        let (auth_tag, raw) = raw.split_at(AUTH_SIZE);
+        if auth_tag != vec![AUTH_PLACEHOLDER; AUTH_SIZE] {
             print!("");
             return Ok(RawData {
                 padding_len: 1,
@@ -79,7 +79,7 @@ impl RawData {
                 padding: vec![],
             });
         }
-        debug_assert_eq!(auth_tag, vec![AUTHPLACEHOLDER; AUTHSIZE]);
+        debug_assert_eq!(auth_tag, vec![AUTH_PLACEHOLDER; AUTH_SIZE]);
         // we have padding_size, so we are safe here
         let (padding_size_buf, remainder) = raw.split_at(size_of::<u16>());
         let (message_type_buf, data_buf) = remainder.split_at(size_of::<u8>());
@@ -108,7 +108,7 @@ impl RawData {
     fn serialize(&mut self) -> Vec<u8> {
         let mut buf = vec![];
         let mut len = self.padding_len.to_le_bytes().to_vec();
-        buf.append(&mut vec![AUTHPLACEHOLDER; AUTHSIZE]);
+        buf.append(&mut vec![AUTH_PLACEHOLDER; AUTH_SIZE]);
         buf.append(&mut len);
         buf.push(self.message_type);
         buf.append(&mut self.data);
@@ -466,7 +466,7 @@ impl P2pCodec for InitiatorEndpoint {
         // write fragmented frames
         for (iv, data) in iv_data_bytes {
             // Lazily evaluated else only create vec when needed
-            let iv = iv.unwrap_or_else(|| vec![0; IVSIZE]);
+            let iv = iv.unwrap_or_else(|| vec![0; IV_SIZE]);
             frame.set_iv(iv.into());
             frame.set_data(data.into());
             let data = frame.write_to_bytes().unwrap();
@@ -628,7 +628,7 @@ impl P2pCodec for TargetEndpoint {
                 );
 
                 // prepare frame
-                let mut iv = vec![0; IVSIZE];
+                let mut iv = vec![0; IV_SIZE];
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                 let mut handshake = HandshakeData::new();
                 handshake.set_serverHello(server_hello);

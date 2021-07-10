@@ -236,8 +236,19 @@ encrypt the single-block 16-byte IV via ECB (without padding) per hop. So when A
 to Bob can be encrypted using this iv. Afterwards, the iv is encrypted by the same encryption key using ECB. This new iv
 is then used for the next hop and so on.
 
-
 #### Peer-to-Peer Protocol Implementation
+
+First of all, it should be noted, that the implementation of the actual protocol design varies a bit from the formal
+design. Instead of exchanging a dynamic elliptic curve, we have fixed the curve to SECP256K1 for now.
+Further, instead of calculating the parameters of ECDHE by our own, we use the openssl interface, which
+creates a public EC keypair and derives a shared secret from the public key from the one peer and the private key from 
+the other peer. Moreover, we use AEAD encryption via AES-GCM, therefore we don't derive MAC keys and we don't calculate
+MACs, since the data is already authenticated. Thus, we only derive two encryption keys from the shared secret. Since we 
+use aes-128, which requires 16 byte keys, our KDF is the sha256(shared_secret), which is then split into the two encryption
+keys.
+Furthermore, since the application layer does not support client authentication yet, we don't send the
+public identity key from Alice to Bob at the moment and the challenge_response is not verified at the moment.
+
 
 The p2p protocol is designed as a finite state machine (FSM), consisting of two components:
 The Handshake FSM and the Main FSM. Using a FSM eliminates unexpected / unhandled cases, since for every state
@@ -332,11 +343,11 @@ TODO
 ## Future Work
 - Add Rounds
 - Add Cover traffic and Dummy traffic
-- Improve closing procedure  
+- Improve closing procedure: Hop Teardown, Teardown of broken connections
 - Add multiple frame IDs, which are then randomly chosen per packet
 - Robustness
-- Verify protection against timing and pattern attacks  
-- Improving Test coverage (at the moment 80%)
+- Verify protection against timing and pattern attacks, break-node-and-see-which-connection-is-down
+- Improving Test coverage (at the moment 82%)
 
 ## Workload Distribution
 
