@@ -4,7 +4,7 @@ use crate::p2p_protocol::messages::p2p_messages::{
     ApplicationData, ClientHello, Close, HandshakeData, RoutingInformation, ServerHello,
     TunnelFrame,
 };
-use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, IVSIZE};
+use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTHPLACEHOLDER, IVSIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
@@ -70,7 +70,7 @@ impl RawData {
         }
 
         let (auth_tag, raw) = raw.split_at(AUTHSIZE);
-        if auth_tag != vec![0; AUTHSIZE] {
+        if auth_tag != vec![AUTHPLACEHOLDER; AUTHSIZE] {
             print!("");
             return Ok(RawData {
                 padding_len: 1,
@@ -79,7 +79,7 @@ impl RawData {
                 padding: vec![],
             });
         }
-        //debug_assert_eq!(auth_tag, vec![0; AUTHSIZE]);
+        debug_assert_eq!(auth_tag, vec![AUTHPLACEHOLDER; AUTHSIZE]);
         // we have padding_size, so we are safe here
         let (padding_size_buf, remainder) = raw.split_at(size_of::<u16>());
         let (message_type_buf, data_buf) = remainder.split_at(size_of::<u8>());
@@ -108,7 +108,7 @@ impl RawData {
     fn serialize(&mut self) -> Vec<u8> {
         let mut buf = vec![];
         let mut len = self.padding_len.to_le_bytes().to_vec();
-        buf.append(&mut vec![0; AUTHSIZE]);
+        buf.append(&mut vec![AUTHPLACEHOLDER; AUTHSIZE]);
         buf.append(&mut len);
         buf.push(self.message_type);
         buf.append(&mut self.data);
@@ -372,7 +372,7 @@ impl P2pCodec for InitiatorEndpoint {
                     assert!(!self.crypto_contexts.is_empty());
                     // encrypt via iv and keys using the crypto contexts
                     let mut iv: Option<Vec<u8>> = None;
-                    for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
+                    for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
                         let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0)?;
                         iv = Some(iv_);
                         raw_data = data_;
@@ -424,7 +424,7 @@ impl P2pCodec for InitiatorEndpoint {
 
                 // encrypt via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
-                for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
+                for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
                     let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0)?;
                     iv = Some(iv_);
                     data = data_;
@@ -446,7 +446,7 @@ impl P2pCodec for InitiatorEndpoint {
 
                 // encrypt via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
-                for (i, cc) in self.crypto_contexts.iter_mut().enumerate().rev() {
+                for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
                     let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0)?;
                     iv = Some(iv_);
                     data = data_;
@@ -758,6 +758,8 @@ impl P2pCodec for IntermediateHopCodec {
         data: Bytes,
         iv: IV,
     ) -> Result<ProcessedData, ProtocolError> {
+        let start_to_end = self.forward_frame_id == 1;
+
         log::trace!(
             "Tunnel={:?}: Process incoming data at intermediate hop",
             self.tunnel_id
@@ -798,7 +800,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Forward => {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
-                let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, false)?;
+                let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, start_to_end)?;
                 frame.set_frameId(self.forward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
@@ -807,7 +809,9 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Backward => {
                 // encrypt using iv and key
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
-                let (iv, encrypted_data) = self.crypto_context.encrypt(Some(&iv), &data, false)?;
+                let (iv, encrypted_data) =
+                    self.crypto_context
+                        .encrypt(Some(&iv), &data, start_to_end)?;
                 frame.set_frameId(self.backward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());

@@ -17,6 +17,7 @@ use super::fsm::ProtocolError;
 pub(crate) const KEYSIZE: usize = 16;
 pub(crate) const IVSIZE: usize = 16;
 pub(crate) const AUTHSIZE: usize = 16;
+pub(crate) const AUTHPLACEHOLDER: u8 = 0;
 
 const DATA_CIPHER: fn() -> Cipher = openssl::symm::Cipher::aes_128_gcm;
 const HOP_DATA_CIPHER: fn() -> Cipher = openssl::symm::Cipher::aes_128_ctr;
@@ -45,7 +46,7 @@ impl CryptoContext {
         &mut self,
         iv: Option<&[u8]>,
         data: &[u8],
-        _start_to_end: bool,
+        start_to_end: bool,
     ) -> Result<(Vec<u8>, Vec<u8>), ProtocolError> {
         let mut iv_store = vec![0; IVSIZE];
         let iv = if let Some(iv) = iv {
@@ -61,12 +62,10 @@ impl CryptoContext {
             return Err(ProtocolError::CryptoFailure);
         }
 
-        // TODO: enable
-        let start_to_end = false;
         // encrypt data
         let enc_data = if start_to_end {
-            debug_assert_eq!(data[0..AUTHSIZE], vec![0; AUTHSIZE]);
-            let mut auth_tag = vec![0; AUTHSIZE];
+            debug_assert_eq!(data[0..AUTHSIZE], vec![AUTHPLACEHOLDER; AUTHSIZE]);
+            let mut auth_tag = vec![AUTHPLACEHOLDER; AUTHSIZE];
             let mut enc_data = openssl::symm::encrypt_aead(
                 DATA_CIPHER(),
                 &self.enc_key,
@@ -92,7 +91,7 @@ impl CryptoContext {
         &mut self,
         iv: &[u8],
         data: &[u8],
-        _start_to_end: bool,
+        start_to_end: bool,
     ) -> Result<(Vec<u8>, Vec<u8>), ProtocolError> {
         if !self.used_ivs.insert(iv.to_vec()) {
             // Handle same IV used multiple times
@@ -100,8 +99,6 @@ impl CryptoContext {
             return Err(ProtocolError::CryptoFailure);
         }
 
-        // TODO: enable
-        let start_to_end = false;
         // decrypt iv
         let dec_iv = decrypt_no_pad(IV_CIPHER(), &self.dec_key, None, iv).unwrap();
 
@@ -119,7 +116,7 @@ impl CryptoContext {
                 log::warn!("Data decryption failed: Received invalid auth tag");
                 ProtocolError::CryptoFailure
             })?;
-            let mut data = vec![0; AUTHSIZE];
+            let mut data = vec![AUTHPLACEHOLDER; AUTHSIZE];
             data.append(&mut dec_data);
             data
         } else {
@@ -267,7 +264,7 @@ mod tests {
     use openssl::rsa::Rsa;
 
     use crate::p2p_protocol::onion_tunnel::{
-        crypto::{CryptoContext, AUTHSIZE, IVSIZE, KEYSIZE},
+        crypto::{CryptoContext, AUTHPLACEHOLDER, AUTHSIZE, IVSIZE, KEYSIZE},
         fsm::ProtocolError,
     };
 
@@ -329,7 +326,7 @@ mod tests {
         let sym_key2 = vec![2; KEYSIZE];
         let sym_key3 = vec![3; KEYSIZE];
         let iv = vec![5; IVSIZE];
-        let mut data = vec![0; AUTHSIZE];
+        let mut data = vec![AUTHPLACEHOLDER; AUTHSIZE];
         data.append(&mut b"Some Crypto TextSome Crypto Text".to_vec());
 
         let mut crypt1 = CryptoContext::new(sym_key1.clone(), sym_key1);
@@ -351,13 +348,12 @@ mod tests {
 
     // TODO: enable this test when GCM mode is enabled
     #[test]
-    #[ignore]
     fn unit_test_data_decryptable_authenticated_invalid() {
         let sym_key1 = vec![1; KEYSIZE];
         let sym_key2 = vec![2; KEYSIZE];
         let sym_key3 = vec![3; KEYSIZE];
         let iv = vec![5; IVSIZE];
-        let mut data = vec![0; AUTHSIZE];
+        let mut data = vec![AUTHPLACEHOLDER; AUTHSIZE];
         data.append(&mut b"Some Crypto TextSome Crypto Text".to_vec());
 
         let mut crypt1 = CryptoContext::new(sym_key1.clone(), sym_key1);
@@ -382,7 +378,7 @@ mod tests {
     fn unit_test_detect_iv_manupulation() {
         let sym_key = vec![1; KEYSIZE];
         let iv = vec![5; IVSIZE];
-        let mut data = vec![0; AUTHSIZE];
+        let mut data = vec![AUTHPLACEHOLDER; AUTHSIZE];
         data.append(&mut b"Some Crypto TextSome Crypto Text".to_vec());
 
         let mut crypt = CryptoContext::new(sym_key.clone(), sym_key);
