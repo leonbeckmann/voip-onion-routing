@@ -1,6 +1,9 @@
 # Midterm Report for Onion Module of Team 10
 
 ## Changes to our assumptions in the initial report
+- GitLab hooks not in use
+- Additional libraries: async-trait and rand
+- The schedule was mostly adhered to
 
 ## Module Architecture
 
@@ -27,7 +30,7 @@ for starting a p2p_interface and an api_interface asynchronously. It is then blo
 and waits until one of the interfaces terminate to shutdown the whole peer.
 
 The two interfaces, which are owned by the run_peer function, are referenced to each other using weak references that do not imply
-ownerships. These weak references can be upgraded at any time the peer is still active
+ownership. These weak references can be upgraded at any time the peer is still active
 and can then be used for communicating with each other. For example, API requests are parsed
 in the api_protocol and are then passed to the p2p_protocol via the p2p_interface, while incoming tunnels
 are handled in the p2p_protocol and passed to the API via the api_interface.
@@ -86,9 +89,10 @@ incoming events from the CM/CI. This event_handler might return an outgoing even
 back to the API via the api_connection and is the response on the request or an incoming tunnel.
 When the connection has been closed, the handler unregisters the connection from the hashmap and returns.
 
-Simply said, the connection abstracts the TCP stream to an api_connection that can be used
+Simply put, the connection abstracts the TCP stream to an api_connection that can be used
 for reading incoming events and writing outgoing events. The api_connection is responsible for
 serializing and deserializing the events into the specified message formats (as bytes).
+The serializing, deserializing and the message formats are in the messages module.
 
 An incoming event is one of the following, which is parsed from the raw bytes as specified in the project documentation.
 ```rust
@@ -122,7 +126,28 @@ p2p_protocol
     |--> mod.rs     // P2P_interface inclusive udp listener
 ```
 
-TODO
+Similar to the API protocol, the P2P protocol is started by the run_peer function in the lib.rs by calling the listen function of the p2p_interface.
+
+```rust
+pub(crate) struct P2pInterface {
+    onion_tunnels: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // Maps a tunnel id to a tunnel instance
+    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>, // Maps a network frame id to a tunnel id
+    socket: Arc<UdpSocket>,
+    config: OnionConfiguration,
+    api_interface: Weak<ApiInterface>,
+}
+```
+
+Only a single instance of this struct is created during the program runtime. Analogous to the api_protocol,
+this instance is shared with the api_protocol by a weak reference. To create or destroy tunnels, to send data via
+a tunnel or to create cover traffic the api_protocol can call the appropriate functions of the P2pInterface struct.
+
+The listen function is listening on the udp socket. This socket is used for the p2p tunnel communication. Incoming
+frames are parsed using protobuf messages (see message format below) and are mapped with frame_ids to the internal
+tunnel_id. The tunnel_id is then mapped with onion_tunnels to the
+according tunnel instance. This tunnel instances are defined in the onion_tunnel module. It contains abstractions
+representing a single p2p tunnel connection. In the onion_tunnel, incoming frames or commands
+from the API protocol are packed into events and are forwarded to the FSM (see Main FSM below).
 
 #### Peer-to-Peer Protocol Design
 
@@ -140,20 +165,20 @@ Bob, since he is the callee recipient, and the public key of Hop (from RPS).
 Alice starts with choosing an elliptic curve *E* and a generator point *G*. She then selects a private ECDHE
 parameter *a* and calculate her public parameter *aG*. Then she sends the *ClientHello = {E, G, aG}* to Hop.
 The ClientHello must not contain any integrity or authenticity protection, since Alice must not leak her identity to Hop. 
-Further, no replay protection is necessary since the ECDHE parameters are fresh already.
+Further, no replay protection is necessary since the ECDHE parameters are fresh already. !!! Aber wir haben noch die Challenge
 
 **Step 2: ServerHello from Hop to Alice**
 
 The Hop receives the ClientHello from Alice and uses the provided curve and generator point to generate his own ECDHE 
-parameter pair *<h, hG>*. He then calculate the shared secret via the ECDHE *s = haG* and derives in total 4 MAC and ENC keys,
+parameter pair *<h, hG>*. He then calculates the shared secret via the ECDHE *s = haG* and derives in total 2 MAC and ENC keys,
 one per direction (from Alice to Hop and from Hop to Alice, similar how TLS is doing, to have an additional protection in 
 one direction if the other direction's key is leaked). Since the Hop does not know yet, whether he is an intermediate hop or
-the target, he acts as he is the target. Therefore he creates a challenge for a Challenge-Response, which
+the target, he acts as he is the target. Therefore, he creates a challenge for a Challenge-Response, which
 is used for authentication of Alice to the target. He then signs his public ECDHE parameter, the challenge and the ClientHello
 (in exactly this order for replay protection) using his private RSA identity key. Similar to the STS protocol, the signature is
 encrypted by the encryption key from Hop to Alice, to avoid that eavesdropper, who know the public key of the Hop, could
 verify the signature and leak the identity of the Hop. (This might not be that important in case of the Hop, but later the same
-procedure is done for the target Bob, where the identity should definitely be hidden). Then, the ServerHello is send back to Alice,
+procedure is done for the target Bob, where the identity should definitely be hidden). Then, the ServerHello is sent back to Alice,
 containing the public ECDHE parameter, the challenge and the signature. We don't need further replay protection here, since
 the ECDHE parameter and the challenge is fresh already.
 
@@ -162,11 +187,11 @@ the ECDHE parameter and the challenge is fresh already.
 Alice first calculates the shared secret and derives the same MAC and ENC keys as Hop. She then decrypts and verifies
 the signature to ensure that the data has not been changed (integrity) and the data is actually from Hop (authenticity).
 Then Alice creates the RoutingInformation, which will tell Hop that he should send the data to the address of Bob.
-This information is encrypted to ensure nobody than Hop knows the next hop and it is protected with a MAC to ensure
+This information is encrypted to ensure nobody else than Hop knows the next hop and it is protected with a MAC to ensure
 the integrity of the information. Encrypted data and MAC is then send to Hop. 
 We don't need replay protection here, since the Hop only expects one RoutingInformation per session and the session keys,
 especially the MAC verification, ensure that the handshake would fail when RoutingInformation
-from an old session are send here.
+from an old session are sent here.
 
 **Step 4: Processing RoutingInformation at Hop**
 
@@ -222,10 +247,10 @@ We obviously need confidentiality by end-to-end encryption, anonymity by tunneli
 encrypted application data between Alice and Bob and replay protection. Authenticity is already ensured due to the 
 handshake design. This is where some additional challenges come in. First of all, we need any kind of nonce or timestamp
 within the data to ensure replay protection. Further, the MAC must not be trackable through the tunnel, to keep the anonymity.
-For this, the MAC has also be encrypted by each hop, such that it will change after each hop.
+For this, the MAC has also been encrypted by each hop, such that it will change after each hop.
 Another challenge is the IV, which also must not be trackable. Since the packet length must be preserved by each hop
 and the padding length is a confidential information which has to be encrypted between the two ends, we cannot simply 
-add multiple IVs to a packet, one per hop. Pre-shared IVs are also not an option, due to the the statelessness of UDP 
+add multiple IVs to a packet, one per hop. Pre-shared IVs are also not an option, due to the statelessness of UDP 
 (We cannot say which IV is used for the next incoming package when we ensure that the IV is changed for each message).
 ECB mode is also not an option since otherwise, patterns in messages can be tracked over multiple hops.
 
@@ -335,7 +360,127 @@ FSM terminated by transiting into the *Error* state immediately.
 ### Message format
 We use protobuf messages for the P2P protocol. 
 
-TODO
+```proto3
+syntax = "proto3";
+
+// P2P Onion Tunnel frame
+message TunnelFrame {
+
+  // an identifier for identifying the corresponding tunnel of this frame
+  fixed64 frame_id = 1;
+
+  // random, unpredictable iv used for encryption
+  bytes iv = 2;
+
+  oneof message {
+    // auth_tag + [padding_size: u16, data_type: u8, data, padding] encrypted
+    bytes data = 3;
+    Close close = 4;
+  }
+}
+
+message HandshakeData {
+  // establish secure channel
+  oneof message {
+    ClientHello client_hello = 1;
+    ServerHello server_hello = 2;
+    RoutingInformation routing = 3;
+  }
+}
+
+message ClientHello {
+  // frameId used for communicating with the source
+  uint64 backward_frame_id = 1;
+  bytes ecdh_public_key = 2;
+}
+
+message ServerHello {
+  // used for hops to tell next hop how to address prev hop
+  uint64 backward_frame_id = 1;
+  // used for telling the source how to address the peer
+  uint64 forward_frame_id = 2;
+  // public ECDHE parameter
+  bytes ecdh_public_key = 3;
+  // challenge for client authentication
+  bytes challenge = 4;
+  // iv for signature encryption
+  bytes iv = 5;
+  // encrypted signature
+  bytes signature = 6;
+}
+
+message RoutingInformation {
+  bool is_endpoint = 1;
+  bytes next_hop_addr = 2;
+  uint32 next_hop_port = 3;
+
+  oneof optional_challenge_response {
+    bytes challenge_response = 4;
+  }
+}
+
+message ApplicationData {
+  fixed32 sequence_number = 1;
+  bytes data = 2;
+}
+
+message Close {}
+```
+
+#### Serialization / Deserialization
+
+Each transfered frame between peers is a TunnelFrame message. The TunnelFrame is not encrypted,
+because it contains the frame_id used in the p2p_protocol to map the frame to a onion_tunnel
+and the IV used during encryption. The message field contains the actual data transfered with
+by the frame. It can be a Close message (signals hops to close the tunnel) or binary data.
+
+The binary data is always a (plaintext or encrypted) serialized representation of the
+two other protobuf messages (HandshakeData,
+ApplicationData).
+It is always exactly 1024 bytes long and is structed as follows:
+
+- The first 16 bytes are the auth_tag used for the AES-GCM
+integrity and authorization verification.
+- The next 2 bytes specify the padding_size appended at the end of the binary data that
+the data has always the same length.
+- The next byte specifies the data_type. This indicates the contained protobuf message type in the remaining bytes until the padding.
+
+This serialization and deserialization is handled in RawData. If the message contains a
+HandshakeData and this HandshakeData contains ClientHello or ServerHello, then the payload
+cannot be encrypted at the tunnel initiator and target, because those are responsible for the key
+exchange. In all other cases (ApplicationData or HandshakeData with RoutingInformation) the payload must be encrypted.
+
+#### Encryption
+
+For the encryption between each hop, we need an encryption with static length. We use AES-CTR.
+For the encryption between the initiator and the target hop, we need an encryption with
+static length, integrity protection and authentication. We use AES-GCM.
+
+The encryption works as follows:
+
+The initiator generates a random IV and encrypts the serialized payload
+but skips the first 16 bytes (auth_tag) using AES-GCM. He then replaces the first
+16 bytes with the auth_tag result from the encryption. For each hop between the
+initiator and the target, the payload (including auth_tag) and the IV is then encrypted
+once more with the shared_key exchanged with the hop.
+
+Initiator:
+- iv = random()
+- cipher_payload_init = enc_ctr_h1(enc_ctr_h2(enc_gcm_target(iv, msg)))
+- cipher_iv_init = enc_ecb_h1(enc_ecb_h2(enc_ecb_target(iv)))
+
+Hop 1:
+- cipher_iv_h1 = dec_ecb_iv_h1(cipher_iv_init)
+- cipher_payload_h1 = dec_ctr_payload_h1(cipher_iv_h1, cipher_payload_init)
+
+Hop 2:
+- cipher_iv_h2 = dec_ecb_iv_h2(cipher_iv_h1)
+- cipher_payload_h2 = dec_ctr_h2(cipher_iv_h2, cipher_h1)
+
+Target:
+- iv = dec_ecb_iv_target(cipher_iv_h2)
+- msg = dec_gcm(iv, cipher_payload_h2)
+
 
 ### Exception Handling
 TODO
@@ -373,3 +518,4 @@ TODO
 Leon: 120 hours
 
 Florian: TODO
+
