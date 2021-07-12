@@ -452,17 +452,21 @@ exchange. In all other cases (ApplicationData or HandshakeData with RoutingInfor
 
 #### Encryption
 
-For the encryption between each hop, we need an encryption with static length. We use AES-CTR.
+For the encryption between each hop, we need an encryption with static length. Integrity
+protection is not required between hops, because they do not interact with the data.
+We chose AES-CTR for this use case.
+
 For the encryption between the initiator and the target hop, we need an encryption with
-static length, integrity protection and authentication. We use AES-GCM.
+static length, integrity protection and authentication. We chose AES-GCM for this, because
+it meets all our requirements.
 
 The encryption works as follows:
 
 The initiator generates a random IV and encrypts the serialized payload
 but skips the first 16 bytes (auth_tag) using AES-GCM. He then replaces the first
 16 bytes with the auth_tag result from the encryption. For each hop between the
-initiator and the target, the payload (including auth_tag) and the IV is then encrypted
-once more with the shared_key exchanged with the hop.
+initiator and the target, the payload (including auth_tag) and the IV are then encrypted
+once more with the shared key exchanged between the initiator and the hop.
 
 Initiator:
 - iv = random()
@@ -483,7 +487,16 @@ Target:
 
 
 ### Exception Handling
-TODO
+
+The current state of exception handling is, that whenever an error occurs, the tunnel is
+destroyed. Replay attacks, data/IV manipulation or packet loss during
+the handshake cause the termination of the tunnel. Only packet loss in the Connected state
+is ignored to match with the nature of an udp protocol.
+
+Future work is planed to handle more errors where possible to reduce the attack surface
+for simple DoS attacks and with that to improve the robustness of the protocol against other
+network related issues.
+
 
 ## Future Work
 - Add Rounds
@@ -517,5 +530,4 @@ TODO
 ## Effort
 Leon: 120 hours
 
-Florian: TODO
-
+Florian: 40 hours
