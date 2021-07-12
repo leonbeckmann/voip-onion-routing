@@ -6,7 +6,6 @@ stages:
     key: $CI_JOB_NAME
     paths:
       - .cargo
-      - target
   variables:
     CARGO_HOME: $CI_PROJECT_DIR/.cargo
 
