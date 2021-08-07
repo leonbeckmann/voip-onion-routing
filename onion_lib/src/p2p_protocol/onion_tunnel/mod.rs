@@ -59,10 +59,10 @@ pub(crate) struct OnionTunnel {
     listeners: Arc<Mutex<HashSet<ConnectionId>>>, // all the api connection listeners
     listeners_available: Arc<Mutex<bool>>,        // are the listeners set, important for managing
     tunnel_id: TunnelId,                          // unique tunnel id
-    tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>, // tunnel registry for tunnel mgmt
     lifo_event_sender: Sender<FsmEvent>,
 }
 
+// TODO update tunnel management
 impl OnionTunnel {
     #[allow(clippy::too_many_arguments)]
     async fn new_tunnel(
@@ -80,28 +80,34 @@ impl OnionTunnel {
 
         let (lifo_event_sender, mut lifo_event_receiver) = tokio::sync::mpsc::channel(32);
 
+        // create tunnel
         let tunnel = OnionTunnel {
             listeners: listeners.clone(),
             listeners_available: listeners_available.clone(),
             tunnel_id,
-            tunnel_registry: tunnel_registry.clone(),
             lifo_event_sender,
         };
 
+        // register tunnel at registry
+        {
+            let mut tunnels = tunnel_registry.lock().await;
+            let _ = tunnels.insert(tunnel_id, tunnel);
+        }
+
         // start management task that manages tunnel cleanup and listener notification
-        let id_clone = tunnel_id;
         let registry_clone = tunnel_registry.clone();
         tokio::spawn(async move {
-            log::trace!("Tunnel={:?}: Run the async management task", id_clone);
+            log::trace!("Tunnel={:?}: Run the async management task", tunnel_id);
             loop {
                 match mgmt_rx.recv().await {
                     None => {
+                        // here the FSM has been dropped. this is the only point where tunnels are removed from the registry
                         log::debug!(
                             "Tunnel={:?}: Received a closure from the FSM. Unregister the tunnel and shutdown the management layer",
-                            id_clone
+                            tunnel_id
                         );
                         let mut registry = registry_clone.lock().await;
-                        let _ = registry.remove(&id_clone);
+                        let _ = registry.remove(&tunnel_id);
                         return;
                     }
 
@@ -112,20 +118,29 @@ impl OnionTunnel {
                                 IncomingEventMessage::IncomingTunnelCompletion => {
                                     log::debug!(
                                         "Tunnel={:?}: Received IncomingTunnelCompletion, delegate to API",
-                                        id_clone
+                                        tunnel_id
                                     );
 
                                     // get listeners
                                     let connections = iface.connections.lock().await;
-                                    let raw_listeners = connections.keys().cloned().collect();
+                                    let raw_listeners = connections
+                                        .keys()
+                                        .cloned()
+                                        .collect::<HashSet<ConnectionId>>();
                                     drop(connections);
                                     log::debug!(
                                         "Tunnel={:?}: Listeners={:?}",
-                                        id_clone,
+                                        tunnel_id,
                                         raw_listeners
                                     );
 
-                                    // TODO check if listeners are empty, then we want to terminate the tunnel
+                                    // check if listeners are empty, then we want to terminate the tunnel
+                                    if raw_listeners.is_empty() {
+                                        let registry = registry_clone.lock().await;
+                                        let tunnel = registry.get(&tunnel_id).unwrap();
+                                        tunnel.close_tunnel().await;
+                                        continue;
+                                    }
 
                                     // store listeners in tunnel reference
                                     let mut listeners_guard = listeners.lock().await;
@@ -135,15 +150,17 @@ impl OnionTunnel {
                                     *listeners_available_guard = true;
                                     drop(listeners_guard);
 
-                                    iface.incoming_tunnel(id_clone, listeners.clone()).await;
+                                    iface.incoming_tunnel(tunnel_id, listeners.clone()).await;
                                 }
 
                                 IncomingEventMessage::IncomingData(data) => {
                                     log::debug!(
                                         "Tunnel={:?}: Received incoming data, delegate to API",
-                                        id_clone
+                                        tunnel_id
                                     );
-                                    iface.incoming_data(data, id_clone, listeners.clone()).await;
+                                    iface
+                                        .incoming_data(data, tunnel_id, listeners.clone())
+                                        .await;
                                 }
                             }
                         } else {
@@ -157,9 +174,7 @@ impl OnionTunnel {
         });
 
         // start fsm
-        if let Err(_e) = event_tx_clone.send(FsmEvent::Init).await {
-            // TODO handle error
-        }
+        let _ = event_tx_clone.send(FsmEvent::Init).await;
 
         // run tunnel_event_listener
         tokio::spawn(async move {
@@ -205,15 +220,12 @@ impl OnionTunnel {
                     tunnel_id
                 );
                 if event_tx.send(event).await.is_err() {
+                    // this only happens when FSM has been terminated
                     log::warn!("Tunnel={:?}: Cannot forward event to fsm", tunnel_id);
                     return;
                 }
             }
         });
-
-        // register tunnel at registry
-        let mut tunnels = tunnel_registry.lock().await;
-        let _ = tunnels.insert(tunnel_id, tunnel);
     }
 
     /*
@@ -233,8 +245,9 @@ impl OnionTunnel {
         api_interface: Weak<ApiInterface>,
         local_crypto_context: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
-    ) -> TunnelId {
+    ) -> Result<TunnelId, ProtocolError> {
         // select intermediate hops via rps module and hop count
+        // TODO robustness isAlive checks during tunnel establishment, maybe add some more backup peers
         let mut hops: Vec<Peer> = vec![];
         for i in 0..hop_count {
             let peer = match rps_get_peer(rps_api_address).await {
@@ -247,10 +260,7 @@ impl OnionTunnel {
                     );
                     peer
                 }
-                Err(_) => {
-                    // TODO handle error
-                    panic!("Error occurred");
-                }
+                Err(_) => return Err(ProtocolError::RpsFailure),
             };
             hops.push(peer);
         }
@@ -306,7 +316,7 @@ impl OnionTunnel {
             fsm_lock,
         )
         .await;
-        tunnel_id
+        Ok(tunnel_id)
     }
 
     /*
@@ -375,6 +385,7 @@ impl OnionTunnel {
             e
         );
         if self.lifo_event_sender.send(e).await.is_err() {
+            // if this fails, the FSM handle_events() method has terminated
             log::warn!(
                 "Tunnel={:?}: Cannot forward event to tunnel",
                 self.tunnel_id
@@ -389,14 +400,6 @@ impl OnionTunnel {
         // send close event
         log::trace!("Tunnel={:?}: Send close event to FSM", self.tunnel_id);
         let _ = self.forward_event(FsmEvent::Close).await;
-
-        // remove from tunnels list
-        log::trace!(
-            "Tunnel={:?}: Remove tunnel from tunnel registry",
-            self.tunnel_id
-        );
-        let mut tunnel_registry = self.tunnel_registry.lock().await;
-        let _ = tunnel_registry.remove(&self.tunnel_id);
     }
 
     pub async fn unsubscribe(&self, connection_id: u64) {

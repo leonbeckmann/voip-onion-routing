@@ -124,9 +124,10 @@ impl P2pInterface {
                                     }
                                 };
 
-                                let mut tunnels = self.onion_tunnels.lock().await;
+                                let tunnels = self.onion_tunnels.lock().await;
                                 match tunnels.get(&tunnel_id) {
                                     None => {
+                                        // should never happen, means outdated frame_ids
                                         log::warn!(
                                             "Received frame for not available tunnel with id {:?}",
                                             tunnel_id
@@ -139,9 +140,8 @@ impl P2pInterface {
                                             tunnel_id
                                         );
                                         if tunnel.forward_event(event).await.is_err() {
-                                            // tunnel has been closed, remove tunnel from registry
+                                            // it seems that the tunnel is currently closing
                                             log::warn!("Cannot forward the parsed frame since the tunnel (ID {:?}) has been closed", tunnel_id);
-                                            let _ = tunnels.remove(&tunnel_id);
                                         }
                                     }
                                 };
@@ -199,7 +199,7 @@ impl P2pInterface {
         let (tx, rx) = oneshot::channel::<TunnelResult>();
 
         log::debug!("Received build_tunnel request from connection {:?} to {:?}. Build initiator tunnel and wait for handshake result", listener, target);
-        let tunnel_id = OnionTunnel::new_initiator_tunnel(
+        let tunnel_id = match OnionTunnel::new_initiator_tunnel(
             listener,
             self.frame_ids.clone(),
             self.socket.clone(),
@@ -213,7 +213,11 @@ impl P2pInterface {
             self.config.crypto_config.clone(),
             self.config.handshake_message_timeout,
         )
-        .await;
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => return Err(P2pError::HandshakeFailure(e)),
+        };
 
         // wait until connected or failure
         match rx.await {

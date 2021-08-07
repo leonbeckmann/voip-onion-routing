@@ -87,7 +87,7 @@ impl RawData {
         let (padding_size_buf, remainder) = raw.split_at(size_of::<u16>());
         let (message_type_buf, data_buf) = remainder.split_at(size_of::<u8>());
         let mut padding_size = [0u8; size_of::<u16>()];
-        padding_size.copy_from_slice(&padding_size_buf);
+        padding_size.copy_from_slice(padding_size_buf);
         let padding_len = u16::from_le_bytes(padding_size);
         let message_type = message_type_buf[0];
         if message_type != APP_DATA && message_type != HANDSHAKE_DATA {

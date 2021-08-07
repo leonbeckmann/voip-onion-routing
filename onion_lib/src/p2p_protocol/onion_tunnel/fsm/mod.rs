@@ -775,6 +775,8 @@ pub enum ProtocolError {
     ReusedSequenceNumber,
     #[error("Received application data with an expired sequence number")]
     ExpiredSequenceNumber,
+    #[error("Cannot sample random peers from RPS module")]
+    RpsFailure,
 }
 
 #[derive(Debug)]
