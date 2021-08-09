@@ -5,6 +5,7 @@ pub mod rps_api;
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;
 use crate::p2p_protocol::messages::p2p_messages::{TunnelFrame, TunnelFrame_oneof_message};
+use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::{OnionTunnel, TunnelResult};
 use protobuf::Message;
@@ -12,8 +13,8 @@ use std::sync::{Arc, Weak};
 use std::{collections::HashMap, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::UdpSocket;
-use tokio::sync::oneshot;
 use tokio::sync::Mutex;
+use tokio::sync::{oneshot, RwLock};
 
 // hard coded packet size should not be configurable and equal for all modules
 // TODO select correct
@@ -30,10 +31,8 @@ pub enum Direction {
 }
 
 pub(crate) struct P2pInterface {
-    // TODO is there a way for a more well-distributed key?
-    // TODO maybe rw lock for better performance?
     onion_tunnels: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
-    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    frame_id_manager: Arc<RwLock<FrameIdManager>>,
     socket: Arc<UdpSocket>,
     config: OnionConfiguration,
     api_interface: Weak<ApiInterface>,
@@ -46,7 +45,7 @@ impl P2pInterface {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             onion_tunnels: Arc::new(Mutex::new(HashMap::new())),
-            frame_ids: Arc::new(Mutex::new(HashMap::new())),
+            frame_id_manager: Arc::new(RwLock::new(FrameIdManager::new())),
             socket: Arc::new(
                 UdpSocket::bind(format!("{}:{:?}", config.p2p_hostname, config.p2p_port)).await?,
             ),
@@ -86,7 +85,7 @@ impl P2pInterface {
                                     );
                                     // build a new target tunnel
                                     let tunnel_id = OnionTunnel::new_target_tunnel(
-                                        self.frame_ids.clone(),
+                                        self.frame_id_manager.clone(),
                                         self.socket.clone(),
                                         addr,
                                         self.onion_tunnels.clone(),
@@ -99,8 +98,8 @@ impl P2pInterface {
                                     (tunnel_id, Direction::Forward)
                                 } else {
                                     // not a new tunnel request, get corresponding tunnel id from frame id
-                                    let frame_ids = self.frame_ids.lock().await;
-                                    match frame_ids.get(&frame.frame_id) {
+                                    let frame_id_manager = self.frame_id_manager.read().await;
+                                    match frame_id_manager.get_tunnel_id(&frame.frame_id) {
                                         None => {
                                             // no tunnel available for the given frame
                                             log::warn!(
@@ -110,7 +109,7 @@ impl P2pInterface {
                                         }
                                         Some((tunnel_id, d)) => {
                                             log::debug!("Incoming frame (direction={:?}) belongs to tunnel with ID {:?} ", d, tunnel_id);
-                                            (*tunnel_id, *d)
+                                            (tunnel_id, d)
                                         }
                                     }
                                 };
@@ -201,7 +200,7 @@ impl P2pInterface {
         log::debug!("Received build_tunnel request from connection {:?} to {:?}. Build initiator tunnel and wait for handshake result", listener, target);
         let tunnel_id = match OnionTunnel::new_initiator_tunnel(
             listener,
-            self.frame_ids.clone(),
+            self.frame_id_manager.clone(),
             self.socket.clone(),
             target,
             host_key.clone(),

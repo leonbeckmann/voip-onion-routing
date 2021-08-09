@@ -6,7 +6,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::net::UdpSocket;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
-    oneshot, Mutex, Notify,
+    oneshot, Mutex, Notify, RwLock,
 };
 
 use openssl::sha;
@@ -15,14 +15,16 @@ use crate::api_protocol::ApiInterface;
 use crate::p2p_protocol::onion_tunnel::fsm::{
     FiniteStateMachine, FsmEvent, InitiatorStateMachine, ProtocolError, TargetStateMachine,
 };
-use crate::p2p_protocol::{ConnectionId, Direction, P2pError};
+use crate::p2p_protocol::{ConnectionId, P2pError};
 
-use super::{FrameId, TunnelId};
+use super::TunnelId;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
+use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::rps_api::rps_get_peer;
 use std::time::Duration;
 
 pub mod crypto;
+pub(crate) mod frame_id_manager;
 pub(crate) mod fsm;
 pub(crate) mod message_codec;
 
@@ -62,10 +64,10 @@ pub(crate) struct OnionTunnel {
     lifo_event_sender: Sender<FsmEvent>,
 }
 
-// TODO update tunnel management
 impl OnionTunnel {
     #[allow(clippy::too_many_arguments)]
     async fn new_tunnel(
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
         listeners: Arc<Mutex<HashSet<ConnectionId>>>,
         listeners_available: Arc<Mutex<bool>>,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
@@ -95,7 +97,7 @@ impl OnionTunnel {
         }
 
         // start management task that manages tunnel cleanup and listener notification
-        let registry_clone = tunnel_registry.clone();
+        let registry_clone = tunnel_registry.clone(); //TODO not clone
         tokio::spawn(async move {
             log::trace!("Tunnel={:?}: Run the async management task", tunnel_id);
             loop {
@@ -108,6 +110,8 @@ impl OnionTunnel {
                         );
                         let mut registry = registry_clone.lock().await;
                         let _ = registry.remove(&tunnel_id);
+                        let mut frame_id_manager = frame_id_manager.write().await;
+                        frame_id_manager.tunnel_closure(tunnel_id);
                         return;
                     }
 
@@ -234,7 +238,7 @@ impl OnionTunnel {
     #[allow(clippy::too_many_arguments)]
     pub async fn new_initiator_tunnel(
         listener: ConnectionId,
-        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
         socket: Arc<UdpSocket>,
         target: SocketAddr,
         target_host_key: Vec<u8>,
@@ -283,7 +287,7 @@ impl OnionTunnel {
         let mut fsm = InitiatorStateMachine::new(
             hops,
             tunnel_result_tx,
-            frame_ids,
+            frame_id_manager.clone(),
             socket,
             tunnel_id,
             mgmt_tx,
@@ -306,6 +310,7 @@ impl OnionTunnel {
         ));
 
         Self::new_tunnel(
+            frame_id_manager,
             listeners,
             Arc::new(Mutex::new(true)),
             tunnel_registry,
@@ -323,7 +328,7 @@ impl OnionTunnel {
      *  Create a tunnel for a non-initiating peer (intermediate hop and target peer)
      */
     pub async fn new_target_tunnel(
-        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
         socket: Arc<UdpSocket>,
         source: SocketAddr,
         tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
@@ -344,7 +349,7 @@ impl OnionTunnel {
         // create target FSM
         let fsm_lock = Arc::new((Mutex::new(FsmLockState::WaitForEvent), Notify::new()));
         let mut fsm = TargetStateMachine::new(
-            frame_ids,
+            frame_id_manager.clone(),
             socket,
             source,
             tunnel_id,
@@ -361,6 +366,7 @@ impl OnionTunnel {
         });
 
         Self::new_tunnel(
+            frame_id_manager,
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(Mutex::new(false)),
             tunnel_registry,

@@ -2,6 +2,7 @@ mod handshake_fsm;
 
 use crate::p2p_protocol::messages::p2p_messages::HandshakeData_oneof_message;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
+use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
@@ -10,17 +11,16 @@ use crate::p2p_protocol::onion_tunnel::message_codec::{
     InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
 };
 use crate::p2p_protocol::onion_tunnel::{FsmLockState, IncomingEventMessage, Peer, TunnelResult};
-use crate::p2p_protocol::{Direction, FrameId, TunnelId};
+use crate::p2p_protocol::{Direction, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 
 type IV = Bytes;
 
@@ -41,7 +41,7 @@ impl InitiatorStateMachine {
     pub fn new(
         hops: Vec<Peer>,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
-        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
         socket: Arc<UdpSocket>,
         tunnel_id: TunnelId,
         listener_tx: Sender<IncomingEventMessage>,
@@ -56,7 +56,10 @@ impl InitiatorStateMachine {
             tunnel_result_tx: Some(tunnel_result_tx),
             event_tx,
             endpoint_codec: Arc::new(Mutex::new(Box::new(InitiatorEndpoint::new(
-                socket, *next_hop, frame_ids, tunnel_id,
+                socket,
+                *next_hop,
+                frame_id_manager,
+                tunnel_id,
             )))),
             listener_tx,
             tunnel_id,
@@ -81,7 +84,7 @@ pub(super) struct TargetStateMachine {
 impl TargetStateMachine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
         socket: Arc<UdpSocket>,
         source: SocketAddr,
         tunnel_id: TunnelId,
@@ -95,7 +98,10 @@ impl TargetStateMachine {
             listener_tx,
             event_tx,
             codec: Arc::new(Mutex::new(Box::new(TargetEndpoint::new(
-                socket, source, frame_ids, tunnel_id,
+                socket,
+                source,
+                frame_id_manager,
+                tunnel_id,
             )))),
             tunnel_id,
             fsm_lock,

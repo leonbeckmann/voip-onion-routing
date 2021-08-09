@@ -11,12 +11,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use protobuf::Message;
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::mem::size_of;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use super::crypto::AUTH_SIZE;
+use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
+
 const PADDING_LEN_SIZE: usize = size_of::<u16>();
 const MSG_TYPE_SIZE: usize = size_of::<u8>();
 const SEQ_NR_SIZE: usize = size_of::<u32>();
@@ -228,39 +230,6 @@ pub trait P2pCodec {
     }
 }
 
-async fn new_frame_id(
-    tunnel_id: TunnelId,
-    direction: Direction,
-    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
-) -> FrameId {
-    let mut frame_ids = frame_ids.lock().await;
-    let mut new_id: u64 = rand::random();
-    while new_id < 2 || frame_ids.contains_key(&new_id) {
-        new_id = rand::random();
-    }
-    log::trace!(
-        "Register new frame_id mapping: <{:?},{:?}>",
-        new_id,
-        (tunnel_id, direction)
-    );
-    let _ = frame_ids.insert(new_id, (tunnel_id, direction));
-    new_id
-}
-
-fn cleanup_frames(
-    _frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
-    _my_frames: &[(FrameId, Direction)],
-) {
-    // FIXME cannot run runtime within runtime
-    /*let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async {
-        let mut frame_ids = frame_ids.lock().await;
-        for (id, _) in my_frames.iter() {
-            let _ = frame_ids.remove(id);
-        }
-    });*/
-}
-
 async fn send_close(frame_id: FrameId, addr: SocketAddr, socket: Arc<UdpSocket>) {
     let mut frame = TunnelFrame::new();
     frame.set_frame_id(frame_id);
@@ -273,11 +242,10 @@ async fn send_close(frame_id: FrameId, addr: SocketAddr, socket: Arc<UdpSocket>)
 pub(crate) struct InitiatorEndpoint {
     socket: Arc<UdpSocket>,
     next_hop: SocketAddr,
-    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
     forward_frame_id: FrameId, // frame id for forward packages
     next_hop_backward_frame_id: Option<FrameId>,
-    own_frame_ids: Vec<(FrameId, Direction)>,
     crypto_contexts: Vec<CryptoContext>,
     seq_nr_context: SequenceNumberContext,
 }
@@ -286,36 +254,28 @@ impl InitiatorEndpoint {
     pub fn new(
         socket: Arc<UdpSocket>,
         next_hop: SocketAddr,
-        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
         tunnel_id: TunnelId,
     ) -> Self {
         Self {
             socket,
             next_hop,
-            frame_ids,
+            frame_id_manager,
             tunnel_id,
             forward_frame_id: 1,              // initialized for init client hello
             next_hop_backward_frame_id: None, // used for client hellos to next hops
-            own_frame_ids: vec![],
             crypto_contexts: vec![],
             seq_nr_context: SequenceNumberContext::new(),
         }
     }
 }
 
-impl Drop for InitiatorEndpoint {
-    fn drop(&mut self) {
-        cleanup_frames(self.frame_ids.clone(), &self.own_frame_ids);
-    }
-}
-
 pub(crate) struct TargetEndpoint {
     socket: Arc<UdpSocket>,
     prev_hop: SocketAddr,
-    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
     backward_frame_id: FrameId, // frame id for backward packages
-    own_frame_ids: Vec<(FrameId, Direction)>,
     crypto_context: Option<CryptoContext>,
     seq_nr_context: SequenceNumberContext,
 }
@@ -324,16 +284,15 @@ impl TargetEndpoint {
     pub fn new(
         socket: Arc<UdpSocket>,
         prev_hop: SocketAddr,
-        frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
         tunnel_id: TunnelId,
     ) -> Self {
         Self {
             socket,
             prev_hop,
-            frame_ids,
+            frame_id_manager,
             tunnel_id,
             backward_frame_id: 0,
-            own_frame_ids: vec![],
             crypto_context: None,
             seq_nr_context: SequenceNumberContext::new(),
         }
@@ -342,25 +301,11 @@ impl TargetEndpoint {
     pub async fn lock_as_target_endpoint(&mut self) {
         // this endpoint is the target and will not be transferred to an intermediate_hop
         log::trace!("Tunnel={:?}: Lock target hop", self.tunnel_id);
-
-        // remove unnecessary frame_ids from registry
-        let mut frames = self.frame_ids.lock().await;
-        self.own_frame_ids.retain(|(id, direction)| {
-            if *direction == Direction::Backward {
-                // remove all backward frame id's
-                let _ = frames.remove(id);
-                false
-            } else {
-                // keep all forward frame id's
-                true
-            }
-        });
-    }
-}
-
-impl Drop for TargetEndpoint {
-    fn drop(&mut self) {
-        cleanup_frames(self.frame_ids.clone(), &self.own_frame_ids);
+        // remove all backward frame ids, which are not used for target tunnels
+        self.frame_id_manager
+            .write()
+            .await
+            .remove_backward_frame_ids(self.tunnel_id);
     }
 }
 
@@ -368,11 +313,10 @@ pub(crate) struct IntermediateHopCodec {
     socket: Arc<UdpSocket>,
     next_hop: SocketAddr,
     prev_hop: SocketAddr,
-    frame_ids: Arc<Mutex<HashMap<FrameId, (TunnelId, Direction)>>>,
+    _frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
     forward_frame_id: FrameId,  // frame id for forward packages
     backward_frame_id: FrameId, // frame id for backward packages
-    own_frame_ids: Vec<(FrameId, Direction)>,
     crypto_context: CryptoContext,
 }
 
@@ -383,19 +327,12 @@ impl IntermediateHopCodec {
             socket: target.socket.clone(),
             next_hop,
             prev_hop: target.prev_hop,
-            frame_ids: target.frame_ids.clone(),
+            _frame_id_manager: target.frame_id_manager.clone(),
             tunnel_id: target.tunnel_id,
             forward_frame_id: 1,
             backward_frame_id: target.backward_frame_id,
-            own_frame_ids: target.own_frame_ids.to_owned(),
             crypto_context: target.crypto_context.take().unwrap(),
         }
-    }
-}
-
-impl Drop for IntermediateHopCodec {
-    fn drop(&mut self) {
-        cleanup_frames(self.frame_ids.clone(), &self.own_frame_ids);
     }
 }
 
@@ -445,14 +382,10 @@ impl P2pCodec for InitiatorEndpoint {
                 let id = match self.next_hop_backward_frame_id {
                     None => {
                         // this handshake is to the direct successor, we have to provide our own backward id
-                        let new_id = new_frame_id(
-                            self.tunnel_id,
-                            Direction::Backward,
-                            self.frame_ids.clone(),
-                        )
-                        .await;
-                        self.own_frame_ids.push((new_id, Direction::Backward));
-                        new_id
+                        self.frame_id_manager
+                            .write()
+                            .await
+                            .new_frame_id(self.tunnel_id, Direction::Backward)
                     }
                     Some(id) => {
                         // this handshake is not to the direct successor, provide backward id of other hop
@@ -668,14 +601,16 @@ impl P2pCodec for TargetEndpoint {
             }
             DataType::ServerHello(mut server_hello) => {
                 // calculate frame_ids
-                let new_forward_id =
-                    new_frame_id(self.tunnel_id, Direction::Forward, self.frame_ids.clone()).await;
-                let new_backward_id =
-                    new_frame_id(self.tunnel_id, Direction::Backward, self.frame_ids.clone()).await;
-                self.own_frame_ids
-                    .push((new_backward_id, Direction::Backward));
-                self.own_frame_ids
-                    .push((new_forward_id, Direction::Forward));
+                let new_forward_id = self
+                    .frame_id_manager
+                    .write()
+                    .await
+                    .new_frame_id(self.tunnel_id, Direction::Forward);
+                let new_backward_id = self
+                    .frame_id_manager
+                    .write()
+                    .await
+                    .new_frame_id(self.tunnel_id, Direction::Backward);
                 server_hello.set_forward_frame_id(new_forward_id);
                 server_hello.set_backward_frame_id(new_backward_id);
 
