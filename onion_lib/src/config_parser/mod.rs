@@ -20,6 +20,7 @@ pub struct OnionConfiguration {
     pub rps_api_address: SocketAddr,
     pub round_time: Duration,
     pub handshake_message_timeout: Duration,
+    pub timeout: Duration,
 }
 
 impl OnionConfiguration {
@@ -193,6 +194,15 @@ impl OnionConfiguration {
             },
         };
 
+        // message timeout (s)
+        let timeout = match onion_sec.get("timeout") {
+            None => Duration::from_secs(15), // default
+            Some(timeout) => match timeout.parse::<u64>() {
+                Ok(timeout) => Duration::from_secs(timeout),
+                Err(_) => return Err(ParsingError::from_str("Cannot parse 'timeout' to u64")),
+            },
+        };
+
         // round time (seconds)
         let round_time = match onion_sec.get("round_time") {
             None => Duration::from_secs(60), // default
@@ -211,6 +221,7 @@ impl OnionConfiguration {
             rps_api_address,
             round_time,
             handshake_message_timeout,
+            timeout,
         })
     }
 }

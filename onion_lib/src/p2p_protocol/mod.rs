@@ -70,7 +70,6 @@ impl P2pInterface {
                             Ok(frame) => {
                                 // check if data available, which should always be the case
                                 log::trace!("UDP packet successfully parsed to TunnelFrame");
-                                // TODO do we want to check data size here?
 
                                 let (tunnel_id, direction) = if frame.frame_id == 1 {
                                     // frame id one is the initial handshake message (client_hello)
@@ -86,6 +85,7 @@ impl P2pInterface {
                                         self.api_interface.clone(),
                                         self.config.crypto_config.clone(),
                                         self.config.handshake_message_timeout,
+                                        self.config.timeout,
                                     )
                                     .await;
                                     log::trace!("New target tunnel has tunnel ID {:?}", tunnel_id);
@@ -199,6 +199,7 @@ impl P2pInterface {
             self.api_interface.clone(),
             self.config.crypto_config.clone(),
             self.config.handshake_message_timeout,
+            self.config.timeout,
         )
         .await
         {

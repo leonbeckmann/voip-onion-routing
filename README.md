@@ -49,6 +49,7 @@ The module requires a Windows INI configuration file for configuring the Onion m
 | api_address       | onion   | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for Onion layer |
 | round_time        | onion   | u64                                   | Round time in seconds (default=60s)| 
 | handshake_timeout | onion   | u64                                   | Handshake message timeout in ms (default=1000ms)| 
+| timeout           | onion   | u64                                   | Timeout for recognize inactive tunnels (default=15s)|
 | private_hostkey   | onion   | str                                   | Path to peer's private hostkey in PEM format | 
 | api_address       | rps     | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for RPS layer |
 

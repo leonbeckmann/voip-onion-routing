@@ -15,12 +15,14 @@ use crate::p2p_protocol::{Direction, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::net::SocketAddr;
+use std::ops::{Add, Sub};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
+use tokio::time::timeout;
 
 type IV = Bytes;
 
@@ -283,23 +285,51 @@ pub(super) trait FiniteStateMachine {
     fn get_codec(&mut self) -> Arc<Mutex<Box<dyn P2pCodec + Send>>>;
 
     #[allow(unused_assignments)]
-    async fn handle_events(&mut self, mut event_rx: Receiver<FsmEvent>) {
+    async fn handle_events(&mut self, mut event_rx: Receiver<FsmEvent>, fsm_timeout: Duration) {
         let mut current_state = Self::INIT_STATE;
+        let mut inactive_ctr = Duration::from_secs(0);
 
         loop {
-            // TODO timeout to close inactive tunnels
             // read event from queue
-            let event = match event_rx.recv().await {
-                None => {
+            let now = Instant::now();
+            let event_future = event_rx.recv();
+            let event = match timeout(fsm_timeout.sub(inactive_ctr), event_future).await {
+                Ok(res) => match res {
+                    None => {
+                        log::warn!(
+                            "Tunnel={:?}: Event queue closed by the tunnel, terminate FSM",
+                            self.tunnel_id()
+                        );
+                        current_state = State::Terminated;
+                        return;
+                    }
+                    Some(e) => e,
+                },
+                Err(_) => {
+                    // timeout occurred
                     log::warn!(
-                        "Tunnel={:?}: Event queue closed by the tunnel, terminate FSM",
+                        "Tunnel={:?}: FSM timeout occurred. Tunnel has not received any incoming payload too long. Terminate FSM.",
                         self.tunnel_id()
                     );
                     current_state = State::Terminated;
                     return;
                 }
-                Some(e) => e,
             };
+
+            // reset timeout for incoming frame, update inactive_ctr for other event
+            match event {
+                FsmEvent::IncomingFrame(_) => {
+                    log::trace!(
+                        "Tunnel={:?}: Reset FSM timeout counter after receiving data.",
+                        self.tunnel_id()
+                    );
+                    inactive_ctr = Duration::from_secs(0);
+                }
+                _ => {
+                    inactive_ctr = inactive_ctr.add(now.elapsed());
+                }
+            }
+
             log::trace!(
                 "Tunnel={:?}: Received event={:?} in state={:?}",
                 self.tunnel_id(),

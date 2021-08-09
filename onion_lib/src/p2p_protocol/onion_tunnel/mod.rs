@@ -97,7 +97,6 @@ impl OnionTunnel {
         }
 
         // start management task that manages tunnel cleanup and listener notification
-        let registry_clone = tunnel_registry.clone(); //TODO not clone
         tokio::spawn(async move {
             log::trace!("Tunnel={:?}: Run the async management task", tunnel_id);
             loop {
@@ -108,7 +107,7 @@ impl OnionTunnel {
                             "Tunnel={:?}: Received a closure from the FSM. Unregister the tunnel and shutdown the management layer",
                             tunnel_id
                         );
-                        let mut registry = registry_clone.lock().await;
+                        let mut registry = tunnel_registry.lock().await;
                         let _ = registry.remove(&tunnel_id);
                         let mut frame_id_manager = frame_id_manager.write().await;
                         frame_id_manager.tunnel_closure(tunnel_id);
@@ -140,7 +139,7 @@ impl OnionTunnel {
 
                                     // check if listeners are empty, then we want to terminate the tunnel
                                     if raw_listeners.is_empty() {
-                                        let registry = registry_clone.lock().await;
+                                        let registry = tunnel_registry.lock().await;
                                         let tunnel = registry.get(&tunnel_id).unwrap();
                                         tunnel.close_tunnel().await;
                                         continue;
@@ -249,6 +248,7 @@ impl OnionTunnel {
         api_interface: Weak<ApiInterface>,
         local_crypto_context: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
+        timeout: Duration,
     ) -> Result<TunnelId, ProtocolError> {
         // select intermediate hops via rps module and hop count
         // TODO robustness isAlive checks during tunnel establishment, maybe add some more backup peers
@@ -299,7 +299,7 @@ impl OnionTunnel {
 
         // run the fsm
         tokio::spawn(async move {
-            fsm.handle_events(event_rx).await;
+            fsm.handle_events(event_rx, timeout).await;
         });
 
         // create the tunnel
@@ -327,6 +327,7 @@ impl OnionTunnel {
     /*
      *  Create a tunnel for a non-initiating peer (intermediate hop and target peer)
      */
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_target_tunnel(
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
         socket: Arc<UdpSocket>,
@@ -335,6 +336,7 @@ impl OnionTunnel {
         api_interface: Weak<ApiInterface>,
         local_crypto_context: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
+        timeout: Duration,
     ) -> TunnelId {
         // create a channel for handing events to the fsm
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
@@ -362,7 +364,7 @@ impl OnionTunnel {
 
         // run the fsm
         tokio::spawn(async move {
-            fsm.handle_events(event_rx).await;
+            fsm.handle_events(event_rx, timeout).await;
         });
 
         Self::new_tunnel(
