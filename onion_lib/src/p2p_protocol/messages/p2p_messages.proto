@@ -9,11 +9,9 @@ message TunnelFrame {
   // random, unpredictable iv used for encryption
   bytes iv = 2;
 
-  oneof message {
-    // auth_tag + [padding_size: u16, data_type: u8, data, padding] encrypted
-    bytes data = 3;
-    Close close = 4;
-  }
+  // auth_tag + [padding_size: u16, data_type: u8, data, padding] encrypted
+  bytes data = 3;
+
 }
 
 message HandshakeData {

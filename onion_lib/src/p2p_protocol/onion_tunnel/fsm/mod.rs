@@ -142,6 +142,10 @@ pub(super) trait FiniteStateMachine {
             .process_data(Direction::Forward, data, iv)
             .await?
         {
+            ProcessedData::ReceivedClose => {
+                log::trace!("Tunnel={:?}: Received close", self.tunnel_id());
+                return Ok(State::Terminated);
+            }
             ProcessedData::TransferredToNextHop => {
                 return Err(ProtocolError::UnexpectedMessageType);
             }
@@ -218,6 +222,10 @@ pub(super) trait FiniteStateMachine {
             .process_data(direction, data, iv)
             .await?
         {
+            ProcessedData::ReceivedClose => {
+                log::trace!("Tunnel={:?}: Received close", self.tunnel_id());
+                return Ok(State::Terminated);
+            }
             ProcessedData::TransferredToNextHop => {
                 log::trace!(
                     "Tunnel={:?}: Data have been transferred to next hop",
@@ -254,15 +262,9 @@ pub(super) trait FiniteStateMachine {
             "Tunnel={:?}: Received close event, notify tunnel peers and shutdown tunnel",
             self.tunnel_id()
         );
-        self.get_codec()
-            .lock()
-            .await
-            .close(Direction::Forward, true)
-            .await;
+        self.get_codec().lock().await.close(false).await;
         Ok(State::Terminated)
     }
-
-    async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError>;
 
     async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError> {
         // send data to the target via the tunnel
@@ -285,6 +287,7 @@ pub(super) trait FiniteStateMachine {
         let mut current_state = Self::INIT_STATE;
 
         loop {
+            // TODO timeout to close inactive tunnels
             // read event from queue
             let event = match event_rx.recv().await {
                 None => {
@@ -338,7 +341,6 @@ pub(super) trait FiniteStateMachine {
                         self.action_handshake_data(tx, data, iv).await
                     }
                     FsmEvent::HandshakeResult(res) => self.action_handshake_result(res).await,
-                    FsmEvent::RecvClose(direction) => self.action_recv_close(direction).await,
                 },
 
                 State::Connected => match event {
@@ -362,7 +364,6 @@ pub(super) trait FiniteStateMachine {
                         );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::RecvClose(direction) => self.action_recv_close(direction).await,
                 },
 
                 State::Terminated => {
@@ -630,16 +631,6 @@ impl FiniteStateMachine for InitiatorStateMachine {
         Ok(State::Connecting(SenderWrapper { event_tx }))
     }
 
-    async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
-        // target sends closure, notify hops
-        log::debug!(
-            "Tunnel={:?}: Received closure from target peer, notify hops and close tunnel",
-            self.tunnel_id
-        );
-        self.endpoint_codec.lock().await.close(d, false).await;
-        Ok(State::Terminated)
-    }
-
     async fn action_handshake_result(
         &mut self,
         res: Result<IsTargetEndpoint, ProtocolError>,
@@ -704,16 +695,6 @@ impl FiniteStateMachine for TargetStateMachine {
         });
 
         Ok(State::Connecting(SenderWrapper { event_tx }))
-    }
-
-    async fn action_recv_close(&mut self, d: Direction) -> Result<State, ProtocolError> {
-        // receives close from initiator peer
-        log::debug!(
-            "Tunnel={:?}: Received closure from initiator peer, close tunnel",
-            self.tunnel_id
-        );
-        self.codec.lock().await.close(d, false).await;
-        Ok(State::Terminated)
     }
 
     async fn action_handshake_result(
@@ -809,10 +790,9 @@ type IsTargetEndpoint = bool;
 
 #[derive(Debug)]
 pub enum FsmEvent {
-    Init,  // Start the FSM
-    Close, // Close the Tunnel
-    RecvClose(Direction),
-    Send(Vec<u8>),                         // Send Data via the Tunnel
-    IncomingFrame((Bytes, Direction, IV)), // Received data frame
+    Init,                                                     // Start the FSM
+    Close,                                                    // Close the Tunnel
+    Send(Vec<u8>),                                            // Send Data via the Tunnel
+    IncomingFrame((Bytes, Direction, IV)),                    // Received data frame
     HandshakeResult(Result<IsTargetEndpoint, ProtocolError>), // HandshakeResult from handshake fsm
 }

@@ -4,7 +4,7 @@ pub mod rps_api;
 
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;
-use crate::p2p_protocol::messages::p2p_messages::{TunnelFrame, TunnelFrame_oneof_message};
+use crate::p2p_protocol::messages::p2p_messages::TunnelFrame;
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::{OnionTunnel, TunnelResult};
@@ -70,13 +70,7 @@ impl P2pInterface {
                             Ok(frame) => {
                                 // check if data available, which should always be the case
                                 log::trace!("UDP packet successfully parsed to TunnelFrame");
-                                let frame_message = match frame.message {
-                                    None => {
-                                        log::warn!("TunnelFrame is empty, drop the packet");
-                                        continue;
-                                    }
-                                    Some(message) => message,
-                                };
+                                // TODO do we want to check data size here?
 
                                 let (tunnel_id, direction) = if frame.frame_id == 1 {
                                     // frame id one is the initial handshake message (client_hello)
@@ -114,14 +108,8 @@ impl P2pInterface {
                                     }
                                 };
 
-                                let event = match frame_message {
-                                    TunnelFrame_oneof_message::data(data) => {
-                                        FsmEvent::IncomingFrame((data, direction, frame.iv))
-                                    }
-                                    TunnelFrame_oneof_message::close(_) => {
-                                        FsmEvent::RecvClose(direction)
-                                    }
-                                };
+                                let event =
+                                    FsmEvent::IncomingFrame((frame.data, direction, frame.iv));
 
                                 let tunnels = self.onion_tunnels.lock().await;
                                 match tunnels.get(&tunnel_id) {

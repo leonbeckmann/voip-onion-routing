@@ -1,8 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use crate::p2p_protocol::messages::p2p_messages::{
-    ApplicationData, ClientHello, Close, HandshakeData, RoutingInformation, ServerHello,
-    TunnelFrame,
+    ApplicationData, ClientHello, HandshakeData, RoutingInformation, ServerHello, TunnelFrame,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTH_PLACEHOLDER, IV_SIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
@@ -23,6 +22,8 @@ const PADDING_LEN_SIZE: usize = size_of::<u16>();
 const MSG_TYPE_SIZE: usize = size_of::<u8>();
 const SEQ_NR_SIZE: usize = size_of::<u32>();
 
+const CLOSE_MAGIC_NUMBER: &[u8] = "CLOSE_MAGIC_NUMBER".as_bytes();
+
 const PAYLOAD_SIZE: usize = 1024;
 const RAW_META_DATA_SIZE: usize = AUTH_SIZE + PADDING_LEN_SIZE + MSG_TYPE_SIZE;
 const PROTOBUF_APP_META_LEN: usize = 17; // buffer for protobuf meta information
@@ -34,9 +35,11 @@ pub enum ProcessedData {
     TransferredToNextHop,
     HandshakeData(HandshakeData),
     IncomingData(Vec<u8>),
+    ReceivedClose,
 }
 
 pub enum DataType {
+    Close(bool),
     AppData(Vec<u8>),
     ClientHello(ClientHello),
     ServerHello(ServerHello),
@@ -52,6 +55,7 @@ struct RawData {
 
 const APP_DATA: u8 = 1;
 const HANDSHAKE_DATA: u8 = 2;
+const CLOSE: u8 = 3;
 
 impl RawData {
     fn new(len: u16, message_type: u8, data: Vec<u8>) -> Self {
@@ -92,7 +96,7 @@ impl RawData {
         padding_size.copy_from_slice(padding_size_buf);
         let padding_len = u16::from_le_bytes(padding_size);
         let message_type = message_type_buf[0];
-        if message_type != APP_DATA && message_type != HANDSHAKE_DATA {
+        if message_type != APP_DATA && message_type != HANDSHAKE_DATA && message_type != CLOSE {
             log::warn!(
                 "Tunnel={:?}: Invalid message type: {}",
                 tunnel_id,
@@ -124,8 +128,6 @@ impl RawData {
 }
 
 type IV = Bytes;
-// TODO make closing procedure safe
-// TODO close hops and endpoints on handshake failures
 
 #[derive(Debug, Clone)]
 struct SequenceNumberContext {
@@ -183,8 +185,9 @@ pub trait P2pCodec {
     /*
      *  Process incoming encrypted data.
      *
-     *  If self is an intermediate hop, the data are processed and transferred to the next hop.
-     *  If self is an endpoint, the data are returned ass IncomingData
+     *  If self is an intermediate hop, the data are processed and transferred to the next hop after
+     * checked for magic close number.
+     *  If self is an endpoint, the data are returned as IncomingData if no endpoint
      */
     async fn process_data(
         &mut self,
@@ -196,7 +199,7 @@ pub trait P2pCodec {
     /*
      *  Tunnel close, send close messages
      */
-    async fn close(&mut self, d: Direction, initiator: bool);
+    async fn close(&mut self, without_last_peer: bool);
 
     /*
      *  Get the implementation of the trait for updating codecs
@@ -230,14 +233,6 @@ pub trait P2pCodec {
     }
 }
 
-async fn send_close(frame_id: FrameId, addr: SocketAddr, socket: Arc<UdpSocket>) {
-    let mut frame = TunnelFrame::new();
-    frame.set_frame_id(frame_id);
-    frame.set_close(Close::new());
-    let data = frame.write_to_bytes().unwrap();
-    let _ = socket.send_to(data.as_ref(), addr).await;
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct InitiatorEndpoint {
     socket: Arc<UdpSocket>,
@@ -266,6 +261,15 @@ impl InitiatorEndpoint {
             next_hop_backward_frame_id: None, // used for client hellos to next hops
             crypto_contexts: vec![],
             seq_nr_context: SequenceNumberContext::new(),
+        }
+    }
+
+    /*
+     * Used during initiator closing procedure to destruct tunnel
+     */
+    fn remove_crypto_context(&mut self) {
+        if !self.crypto_contexts.is_empty() {
+            let _ = self.crypto_contexts.remove(self.crypto_contexts.len() - 1);
         }
     }
 }
@@ -343,6 +347,30 @@ impl P2pCodec for InitiatorEndpoint {
         frame.set_frame_id(self.forward_frame_id);
 
         let iv_data_chunks = match data {
+            DataType::Close(to_endpoint) => {
+                // send close similar as app_data without fragmentation and with magic number if hop
+                let mut raw_data = if to_endpoint {
+                    RawData::new(PAYLOAD_SIZE as u16, CLOSE, vec![]).serialize()
+                } else {
+                    let mut data = CLOSE_MAGIC_NUMBER.to_vec();
+                    data.append(
+                        &mut (0..(PAYLOAD_SIZE - CLOSE_MAGIC_NUMBER.len()))
+                            .map(|_| rand::random::<u8>())
+                            .collect(),
+                    );
+                    data
+                };
+
+                // layered encryption via iv and keys using the crypto contexts
+                let mut iv: Option<Vec<u8>> = None;
+                for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0)?;
+                    iv = Some(iv_);
+                    raw_data = data_;
+                }
+                assert_eq!(raw_data.len(), PAYLOAD_SIZE);
+                vec![(iv, raw_data)]
+            }
             DataType::AppData(data) => {
                 // fragmentation
                 let mut chunks = vec![];
@@ -521,18 +549,34 @@ impl P2pCodec for InitiatorEndpoint {
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
+            CLOSE => {
+                // initiator received close, deconstruct tunnel
+                log::trace!("Tunnel={:?}: Initiator receives close", self.tunnel_id);
+                self.close(true).await;
+                Ok(ProcessedData::ReceivedClose)
+            }
             _ => return Err(ProtocolError::UnexpectedMessageType),
         }
     }
 
-    async fn close(&mut self, _: Direction, initiator: bool) {
-        if initiator {
-            log::debug!(
-                "Tunnel={:?}: At initiator send close to {:?} (forward)",
-                self.tunnel_id,
-                self.next_hop
-            );
-            send_close(self.forward_frame_id, self.next_hop, self.socket.clone()).await;
+    async fn close(&mut self, without_last_peer: bool) {
+        // iteratively deconstruct tunnel, starting by the endpoint
+        log::debug!("Tunnel={:?}: At initiator send close", self.tunnel_id,);
+
+        if !without_last_peer {
+            // send close to target endpoint
+            let _ = self.write(DataType::Close(true)).await;
+        }
+
+        // remove last endpoint cc if available
+        self.remove_crypto_context();
+        let i = self.crypto_contexts.len();
+
+        // send close to intermediate hops
+        for _ in 0..i {
+            // FIXME test terminates too early, this is not executed completely
+            let _ = self.write(DataType::Close(false)).await;
+            self.remove_crypto_context();
         }
     }
 
@@ -569,6 +613,24 @@ impl P2pCodec for TargetEndpoint {
         frame.set_frame_id(self.backward_frame_id);
 
         let iv_data_bytes = match data {
+            DataType::Close(_) => {
+                // send close to initiator endpoint similar to appData
+                let raw_data = RawData::new(PAYLOAD_SIZE as u16, CLOSE, vec![]).serialize();
+                // encrypt via iv and key
+                assert!(self.crypto_context.is_some());
+                let (iv, raw_data) = self
+                    .crypto_context
+                    .as_mut()
+                    .unwrap()
+                    .encrypt(None, &raw_data, true)?;
+                assert_eq!(raw_data.len(), PAYLOAD_SIZE);
+                log::debug!(
+                    "Tunnel={:?}: Send encrypted close to prev hop {:?}",
+                    self.tunnel_id,
+                    self.prev_hop
+                );
+                vec![(iv, raw_data)]
+            }
             DataType::AppData(data) => {
                 // fragmentation
                 let mut chunks = vec![];
@@ -707,19 +769,17 @@ impl P2pCodec for TargetEndpoint {
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
+            CLOSE => {
+                log::trace!("Tunnel={:?}: Target receives close", self.tunnel_id);
+                Ok(ProcessedData::ReceivedClose)
+            }
             _ => return Err(ProtocolError::UnexpectedMessageType),
         }
     }
 
-    async fn close(&mut self, _: Direction, initiator: bool) {
-        if initiator {
-            log::debug!(
-                "Tunnel={:?}: At target send close to {:?} (backward)",
-                self.prev_hop,
-                self.prev_hop
-            );
-            send_close(self.backward_frame_id, self.prev_hop, self.socket.clone()).await;
-        }
+    async fn close(&mut self, _: bool) {
+        log::info!("Tunnel={:?}: Send close at target endpoint", self.tunnel_id,);
+        let _ = self.write(DataType::Close(true)).await;
     }
 
     fn as_any(&mut self) -> &mut dyn Any {
@@ -802,6 +862,14 @@ impl P2pCodec for IntermediateHopCodec {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
                 let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, start_to_end)?;
+                // check for magic number for closing a hop
+                if &decrypted_data[0..CLOSE_MAGIC_NUMBER.len()] == CLOSE_MAGIC_NUMBER {
+                    log::trace!(
+                        "Tunnel={:?}: Hop found magic close number in packet",
+                        self.tunnel_id
+                    );
+                    return Ok(ProcessedData::ReceivedClose);
+                }
                 frame.set_frame_id(self.forward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
@@ -833,20 +901,8 @@ impl P2pCodec for IntermediateHopCodec {
         Ok(ProcessedData::TransferredToNextHop)
     }
 
-    async fn close(&mut self, d: Direction, initiator: bool) {
-        // we should never be the initiator here
-        assert!(!initiator);
-        let (addr, frame_id) = match d {
-            Direction::Forward => (self.next_hop, self.forward_frame_id),
-            Direction::Backward => (self.prev_hop, self.backward_frame_id),
-        };
-        log::debug!(
-            "Tunnel={:?}: At intermediate hop send close to {:?} ({:?})",
-            self.tunnel_id,
-            addr,
-            d
-        );
-        send_close(frame_id, addr, self.socket.clone()).await;
+    async fn close(&mut self, _: bool) {
+        log::warn!("Close action not supported for intermediate hop codec");
     }
 
     fn as_any(&mut self) -> &mut dyn Any {
