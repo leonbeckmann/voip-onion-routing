@@ -809,6 +809,10 @@ pub enum ProtocolError {
     ExpiredSequenceNumber,
     #[error("Cannot sample random peers from RPS module")]
     RpsFailure,
+    #[error("Provided Frame IDS are empty")]
+    EmptyFrameIds,
+    #[error("Unsupported acction")]
+    UnsupportedAction,
 }
 
 #[derive(Debug)]

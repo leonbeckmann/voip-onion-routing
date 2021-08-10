@@ -1,5 +1,5 @@
 use crate::p2p_protocol::messages::p2p_messages::{
-    ClientHello, EncryptedServerHello, RoutingInformation,
+    ClientHello, EncryptedServerHelloData, RoutingInformation,
     RoutingInformation_oneof_optional_challenge_response, ServerHello,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{
@@ -141,7 +141,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let signature = self.crypto_context.hop_sign(&data.ecdh_public_key);
 
         // prepare secret server hello data
-        let mut encrypted_data = EncryptedServerHello::new();
+        let mut encrypted_data = EncryptedServerHelloData::new();
         encrypted_data.set_signature(signature.into());
         encrypted_data.set_forward_frame_ids(self.frame_id_manager.write().await.new_frame_ids(
             self.tunnel_id,
@@ -165,6 +165,12 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // create server hello and give it to message_codec
         let mut server_hello = ServerHello::new();
+        server_hello.set_backward_frame_id(
+            self.frame_id_manager
+                .write()
+                .await
+                .new_frame_id(self.tunnel_id, Direction::Backward),
+        );
         server_hello.set_ecdh_public_key(receiver_pub_der.into());
         server_hello.set_challenge(self.crypto_context.get_challenge().to_owned().into());
         server_hello.set_iv(iv.into());
@@ -203,10 +209,20 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let (_, dec_data_raw) = cc.decrypt(&data.iv, &data.encrypted_data, false)?;
 
         // parse dec_data into EncryptedServerHello
-        let enc_server_hello_data = match EncryptedServerHello::parse_from_bytes(&dec_data_raw) {
-            Ok(data) => data,
+        let enc_server_hello_data = match EncryptedServerHelloData::parse_from_bytes(&dec_data_raw)
+        {
+            Ok(data) => {
+                if data.forward_frame_ids.is_empty() || data.backward_frame_ids.is_empty() {
+                    log::warn!(
+                        "Tunnel={:?}: Provided frame IDS in ServerHello are empty",
+                        self.tunnel_id
+                    );
+                    return Err(ProtocolError::EmptyFrameIds);
+                }
+                data
+            }
             Err(_) => {
-                log::debug!(
+                log::warn!(
                     "Tunnel={:?}: Cannot parse ServerHello encrypted data",
                     self.tunnel_id
                 );
@@ -238,10 +254,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // update codec
         let mut codec = self.message_codec.lock().await;
-        codec.set_forward_frame_id(data.forward_frame_id);
         codec
             .process_forward_frame_ids(enc_server_hello_data.forward_frame_ids)
-            .await;
+            .await?;
         codec.set_backward_frame_id(data.backward_frame_id);
         codec.set_backward_frame_ids(enc_server_hello_data.backward_frame_ids);
         codec.add_crypto_context(cc);

@@ -32,19 +32,17 @@ message ClientHello {
 message ServerHello {
   // used for hops to tell next hop how to address prev hop
   uint64 backward_frame_id = 1;
-  // used for telling the source how to address the peer
-  uint64 forward_frame_id = 2;
   // public ECDHE parameter
-  bytes ecdh_public_key = 3;
+  bytes ecdh_public_key = 2;
   // challenge for client authentication
-  bytes challenge = 4;
+  bytes challenge = 3;
   // iv for encrypted data
-  bytes iv = 5;
+  bytes iv = 4;
   // encrypted data
-  bytes encrypted_data = 6;
+  bytes encrypted_data = 5;
 }
 
-message EncryptedServerHello {
+message EncryptedServerHelloData {
   bytes signature = 1;
   repeated uint64 backward_frame_ids = 2;
   repeated uint64 forward_frame_ids = 3;
