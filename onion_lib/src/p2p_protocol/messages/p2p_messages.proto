@@ -38,10 +38,16 @@ message ServerHello {
   bytes ecdh_public_key = 3;
   // challenge for client authentication
   bytes challenge = 4;
-  // iv for signature encryption
+  // iv for encrypted data
   bytes iv = 5;
-  // encrypted signature
-  bytes signature = 6;
+  // encrypted data
+  bytes encrypted_data = 6;
+}
+
+message EncryptedServerHello {
+  bytes signature = 1;
+  repeated uint64 backward_frame_ids = 2;
+  repeated uint64 forward_frame_ids = 3;
 }
 
 message RoutingInformation {
@@ -52,6 +58,8 @@ message RoutingInformation {
   oneof optional_challenge_response {
     bytes challenge_response = 4;
   }
+
+  repeated uint64 backward_frame_ids = 5;
 }
 
 message ApplicationData {

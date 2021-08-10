@@ -169,7 +169,7 @@ fn run_rps_api(
 #[test]
 fn integration_test() {
     // enable logging
-    env::set_var("RUST_LOG", "trace");
+    env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     log::info!("Starting integration test");
@@ -388,8 +388,6 @@ fn integration_test() {
     assert_eq!(incoming.data.as_slice(), message_pong);
     log::info!("TEST: Alice has received PONG");
 
-    sleep(Duration::from_secs(10));
-
     // send fragmented data from Alice to Bob
     log::info!("TEST: Request fragmented TunnelData from Alice to Bob");
     let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
@@ -436,8 +434,6 @@ fn integration_test() {
     let error = OnionError::try_from(data).unwrap();
     assert_eq!(error.tunnel_id, bob_from_alice_tunnel);
     assert_eq!(error.request_type, ONION_TUNNEL_DATA);
-
-    sleep(Duration::from_secs(1));
 
     // TODO test inactive after timeout
 }

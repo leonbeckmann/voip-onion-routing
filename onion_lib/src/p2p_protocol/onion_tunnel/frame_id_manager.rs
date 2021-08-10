@@ -40,6 +40,19 @@ impl FrameIdManager {
         new_id
     }
 
+    pub fn new_frame_ids(
+        &mut self,
+        tunnel_id: TunnelId,
+        direction: Direction,
+        count: usize,
+    ) -> Vec<FrameId> {
+        let mut v = vec![];
+        for _ in 0..count {
+            v.push(self.new_frame_id(tunnel_id, direction))
+        }
+        v
+    }
+
     pub fn get_tunnel_id(&self, frame_id: &FrameId) -> Option<(TunnelId, Direction)> {
         self.frame_ids.get(frame_id).map(|(a, b)| (*a, *b))
     }

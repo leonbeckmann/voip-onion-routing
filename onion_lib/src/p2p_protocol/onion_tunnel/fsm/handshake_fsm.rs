@@ -1,25 +1,27 @@
 use crate::p2p_protocol::messages::p2p_messages::{
-    ClientHello, RoutingInformation, RoutingInformation_oneof_optional_challenge_response,
-    ServerHello,
+    ClientHello, EncryptedServerHello, RoutingInformation,
+    RoutingInformation_oneof_optional_challenge_response, ServerHello,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{
     CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext,
 };
+use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
 use crate::p2p_protocol::onion_tunnel::message_codec::{
     DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
 };
 use crate::p2p_protocol::onion_tunnel::{FsmLockState, Peer};
-use crate::p2p_protocol::TunnelId;
+use crate::p2p_protocol::{Direction, TunnelId};
 use bytes::Bytes;
 use openssl::rsa::Rsa;
+use protobuf::Message;
 use std::convert::{TryFrom, TryInto};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::timeout;
 
 pub(super) struct Client;
@@ -61,6 +63,7 @@ pub struct HandshakeStateMachine<PT> {
     next_hop: Option<SocketAddr>,
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     crypto_context: HandshakeCryptoContext,
+    frame_id_manager: Arc<RwLock<FrameIdManager>>,
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
@@ -71,6 +74,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         next_hop: Option<SocketAddr>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
         crypto_config: Arc<HandshakeCryptoConfig>,
+        frame_id_manager: Arc<RwLock<FrameIdManager>>,
     ) -> Self {
         Self {
             _phantom: Default::default(),
@@ -80,6 +84,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             next_hop,
             fsm_lock,
             crypto_context: HandshakeCryptoContext::new(crypto_config),
+            frame_id_manager,
         }
     }
 
@@ -135,8 +140,23 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // calculate signature of handshake parameters
         let signature = self.crypto_context.hop_sign(&data.ecdh_public_key);
 
+        // prepare secret server hello data
+        let mut encrypted_data = EncryptedServerHello::new();
+        encrypted_data.set_signature(signature.into());
+        encrypted_data.set_forward_frame_ids(self.frame_id_manager.write().await.new_frame_ids(
+            self.tunnel_id,
+            Direction::Forward,
+            10,
+        ));
+        encrypted_data.set_backward_frame_ids(self.frame_id_manager.write().await.new_frame_ids(
+            self.tunnel_id,
+            Direction::Backward,
+            10,
+        ));
+        let raw_enc_data = encrypted_data.write_to_bytes().unwrap();
+
         // encrypt signature for anonymity
-        let (iv, signature) = cc.encrypt(None, &signature, false)?;
+        let (iv, enc_data) = cc.encrypt(None, &raw_enc_data, false)?;
 
         // store context at codec and set backward frame id on target endpoint
         let mut codec = self.message_codec.lock().await;
@@ -148,7 +168,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         server_hello.set_ecdh_public_key(receiver_pub_der.into());
         server_hello.set_challenge(self.crypto_context.get_challenge().to_owned().into());
         server_hello.set_iv(iv.into());
-        server_hello.set_signature(signature.into());
+        server_hello.set_encrypted_data(enc_data.into());
 
         log::trace!(
             "Tunnel={:?}: Send ServerHello=({:?}) via message codec",
@@ -180,7 +200,19 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let mut cc = CryptoContext::new(shared_secret, true);
 
         // decrypt signature
-        let (_, signature) = cc.decrypt(&data.iv, &data.signature, false)?;
+        let (_, dec_data_raw) = cc.decrypt(&data.iv, &data.encrypted_data, false)?;
+
+        // parse dec_data into EncryptedServerHello
+        let enc_server_hello_data = match EncryptedServerHello::parse_from_bytes(&dec_data_raw) {
+            Ok(data) => data,
+            Err(_) => {
+                log::debug!(
+                    "Tunnel={:?}: Cannot parse ServerHello encrypted data",
+                    self.tunnel_id
+                );
+                return Err(ProtocolError::ProtobufError);
+            }
+        };
 
         // Get the public key of the hop. Safe unwrap, because initiator always has a current_hop
         let hop_public_key = Rsa::public_key_from_der(&self.current_hop.as_ref().unwrap().1)
@@ -192,7 +224,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // verify the signature
         if !self.crypto_context.initiator_verify(
             hop_public_key,
-            &signature,
+            &enc_server_hello_data.signature,
             &data.ecdh_public_key,
             challenge.as_ref(),
         ) {
@@ -207,7 +239,11 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // update codec
         let mut codec = self.message_codec.lock().await;
         codec.set_forward_frame_id(data.forward_frame_id);
+        codec
+            .process_forward_frame_ids(enc_server_hello_data.forward_frame_ids)
+            .await;
         codec.set_backward_frame_id(data.backward_frame_id);
+        codec.set_backward_frame_ids(enc_server_hello_data.backward_frame_ids);
         codec.add_crypto_context(cc);
 
         // create routing information and give it to message_codec
@@ -257,6 +293,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         );
 
         let mut codec_guard = self.message_codec.lock().await;
+        codec_guard.set_backward_frame_ids(routing.backward_frame_ids);
         let target_endpoint = match (*codec_guard).as_any().downcast_mut::<TargetEndpoint>() {
             None => {
                 log::error!(

@@ -23,6 +23,7 @@ const MSG_TYPE_SIZE: usize = size_of::<u8>();
 const SEQ_NR_SIZE: usize = size_of::<u32>();
 
 const CLOSE_MAGIC_NUMBER: &[u8] = "CLOSE_MAGIC_NUMBER".as_bytes();
+const FORWARD_FRAME_IDS_MAGIC_NUMBER: &[u8] = "FORWARD_FRAME_IDS_MAGIC_NUMBER".as_bytes();
 
 const PAYLOAD_SIZE: usize = 1024;
 const RAW_META_DATA_SIZE: usize = AUTH_SIZE + PADDING_LEN_SIZE + MSG_TYPE_SIZE;
@@ -39,6 +40,7 @@ pub enum ProcessedData {
 }
 
 pub enum DataType {
+    ForwardFrameIds(Vec<FrameId>),
     Close(bool),
     AppData(Vec<u8>),
     ClientHello(ClientHello),
@@ -56,6 +58,8 @@ struct RawData {
 const APP_DATA: u8 = 1;
 const HANDSHAKE_DATA: u8 = 2;
 const CLOSE: u8 = 3;
+
+// TODO remove options
 
 impl RawData {
     fn new(len: u16, message_type: u8, data: Vec<u8>) -> Self {
@@ -214,10 +218,22 @@ pub trait P2pCodec {
     }
 
     /*
+     *  Set the secret frame_ids for forwarding packets
+     */
+    async fn process_forward_frame_ids(&mut self, _ids: Vec<FrameId>);
+
+    /*
      *  Set the frame_id for backward packets
      */
     fn set_backward_frame_id(&mut self, _id: FrameId) {
         log::warn!("Setting backward frame_id not supported for this codec");
+    }
+
+    /*
+     *  Set the secret frame_ids for backward packets
+     */
+    fn set_backward_frame_ids(&mut self, _secret_ids: Vec<FrameId>) {
+        log::warn!("Setting backward frame_ids not supported for this codec");
     }
 
     /*
@@ -239,8 +255,12 @@ pub(crate) struct InitiatorEndpoint {
     next_hop: SocketAddr,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
+    // TODO forward_frame_ids
     forward_frame_id: FrameId, // frame id for forward packages
-    next_hop_backward_frame_id: Option<FrameId>,
+    forward_frame_ids: Option<Vec<FrameId>>, // secret send to next hop
+    next_hop_backward_frame_id: Option<FrameId>, // unencrypted for client_hello
+    next_hop_backward_frame_ids: Vec<FrameId>, // encrypted secret via routing infos
+    next_hop_backward_frame_ids_old: Vec<FrameId>, // used for storing last, otherwise would be overwritten too early
     crypto_contexts: Vec<CryptoContext>,
     seq_nr_context: SequenceNumberContext,
 }
@@ -257,8 +277,11 @@ impl InitiatorEndpoint {
             next_hop,
             frame_id_manager,
             tunnel_id,
-            forward_frame_id: 1,              // initialized for init client hello
-            next_hop_backward_frame_id: None, // used for client hellos to next hops
+            forward_frame_id: 1, // initialized for init client hello
+            forward_frame_ids: None,
+            next_hop_backward_frame_id: None,
+            next_hop_backward_frame_ids: vec![],
+            next_hop_backward_frame_ids_old: vec![],
             crypto_contexts: vec![],
             seq_nr_context: SequenceNumberContext::new(),
         }
@@ -279,7 +302,9 @@ pub(crate) struct TargetEndpoint {
     prev_hop: SocketAddr,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
+    // TODO backward frame ids
     backward_frame_id: FrameId, // frame id for backward packages
+    backward_frame_ids: Option<Vec<FrameId>>,
     crypto_context: Option<CryptoContext>,
     seq_nr_context: SequenceNumberContext,
 }
@@ -297,6 +322,7 @@ impl TargetEndpoint {
             frame_id_manager,
             tunnel_id,
             backward_frame_id: 0,
+            backward_frame_ids: None,
             crypto_context: None,
             seq_nr_context: SequenceNumberContext::new(),
         }
@@ -317,10 +343,12 @@ pub(crate) struct IntermediateHopCodec {
     socket: Arc<UdpSocket>,
     next_hop: SocketAddr,
     prev_hop: SocketAddr,
-    _frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
+    // TODO forward_frame_ids and backward_frame_ids
     forward_frame_id: FrameId,  // frame id for forward packages
     backward_frame_id: FrameId, // frame id for backward packages
+    forward_frame_ids: Option<Vec<FrameId>>,
+    backward_frame_ids: Option<Vec<FrameId>>,
     crypto_context: CryptoContext,
 }
 
@@ -331,10 +359,11 @@ impl IntermediateHopCodec {
             socket: target.socket.clone(),
             next_hop,
             prev_hop: target.prev_hop,
-            _frame_id_manager: target.frame_id_manager.clone(),
             tunnel_id: target.tunnel_id,
             forward_frame_id: 1,
             backward_frame_id: target.backward_frame_id,
+            forward_frame_ids: None,
+            backward_frame_ids: target.backward_frame_ids.clone(),
             crypto_context: target.crypto_context.take().unwrap(),
         }
     }
@@ -344,13 +373,43 @@ impl IntermediateHopCodec {
 impl P2pCodec for InitiatorEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
-        frame.set_frame_id(self.forward_frame_id);
+        if let Some(ids) = &self.forward_frame_ids {
+            let index = rand::random::<usize>() % ids.len();
+            assert!(index < ids.len());
+            frame.set_frame_id(*ids.get(index).unwrap());
+        } else {
+            frame.set_frame_id(self.forward_frame_id);
+        }
 
         let iv_data_chunks = match data {
+            DataType::ForwardFrameIds(ids) => {
+                let mut data = FORWARD_FRAME_IDS_MAGIC_NUMBER.to_vec();
+                data.append(&mut (ids.len() as u16).to_le_bytes().into());
+                for id in ids {
+                    data.append(&mut id.to_le_bytes().into());
+                }
+                data.append(
+                    &mut (0..(PAYLOAD_SIZE - data.len()))
+                        .map(|_| rand::random::<u8>())
+                        .collect(),
+                );
+                // layered encryption via iv and keys using the crypto contexts
+                let mut iv: Option<Vec<u8>> = None;
+                for (_, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, false)?;
+                    iv = Some(iv_);
+                    data = data_;
+                }
+                assert_eq!(data.len(), PAYLOAD_SIZE);
+                vec![(iv, data)]
+            }
             DataType::Close(to_endpoint) => {
                 // send close similar as app_data without fragmentation and with magic number if hop
-                let mut raw_data = if to_endpoint {
-                    RawData::new(PAYLOAD_SIZE as u16, CLOSE, vec![]).serialize()
+                let (mut raw_data, e2e) = if to_endpoint {
+                    (
+                        RawData::new(PAYLOAD_SIZE as u16, CLOSE, vec![]).serialize(),
+                        true,
+                    )
                 } else {
                     let mut data = CLOSE_MAGIC_NUMBER.to_vec();
                     data.append(
@@ -358,13 +417,13 @@ impl P2pCodec for InitiatorEndpoint {
                             .map(|_| rand::random::<u8>())
                             .collect(),
                     );
-                    data
+                    (data, false)
                 };
 
                 // layered encryption via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
                 for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
-                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0)?;
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0 && e2e)?;
                     iv = Some(iv_);
                     raw_data = data_;
                 }
@@ -444,13 +503,18 @@ impl P2pCodec for InitiatorEndpoint {
                 assert_eq!(data.len(), PAYLOAD_SIZE);
                 vec![(iv, data)]
             }
-            DataType::RoutingInformation(data) => {
+            DataType::RoutingInformation(mut data) => {
                 log::debug!(
                     "Tunnel={:?}: Send RoutingInformation={:?} to next hop {:?}",
                     self.tunnel_id,
                     data,
                     self.next_hop
                 );
+
+                // use the stored next_hop_backward_frame_ids to tell the next hop how he can address the previous one
+                let bf_ids = self.next_hop_backward_frame_ids_old.drain(..).collect();
+                data.set_backward_frame_ids(bf_ids);
+
                 let mut handshake = HandshakeData::new();
                 handshake.set_routing(data);
                 let data = handshake.write_to_bytes().unwrap();
@@ -574,7 +638,6 @@ impl P2pCodec for InitiatorEndpoint {
 
         // send close to intermediate hops
         for _ in 0..i {
-            // FIXME test terminates too early, this is not executed completely
             let _ = self.write(DataType::Close(false)).await;
             self.remove_crypto_context();
         }
@@ -589,12 +652,50 @@ impl P2pCodec for InitiatorEndpoint {
         // directly followed hop and the forward_frame_id has already been caught from the
         // correct intermediate hop
         if self.forward_frame_id == 1 {
+            log::trace!(
+                "Tunnel={:?}: Initiator set_forward_frame_id={:?}",
+                self.tunnel_id,
+                id
+            );
             self.forward_frame_id = id;
         }
     }
 
+    async fn process_forward_frame_ids(&mut self, ids: Vec<FrameId>) {
+        if self.forward_frame_ids.is_none() {
+            log::trace!(
+                "Tunnel={:?}: Set secret forward frame ids = {:?}",
+                self.tunnel_id,
+                ids
+            );
+            self.forward_frame_ids = Some(ids);
+        } else {
+            log::trace!(
+                "Tunnel={:?}: Initiator send forward_frame_ids={:?} to hop via magic number",
+                self.tunnel_id,
+                ids
+            );
+            let _ = self.write(DataType::ForwardFrameIds(ids)).await;
+        }
+    }
+
     fn set_backward_frame_id(&mut self, id: FrameId) {
+        log::info!(
+            "Tunnel={:?}: Initiator set_next_hop_bw_frame_id={:?}",
+            self.tunnel_id,
+            id
+        );
         self.next_hop_backward_frame_id = Some(id);
+    }
+
+    fn set_backward_frame_ids(&mut self, secret_ids: Vec<FrameId>) {
+        log::trace!(
+            "Tunnel={:?}: Initiator set_next_hop_bw_frame_ids={:?}",
+            self.tunnel_id,
+            secret_ids
+        );
+        self.next_hop_backward_frame_ids_old = self.next_hop_backward_frame_ids.drain(..).collect();
+        self.next_hop_backward_frame_ids = secret_ids;
     }
 
     fn add_crypto_context(&mut self, cc: CryptoContext) {
@@ -610,7 +711,13 @@ impl P2pCodec for InitiatorEndpoint {
 impl P2pCodec for TargetEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
-        frame.set_frame_id(self.backward_frame_id);
+        if let Some(ids) = &self.backward_frame_ids {
+            let index = rand::random::<usize>() % ids.len();
+            assert!(index < ids.len());
+            frame.set_frame_id(*ids.get(index).unwrap());
+        } else {
+            frame.set_frame_id(self.backward_frame_id);
+        }
 
         let iv_data_bytes = match data {
             DataType::Close(_) => {
@@ -778,7 +885,7 @@ impl P2pCodec for TargetEndpoint {
     }
 
     async fn close(&mut self, _: bool) {
-        log::info!("Tunnel={:?}: Send close at target endpoint", self.tunnel_id,);
+        log::debug!("Tunnel={:?}: Send close at target endpoint", self.tunnel_id);
         let _ = self.write(DataType::Close(true)).await;
     }
 
@@ -786,8 +893,26 @@ impl P2pCodec for TargetEndpoint {
         self
     }
 
+    async fn process_forward_frame_ids(&mut self, _ids: Vec<FrameId>) {
+        log::warn!("Setting forward frame_ids not supported for this codec");
+    }
+
     fn set_backward_frame_id(&mut self, id: FrameId) {
+        log::trace!(
+            "Tunnel={:?}: Target set backward_frame_id={:?}",
+            self.tunnel_id,
+            id
+        );
         self.backward_frame_id = id;
+    }
+
+    fn set_backward_frame_ids(&mut self, secret_ids: Vec<FrameId>) {
+        log::trace!(
+            "Tunnel={:?}: Set secret backward frame ids={:?}",
+            self.tunnel_id,
+            secret_ids
+        );
+        self.backward_frame_ids = Some(secret_ids);
     }
 
     fn add_crypto_context(&mut self, cc: CryptoContext) {
@@ -834,6 +959,7 @@ impl P2pCodec for IntermediateHopCodec {
             return Err(ProtocolError::InvalidPacketLength);
         }
 
+        // TODO remove this to ensure using secret forward frame ids?
         if d == Direction::Backward && self.forward_frame_id == 1 {
             // seems to be the unencrypted server_hello for the next hop, catch the forward id
             log::trace!("Tunnel={:?}: Received data containing the ServerHello from the next hop, extract forward ID", self.tunnel_id);
@@ -862,6 +988,44 @@ impl P2pCodec for IntermediateHopCodec {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
                 let (iv, decrypted_data) = self.crypto_context.decrypt(&iv, &data, start_to_end)?;
+                // check for magic number forward frame ids
+                // TODO this should be part of the handshake, otherwise someone could block the message and reduce security
+                if self.forward_frame_ids.is_none()
+                    && &decrypted_data[0..FORWARD_FRAME_IDS_MAGIC_NUMBER.len()]
+                        == FORWARD_FRAME_IDS_MAGIC_NUMBER
+                {
+                    log::trace!(
+                        "Tunnel={:?}: Hop found magic number for secret forward frame ids",
+                        self.tunnel_id
+                    );
+                    let mut ids: Vec<FrameId> = vec![];
+                    let (_, remainder) =
+                        decrypted_data.split_at(FORWARD_FRAME_IDS_MAGIC_NUMBER.len());
+                    let (len_raw, remainder) = remainder.split_at(size_of::<u16>());
+                    let mut len_buf = [0u8; size_of::<u16>()];
+                    len_buf.copy_from_slice(len_raw);
+                    let len = u16::from_le_bytes(len_buf) as usize;
+
+                    for chunk in remainder.chunks(size_of::<u64>()) {
+                        let mut current_id_buf = [0u8; size_of::<u64>()];
+                        current_id_buf.copy_from_slice(chunk);
+                        let id = u64::from_le_bytes(current_id_buf);
+                        ids.push(id);
+                        if ids.len() == len {
+                            break;
+                        }
+                    }
+
+                    log::trace!(
+                        "Tunnel={:?}: New secret forwards ids: {:?}",
+                        self.tunnel_id,
+                        ids,
+                    );
+
+                    self.forward_frame_ids = Some(ids);
+
+                    return Ok(ProcessedData::TransferredToNextHop);
+                }
                 // check for magic number for closing a hop
                 if &decrypted_data[0..CLOSE_MAGIC_NUMBER.len()] == CLOSE_MAGIC_NUMBER {
                     log::trace!(
@@ -870,7 +1034,13 @@ impl P2pCodec for IntermediateHopCodec {
                     );
                     return Ok(ProcessedData::ReceivedClose);
                 }
-                frame.set_frame_id(self.forward_frame_id);
+                if let Some(ids) = &self.forward_frame_ids {
+                    let index = rand::random::<usize>() % ids.len();
+                    assert!(index < ids.len());
+                    frame.set_frame_id(*ids.get(index).unwrap());
+                } else {
+                    frame.set_frame_id(self.forward_frame_id);
+                }
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
                 (frame, self.next_hop)
@@ -881,7 +1051,13 @@ impl P2pCodec for IntermediateHopCodec {
                 let (iv, encrypted_data) =
                     self.crypto_context
                         .encrypt(Some(&iv), &data, start_to_end)?;
-                frame.set_frame_id(self.backward_frame_id);
+                if let Some(ids) = &self.backward_frame_ids {
+                    let index = rand::random::<usize>() % ids.len();
+                    assert!(index < ids.len());
+                    frame.set_frame_id(*ids.get(index).unwrap());
+                } else {
+                    frame.set_frame_id(self.backward_frame_id);
+                }
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());
                 (frame, self.prev_hop)
@@ -907,6 +1083,10 @@ impl P2pCodec for IntermediateHopCodec {
 
     fn as_any(&mut self) -> &mut dyn Any {
         self
+    }
+
+    async fn process_forward_frame_ids(&mut self, _ids: Vec<FrameId>) {
+        log::warn!("Setting forward frame_ids not supported for this codec");
     }
 }
 

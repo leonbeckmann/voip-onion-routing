@@ -36,6 +36,7 @@ pub(super) struct InitiatorStateMachine {
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     local_crypto_config: Arc<HandshakeCryptoConfig>,
     handshake_timeout: Duration,
+    frame_id_manager: Arc<RwLock<FrameIdManager>>,
 }
 
 impl InitiatorStateMachine {
@@ -60,7 +61,7 @@ impl InitiatorStateMachine {
             endpoint_codec: Arc::new(Mutex::new(Box::new(InitiatorEndpoint::new(
                 socket,
                 *next_hop,
-                frame_id_manager,
+                frame_id_manager.clone(),
                 tunnel_id,
             )))),
             listener_tx,
@@ -69,6 +70,7 @@ impl InitiatorStateMachine {
             fsm_lock,
             local_crypto_config,
             handshake_timeout,
+            frame_id_manager,
         }
     }
 }
@@ -81,6 +83,7 @@ pub(super) struct TargetStateMachine {
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     local_crypto_config: Arc<HandshakeCryptoConfig>,
     handshake_timeout: Duration,
+    frame_id_manager: Arc<RwLock<FrameIdManager>>,
 }
 
 impl TargetStateMachine {
@@ -102,13 +105,14 @@ impl TargetStateMachine {
             codec: Arc::new(Mutex::new(Box::new(TargetEndpoint::new(
                 socket,
                 source,
-                frame_id_manager,
+                frame_id_manager.clone(),
                 tunnel_id,
             )))),
             tunnel_id,
             fsm_lock,
             local_crypto_config,
             handshake_timeout,
+            frame_id_manager,
         }
     }
 }
@@ -459,6 +463,15 @@ impl FiniteStateMachine for InitiatorStateMachine {
         let fsm_lock = self.fsm_lock.clone();
         let cc = self.local_crypto_config.clone();
         let handshake_timeout = self.handshake_timeout;
+        let frame_id_manager = self.frame_id_manager.clone();
+
+        // create bw frame ids for the initiator codec
+        let bf_ids =
+            frame_id_manager
+                .write()
+                .await
+                .new_frame_ids(tunnel_id, Direction::Backward, 10);
+        codec.lock().await.set_backward_frame_ids(bf_ids);
 
         // create a channel used by the main FSM to communicate with the handshake fsm
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
@@ -522,6 +535,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                     next_hop,
                     fsm_lock.clone(),
                     cc.clone(),
+                    frame_id_manager.clone(),
                 );
 
                 // create a channel for hooking the handshake results
@@ -710,6 +724,7 @@ impl FiniteStateMachine for TargetStateMachine {
             None,
             self.fsm_lock.clone(),
             self.local_crypto_config.clone(),
+            self.frame_id_manager.clone(),
         );
 
         // create a channel for communicating with the handshake protocol
