@@ -15,7 +15,7 @@ use crate::api_protocol::ApiInterface;
 use crate::p2p_protocol::onion_tunnel::fsm::{
     FiniteStateMachine, FsmEvent, InitiatorStateMachine, ProtocolError, TargetStateMachine,
 };
-use crate::p2p_protocol::{ConnectionId, P2pError};
+use crate::p2p_protocol::{ConnectionId, FrameId, P2pError};
 
 use super::TunnelId;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
@@ -51,8 +51,9 @@ pub enum FsmLockState {
  *  the API should be notified now via the IncomingTunnel message.
  */
 enum IncomingEventMessage {
-    IncomingTunnelCompletion,
-    IncomingData(Vec<u8>),
+    TunnelCompletion,
+    TunnelUpdate(FrameId),
+    Data(Vec<u8>),
 }
 
 pub(crate) type Peer = (SocketAddr, Vec<u8>);
@@ -118,7 +119,7 @@ impl OnionTunnel {
                     Some(m) => {
                         if let Some(iface) = api_interface.upgrade() {
                             match m {
-                                IncomingEventMessage::IncomingTunnelCompletion => {
+                                IncomingEventMessage::TunnelCompletion => {
                                     log::debug!(
                                         "Tunnel={:?}: Received IncomingTunnelCompletion, delegate to API",
                                         tunnel_id
@@ -156,7 +157,12 @@ impl OnionTunnel {
                                     iface.incoming_tunnel(tunnel_id, listeners.clone()).await;
                                 }
 
-                                IncomingEventMessage::IncomingData(data) => {
+                                IncomingEventMessage::TunnelUpdate(_tunnel_update_ref) => {
+                                    // this target tunnel is an update for an old one
+                                    // TODO close the old tunnel and replace the tunnel_ids
+                                }
+
+                                IncomingEventMessage::Data(data) => {
                                     log::debug!(
                                         "Tunnel={:?}: Received incoming data, delegate to API",
                                         tunnel_id
@@ -249,6 +255,7 @@ impl OnionTunnel {
         local_crypto_context: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
         timeout: Duration,
+        tunnel_update_ref: Option<FrameId>,
     ) -> Result<TunnelId, ProtocolError> {
         // select intermediate hops via rps module and hop count
         // TODO robustness isAlive checks during tunnel establishment, maybe add some more backup peers
@@ -295,6 +302,7 @@ impl OnionTunnel {
             fsm_lock.clone(),
             local_crypto_context,
             handshake_timeout,
+            tunnel_update_ref,
         );
 
         // run the fsm

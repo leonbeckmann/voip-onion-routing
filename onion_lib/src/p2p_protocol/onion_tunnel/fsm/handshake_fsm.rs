@@ -11,12 +11,11 @@ use crate::p2p_protocol::onion_tunnel::message_codec::{
     DataType, IntermediateHopCodec, P2pCodec, TargetEndpoint,
 };
 use crate::p2p_protocol::onion_tunnel::{FsmLockState, Peer};
-use crate::p2p_protocol::{Direction, TunnelId};
+use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use bytes::Bytes;
 use openssl::rsa::Rsa;
 use protobuf::Message;
 use std::convert::{TryFrom, TryInto};
-use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,19 +23,36 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::timeout;
 
-pub(super) struct Client;
+pub(super) struct Client {
+    tunnel_update_ref: FrameId,
+}
 pub(super) struct Server;
 
 pub trait PeerType {
     const INIT_STATE: HandshakeState;
+    fn tunnel_update_reference(&self) -> FrameId;
 }
 
 impl PeerType for Client {
     const INIT_STATE: HandshakeState = HandshakeState::Start;
+
+    fn tunnel_update_reference(&self) -> u64 {
+        self.tunnel_update_ref
+    }
+}
+
+impl Client {
+    pub fn new(tunnel_update_ref: FrameId) -> Client {
+        Client { tunnel_update_ref }
+    }
 }
 
 impl PeerType for Server {
     const INIT_STATE: HandshakeState = HandshakeState::WaitForClientHello;
+
+    fn tunnel_update_reference(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -56,7 +72,7 @@ pub enum HandshakeEvent {
 }
 
 pub struct HandshakeStateMachine<PT> {
-    _phantom: PhantomData<PT>,
+    context: PT,
     message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
     tunnel_id: TunnelId,
     current_hop: Option<Peer>,
@@ -67,7 +83,9 @@ pub struct HandshakeStateMachine<PT> {
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        context: PT,
         message_codec: Arc<Mutex<Box<dyn P2pCodec + Send>>>,
         tunnel_id: TunnelId,
         current_hop: Option<Peer>,
@@ -77,7 +95,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
     ) -> Self {
         Self {
-            _phantom: Default::default(),
+            context,
             message_codec,
             tunnel_id,
             current_hop,
@@ -219,6 +237,14 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                     );
                     return Err(ProtocolError::EmptyFrameIds);
                 }
+                // frame ids available
+                if self.next_hop.is_none() {
+                    // frame ids for target, store one identifier for tunnel updates, unwrap is safe
+                    self.frame_id_manager.write().await.add_tunnel_reference(
+                        self.tunnel_id,
+                        *data.forward_frame_ids.first().unwrap(),
+                    );
+                }
                 data
             }
             Err(_) => {
@@ -266,6 +292,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         match self.next_hop {
             None => {
                 data.set_is_endpoint(true);
+                data.set_tunnel_update_reference(self.context.tunnel_update_reference());
 
                 // Sign the challenge for the target peer
                 let challenge_response = self.crypto_context.sign(&challenge);
@@ -299,7 +326,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     pub async fn action_recv_routing(
         &mut self,
         routing: RoutingInformation,
-    ) -> Result<IsTargetEndpoint, ProtocolError> {
+    ) -> Result<(IsTargetEndpoint, FrameId), ProtocolError> {
         // get target endpoint
         log::debug!(
             "Tunnel={:?}: Process incoming RoutingInformation=({:?})",
@@ -352,7 +379,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             }
 
             target_endpoint.lock_as_target_endpoint().await;
-            Ok(true)
+            Ok((true, routing.tunnel_update_reference))
         } else {
             // parse socket addr
             let addr = match u16::try_from(routing.next_hop_port) {
@@ -389,7 +416,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             let new_codec = Box::new(IntermediateHopCodec::from(target_endpoint, addr));
             *codec_guard = new_codec;
 
-            Ok(false)
+            Ok((false, 0))
         }
     }
 
@@ -476,7 +503,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                                     "Tunnel={:?}: Send handshake_result=ok",
                                     self.tunnel_id
                                 );
-                                let _ = event_tx.send(FsmEvent::HandshakeResult(Ok(false))).await;
+                                let _ = event_tx
+                                    .send(FsmEvent::HandshakeResult(Ok((false, None))))
+                                    .await;
                                 return;
                             }
                             Err(e) => Err(e),
@@ -495,13 +524,21 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 HandshakeState::WaitForRoutingInformation => match event {
                     HandshakeEvent::RoutingInformation(data) => {
                         match self.action_recv_routing(data).await {
-                            Ok(is_target_endpoint) => {
+                            Ok((is_target_endpoint, tunnel_update_ref)) => {
                                 log::trace!(
                                     "Tunnel={:?}: Send handshake_result=ok",
                                     self.tunnel_id
                                 );
+                                let tunnel_update_ref = if tunnel_update_ref == 0 {
+                                    None
+                                } else {
+                                    Some(tunnel_update_ref)
+                                };
                                 let _ = event_tx
-                                    .send(FsmEvent::HandshakeResult(Ok(is_target_endpoint)))
+                                    .send(FsmEvent::HandshakeResult(Ok((
+                                        is_target_endpoint,
+                                        tunnel_update_ref,
+                                    ))))
                                     .await;
                                 return;
                             }

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub struct FrameIdManager {
     frame_ids: HashMap<FrameId, (TunnelId, Direction)>,
     used_frame_ids: HashMap<TunnelId, Vec<(FrameId, Direction)>>,
+    ref_ids: HashMap<TunnelId, FrameId>,
 }
 
 impl FrameIdManager {
@@ -13,6 +14,7 @@ impl FrameIdManager {
         Self {
             frame_ids: HashMap::new(),
             used_frame_ids: HashMap::new(),
+            ref_ids: HashMap::new(),
         }
     }
 
@@ -69,6 +71,7 @@ impl FrameIdManager {
                 let _ = self.frame_ids.remove(frame_id);
             }
         }
+        let _ = self.ref_ids.remove(&tunnel_id);
     }
 
     pub fn remove_backward_frame_ids(&mut self, tunnel_id: TunnelId) {
@@ -92,6 +95,11 @@ impl FrameIdManager {
                 );
             }
         }
+    }
+
+    // used for initiator endpoints, store a forward frame of the target for tunnel updates
+    pub fn add_tunnel_reference(&mut self, tunnel_id: TunnelId, ref_id: FrameId) {
+        let _ = self.ref_ids.insert(tunnel_id, ref_id);
     }
 }
 

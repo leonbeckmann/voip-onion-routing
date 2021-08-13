@@ -5,7 +5,7 @@ use crate::p2p_protocol::messages::p2p_messages::{
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTH_PLACEHOLDER, IV_SIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
-use crate::p2p_protocol::{Direction, FrameId, TunnelId};
+use crate::p2p_protocol::{Direction, FrameId, TunnelId, CLIENT_HELLO_FORWARD_ID};
 use async_trait::async_trait;
 use bytes::Bytes;
 use protobuf::Message;
@@ -24,7 +24,6 @@ const SEQ_NR_SIZE: usize = size_of::<u32>();
 
 const CLOSE_MAGIC_NUMBER: &[u8] = "CLOSE_MAGIC_NUMBER".as_bytes();
 const FORWARD_FRAME_IDS_MAGIC_NUMBER: &[u8] = "FORWARD_FRAME_IDS_MAGIC_NUMBER".as_bytes();
-const CLIENT_HELLO_FORWARD_ID: FrameId = 1;
 
 const PAYLOAD_SIZE: usize = 1024;
 const RAW_META_DATA_SIZE: usize = AUTH_SIZE + PADDING_LEN_SIZE + MSG_TYPE_SIZE;

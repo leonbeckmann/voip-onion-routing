@@ -19,6 +19,7 @@ use tokio::sync::{oneshot, RwLock};
 // hard coded packet size should not be configurable and equal for all modules
 // TODO select correct
 pub(crate) const MAX_PACKET_SIZE: usize = 2048;
+const CLIENT_HELLO_FORWARD_ID: FrameId = 1;
 
 pub type TunnelId = u32;
 type FrameId = u64;
@@ -71,7 +72,9 @@ impl P2pInterface {
                                 // check if data available, which should always be the case
                                 log::trace!("UDP packet successfully parsed to TunnelFrame");
 
-                                let (tunnel_id, direction) = if frame.frame_id == 1 {
+                                let (tunnel_id, direction) = if frame.frame_id
+                                    == CLIENT_HELLO_FORWARD_ID
+                                {
                                     // frame id one is the initial handshake message (client_hello)
                                     log::debug!(
                                         "Frame is a new tunnel request. Create a new target tunnel"
@@ -200,6 +203,7 @@ impl P2pInterface {
             self.config.crypto_config.clone(),
             self.config.handshake_message_timeout,
             self.config.timeout,
+            None,
         )
         .await
         {
@@ -280,6 +284,16 @@ impl P2pInterface {
     pub(crate) async fn send_cover_traffic(&self, _cover_size: u16) -> Result<(), P2pError> {
         // TODO implement logic
         Ok(())
+    }
+
+    async fn _update_tunnel(&mut self) {
+        // TODO
+        // only update connected tunnels where we are the initiator
+        // create a new tunnel from Initiator to target and reference the old tunnel
+
+        // update the tunnel id
+
+        // destroy the old tunnel
     }
 }
 

@@ -11,7 +11,7 @@ use crate::p2p_protocol::onion_tunnel::message_codec::{
     InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
 };
 use crate::p2p_protocol::onion_tunnel::{FsmLockState, IncomingEventMessage, Peer, TunnelResult};
-use crate::p2p_protocol::{Direction, TunnelId};
+use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -37,6 +37,7 @@ pub(super) struct InitiatorStateMachine {
     local_crypto_config: Arc<HandshakeCryptoConfig>,
     handshake_timeout: Duration,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
+    tunnel_update_ref: Option<FrameId>,
 }
 
 impl InitiatorStateMachine {
@@ -52,6 +53,7 @@ impl InitiatorStateMachine {
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
         local_crypto_config: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
+        tunnel_update_ref: Option<FrameId>,
     ) -> Self {
         assert!(!hops.is_empty());
         let (next_hop, _) = hops.first().unwrap();
@@ -71,6 +73,7 @@ impl InitiatorStateMachine {
             local_crypto_config,
             handshake_timeout,
             frame_id_manager,
+            tunnel_update_ref,
         }
     }
 }
@@ -246,7 +249,7 @@ pub(super) trait FiniteStateMachine {
                 // we can ignore an error here since this will only fail when the tunnel has been closed
                 let _ = self
                     .get_listener()
-                    .send(IncomingEventMessage::IncomingData(data))
+                    .send(IncomingEventMessage::Data(data))
                     .await;
             }
             ProcessedData::HandshakeData(_) => {
@@ -280,7 +283,7 @@ pub(super) trait FiniteStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<IsTargetEndpoint, ProtocolError>,
+        res: Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>,
     ) -> Result<State, ProtocolError>;
 
     const INIT_STATE: State = State::Closed;
@@ -464,6 +467,11 @@ impl FiniteStateMachine for InitiatorStateMachine {
         let cc = self.local_crypto_config.clone();
         let handshake_timeout = self.handshake_timeout;
         let frame_id_manager = self.frame_id_manager.clone();
+        let tunnel_update_ref = if let Some(id) = self.tunnel_update_ref {
+            id
+        } else {
+            0
+        };
 
         // create bw frame ids for the initiator codec
         let bf_ids =
@@ -516,9 +524,9 @@ impl FiniteStateMachine for InitiatorStateMachine {
             );
             for i in 0..peers.len() {
                 let current_peer = peers.get(i).unwrap();
-                let (target, next_hop) = match peers.get(i + 1) {
-                    None => (true, None),
-                    Some((addr, _)) => (false, Some(*addr)),
+                let (target, next_hop, update_ref) = match peers.get(i + 1) {
+                    None => (true, None, tunnel_update_ref),
+                    Some((addr, _)) => (false, Some(*addr), 0),
                 };
                 log::debug!(
                     "Tunnel={:?}: Initiate handshake to current_peer={:?} with next_hop={:?}",
@@ -529,6 +537,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
 
                 // create the handshake fsm for connecting to current_peer
                 let mut handshake_fsm = HandshakeStateMachine::<Client>::new(
+                    Client::new(update_ref),
                     codec.clone(),
                     tunnel_id,
                     Some(current_peer.clone()),
@@ -617,7 +626,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                                         if target {
                                             log::debug!("Tunnel={:?}: Received handshake_result=ok for the target hop", tunnel_id);
                                             let _ = final_result_tx
-                                                .send(FsmEvent::HandshakeResult(Ok(true)))
+                                                .send(FsmEvent::HandshakeResult(Ok((true, None))))
                                                 .await;
                                             return;
                                         } else {
@@ -677,7 +686,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<IsTargetEndpoint, ProtocolError>,
+        res: Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>,
     ) -> Result<State, ProtocolError> {
         let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
         let res = match res {
@@ -718,6 +727,7 @@ impl FiniteStateMachine for TargetStateMachine {
             self.tunnel_id
         );
         let mut handshake_fsm = HandshakeStateMachine::<Server>::new(
+            Server,
             self.codec.clone(),
             self.tunnel_id,
             None,
@@ -744,16 +754,23 @@ impl FiniteStateMachine for TargetStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<IsTargetEndpoint, ProtocolError>,
+        res: Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>,
     ) -> Result<State, ProtocolError> {
         let res = match res {
-            Ok(is_target_endpoint) => {
+            Ok((is_target_endpoint, tunnel_update_ref)) => {
                 log::debug!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 if is_target_endpoint {
-                    let _ = self
-                        .listener_tx
-                        .send(IncomingEventMessage::IncomingTunnelCompletion)
-                        .await;
+                    if let Some(tunnel_update_ref) = tunnel_update_ref {
+                        let _ = self
+                            .listener_tx
+                            .send(IncomingEventMessage::TunnelUpdate(tunnel_update_ref))
+                            .await;
+                    } else {
+                        let _ = self
+                            .listener_tx
+                            .send(IncomingEventMessage::TunnelCompletion)
+                            .await;
+                    }
                 }
                 Ok(State::Connected)
             }
@@ -839,9 +856,9 @@ type IsTargetEndpoint = bool;
 
 #[derive(Debug)]
 pub enum FsmEvent {
-    Init,                                                     // Start the FSM
-    Close,                                                    // Close the Tunnel
-    Send(Vec<u8>),                                            // Send Data via the Tunnel
-    IncomingFrame((Bytes, Direction, IV)),                    // Received data frame
-    HandshakeResult(Result<IsTargetEndpoint, ProtocolError>), // HandshakeResult from handshake fsm
+    Init,                                                                        // Start the FSM
+    Close,                                                                       // Close the Tunnel
+    Send(Vec<u8>),                         // Send Data via the Tunnel
+    IncomingFrame((Bytes, Direction, IV)), // Received data frame
+    HandshakeResult(Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>), // HandshakeResult from handshake fsm
 }
