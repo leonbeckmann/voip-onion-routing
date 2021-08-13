@@ -14,9 +14,11 @@ use crate::p2p_protocol::onion_tunnel::{
 use protobuf::Message;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::net::UdpSocket;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Notify, RwLock};
+use tokio::time::sleep;
 
 // hard coded packet size should not be configurable and equal for all modules
 // TODO select correct
@@ -33,12 +35,44 @@ pub enum Direction {
     Backward,
 }
 
+struct RoundSynchronizer {
+    notify: Arc<Notify>,
+    round_time: Duration,
+}
+
+impl RoundSynchronizer {
+    fn new(round_time: Duration) -> RoundSynchronizer {
+        RoundSynchronizer {
+            notify: Arc::new(Notify::new()),
+            round_time,
+        }
+    }
+
+    async fn run(&self) {
+        let notify = self.notify.clone();
+        let round_time = self.round_time;
+        tokio::spawn(async move {
+            loop {
+                log::debug!("New round has started. Duration={:?}", round_time);
+                sleep(round_time).await;
+                notify.notify_waiters();
+            }
+        });
+    }
+
+    async fn wait(&self) {
+        let notify = self.notify.clone();
+        notify.notified().await;
+    }
+}
+
 pub(crate) struct P2pInterface {
     tunnel_manager: Arc<RwLock<TunnelManager>>,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     socket: Arc<UdpSocket>,
     config: OnionConfiguration,
     api_interface: Weak<ApiInterface>,
+    round_sync: RoundSynchronizer,
 }
 
 impl P2pInterface {
@@ -46,6 +80,7 @@ impl P2pInterface {
         config: OnionConfiguration,
         api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<Self> {
+        let round_sync = RoundSynchronizer::new(config.round_time);
         Ok(Self {
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
             frame_id_manager: Arc::new(RwLock::new(FrameIdManager::new())),
@@ -54,10 +89,31 @@ impl P2pInterface {
             ),
             config,
             api_interface,
+            round_sync,
         })
     }
 
-    pub(crate) async fn listen(&self) -> Result<(), P2pError> {
+    pub(crate) async fn listen(&self, self_ref: Arc<P2pInterface>) -> Result<(), P2pError> {
+        // run the round synchronizer
+        self.round_sync.run().await;
+        // run the tunnel update task
+        let notify = self.round_sync.notify.clone();
+        tokio::spawn(async move {
+            loop {
+                // wait for round change
+                notify.notified().await;
+                // update old tunnels
+                log::debug!("Round is over, update all initiator tunnels.");
+                let ids = self_ref
+                    .tunnel_manager
+                    .read()
+                    .await
+                    .get_connected_initiator_tunnel_ids();
+                for id in ids {
+                    self_ref.update_tunnel(id).await;
+                }
+            }
+        });
         // Allow to receive more than expected to detect messages exceeding the fixed size.
         // Otherwise recv_from would silently discards exceeding bytes.
         let mut buf = [0u8; MAX_PACKET_SIZE + 1];
@@ -189,9 +245,10 @@ impl P2pInterface {
         host_key: Vec<u8>,
         listener: ConnectionId,
     ) -> Result<(TunnelId, Vec<u8>), P2pError> {
+        // wait for new round
+        log::debug!("Received build_tunnel request from connection {:?} to {:?}. Wait for new round,build initiator tunnel and wait for handshake result", listener, target);
+        self.round_sync.wait().await;
         let (tx, rx) = oneshot::channel::<TunnelResult>();
-
-        log::debug!("Received build_tunnel request from connection {:?} to {:?}. Build initiator tunnel and wait for handshake result", listener, target);
         let tunnel_id = match OnionTunnel::new_initiator_tunnel(
             listener,
             self.frame_id_manager.clone(),
@@ -298,7 +355,7 @@ impl P2pInterface {
         Ok(())
     }
 
-    async fn update_tunnel(&mut self, tunnel_id: TunnelId) {
+    async fn update_tunnel(&self, tunnel_id: TunnelId) {
         log::debug!("Tunnel={:?}: Start updating", tunnel_id);
         // get tunnel update reference
         let frame_id = match self
@@ -316,6 +373,11 @@ impl P2pInterface {
             }
             Some(id) => *id,
         };
+        log::trace!(
+            "Tunnel={:?}: Tunnel update reference for target is {:?}",
+            tunnel_id,
+            frame_id
+        );
 
         // only update connected tunnels where we are the initiator
         let update_info = match self.tunnel_manager.read().await.get_tunnel(&tunnel_id) {
@@ -347,6 +409,7 @@ impl P2pInterface {
         };
 
         // create a new tunnel from Initiator to target and reference the old tunnel
+        log::trace!("Tunnel={:?}: Start creating new tunnel", tunnel_id);
         let (tx, rx) = oneshot::channel::<TunnelResult>();
         let new_tunnel_id = match OnionTunnel::new_initiator_tunnel(
             update_info.listener,
@@ -378,38 +441,37 @@ impl P2pInterface {
         match rx.await {
             Ok(res) => match res {
                 TunnelResult::Connected => {
-                    self.tunnel_manager.write().await.set_connected(&tunnel_id);
-                    log::debug!("Tunnel with ID={:?} established", tunnel_id);
+                    let mut tunnel_manager_guard = self.tunnel_manager.write().await;
+                    tunnel_manager_guard.set_connected(&new_tunnel_id);
+                    log::debug!(
+                        "Tunnel={:?}: New tunnel with ID={:?} established",
+                        tunnel_id,
+                        new_tunnel_id
+                    );
+
+                    // redirect the tunnel id
+                    tunnel_manager_guard.add_redirection_link(tunnel_id, new_tunnel_id);
+
+                    // destroy the old tunnel
+                    match tunnel_manager_guard.get_tunnel(&tunnel_id) {
+                        None => {
+                            // the old tunnel has been closed during the tunnel update, close the new one
+                            log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", new_tunnel_id, tunnel_id);
+                            if let Some(tunnel) = tunnel_manager_guard.get_tunnel(&new_tunnel_id) {
+                                tunnel.close_tunnel().await;
+                            }
+                        }
+                        Some(tunnel) => {
+                            tunnel.shutdown_tunnel().await;
+                        }
+                    }
                 }
                 TunnelResult::Failure(e) => {
                     log::warn!("Tunnel={:?}: Cannot update tunnel: {:?}", tunnel_id, e);
-                    return;
                 }
             },
             Err(e) => {
                 log::warn!("Tunnel={:?}: Cannot update tunnel: {:?}", tunnel_id, e);
-                return;
-            }
-        }
-
-        // redirect the tunnel id
-        self.tunnel_manager
-            .write()
-            .await
-            .add_redirection_link(tunnel_id, new_tunnel_id);
-
-        // destroy the old tunnel
-        let tunnel_manager_guard = self.tunnel_manager.read().await;
-        match tunnel_manager_guard.get_tunnel(&tunnel_id) {
-            None => {
-                // the old tunnel has been closed during the tunnel update, close the new one
-                log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", new_tunnel_id, tunnel_id);
-                if let Some(tunnel) = tunnel_manager_guard.get_tunnel(&new_tunnel_id) {
-                    tunnel.close_tunnel().await;
-                }
-            }
-            Some(tunnel) => {
-                tunnel.shutdown_tunnel().await;
             }
         }
     }

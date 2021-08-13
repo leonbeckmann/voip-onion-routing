@@ -59,7 +59,7 @@ fn run_peer(
         .set("p2p_hostname", "127.0.0.1")
         .set("hop_count", "2")
         .set("api_address", onion_api_addr)
-        .set("round_time", "100")
+        .set("round_time", "2")
         .set("private_hostkey", priv_key_file.to_str().unwrap())
         .set("handshake_timeout", "3000");
     config
@@ -169,7 +169,7 @@ fn run_rps_api(
 #[test]
 fn integration_test() {
     // enable logging
-    env::set_var("RUST_LOG", "debug");
+    env::set_var("RUST_LOG", "trace");
     env_logger::init();
 
     log::info!("Starting integration test");
@@ -388,6 +388,9 @@ fn integration_test() {
     assert_eq!(incoming.data.as_slice(), message_pong);
     log::info!("TEST: Alice has received PONG");
 
+    // wait for new round to test tunnel update
+    sleep(Duration::from_millis(2500));
+
     // send fragmented data from Alice to Bob
     log::info!("TEST: Request fragmented TunnelData from Alice to Bob");
     let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
@@ -406,23 +409,44 @@ fn integration_test() {
     assert_eq!(collected_incoming_data, message);
     log::info!("TEST: Bob has received fragmented data");
 
+    // wait for another round to test multiple tunnel updates
+    sleep(Duration::from_millis(2500));
+
+    // send fragmented data from Bob to Alice
+    log::info!("TEST: Request fragmented TunnelData from Bob to Alice");
+    let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
+    let tunnel_data = OnionTunnelData::new(bob_from_alice_tunnel, message.to_vec()).to_be_vec();
+    write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut bob_api);
+
+    // expect incoming data in Bob's API
+    let mut collected_incoming_data = vec![];
+    for _ in 0..2 {
+        let (hdr, data) = read_msg(&mut alice_api);
+        assert_eq!(hdr.msg_type, ONION_TUNNEL_DATA);
+        let mut incoming = Box::<OnionTunnelData>::try_from(data).unwrap();
+        assert_eq!(incoming.tunnel_id, alice_to_bob_tunnel);
+        collected_incoming_data.append(incoming.data.as_mut())
+    }
+    assert_eq!(collected_incoming_data, message);
+    log::info!("TEST: Alice has received fragmented data");
+
     // TEST: destroy the connection via alice
 
     log::info!("TEST: Request TunnelDestroy from Alice");
     let tunnel_destroy = OnionTunnelDestroy::new(alice_to_bob_tunnel).to_be_vec();
     write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
 
-    sleep(Duration::from_secs(1));
+    sleep(Duration::from_millis(500));
 
     // TEST: cannot send data from Alice to Bob anymore
-    /*log::info!("TEST: Send data from Alice to Bob via old tunnel and expect failure");
+    log::info!("TEST: Send data from Alice to Bob via old tunnel and expect failure");
     let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, message_ping.to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
     let (hdr, data) = read_msg(&mut alice_api);
     assert_eq!(hdr.msg_type, ONION_ERROR);
     let error = OnionError::try_from(data).unwrap();
     assert_eq!(error.tunnel_id, alice_to_bob_tunnel);
-    assert_eq!(error.request_type, ONION_TUNNEL_DATA);*/
+    assert_eq!(error.request_type, ONION_TUNNEL_DATA);
 
     // TEST: cannot send data from Bob to Alice anymore
     log::info!("TEST: Send data from Bob to Alice via old tunnel and expect failure");

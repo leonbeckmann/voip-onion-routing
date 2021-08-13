@@ -85,6 +85,20 @@ pub(crate) struct OnionTunnel {
 }
 
 impl OnionTunnel {
+    pub fn is_connected(&self) -> bool {
+        match self.status {
+            TunnelStatus::Connected => true,
+            TunnelStatus::Connecting => false,
+        }
+    }
+
+    pub fn is_initiator(&self) -> bool {
+        match self.tunnel_type {
+            TunnelType::Initiator(_) => true,
+            TunnelType::Target => false,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn new_tunnel(
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
@@ -244,6 +258,15 @@ impl OnionTunnel {
                                                 .tunnel_closure(tunnel_id);
                                         }
                                         Some(tunnel) => {
+                                            // take listeners from old tunnel
+                                            let raw_listeners =
+                                                tunnel.listeners.lock().await.clone();
+                                            let mut listeners_guard = listeners.lock().await;
+                                            let mut listeners_available_guard =
+                                                listeners_available.lock().await;
+                                            *listeners_guard = raw_listeners;
+                                            *listeners_available_guard = true;
+                                            drop(listeners_guard);
                                             tunnel.shutdown_tunnel().await;
                                         }
                                     }

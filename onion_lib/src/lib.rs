@@ -38,6 +38,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
                 }
             };
         let p2p_interface_ref = Arc::downgrade(&p2p_interface);
+        let p2p_interface_strong_ref = p2p_interface.clone();
 
         let api_address = config.onion_api_address;
 
@@ -53,7 +54,7 @@ pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
                 config.p2p_hostname,
                 config.p2p_port
             );
-            if let Err(e) = p2p_interface.listen().await {
+            if let Err(e) = p2p_interface.listen(p2p_interface_strong_ref).await {
                 log::error!("P2P listener has failed: {:?}", e);
             }
 
