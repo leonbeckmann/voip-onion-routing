@@ -1,7 +1,6 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Weak;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use tokio::net::UdpSocket;
 use tokio::sync::{
@@ -20,6 +19,7 @@ use crate::p2p_protocol::{ConnectionId, FrameId, P2pError};
 use super::TunnelId;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
+use crate::p2p_protocol::onion_tunnel::tunnel_manager::TunnelManager;
 use crate::p2p_protocol::rps_api::rps_get_peer;
 use std::time::Duration;
 
@@ -27,11 +27,7 @@ pub mod crypto;
 pub(crate) mod frame_id_manager;
 pub(crate) mod fsm;
 pub(crate) mod message_codec;
-
-static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
-fn get_id() -> u32 {
-    ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-}
+pub(crate) mod tunnel_manager;
 
 pub enum TunnelResult {
     Connected,
@@ -58,11 +54,34 @@ enum IncomingEventMessage {
 
 pub(crate) type Peer = (SocketAddr, Vec<u8>);
 
+pub(crate) struct UpdateInformation {
+    pub listener: ConnectionId,
+    pub target: Peer,
+}
+
+impl UpdateInformation {
+    pub fn new(listener: ConnectionId, target: Peer) -> UpdateInformation {
+        UpdateInformation { listener, target }
+    }
+}
+
+pub(crate) enum TunnelType {
+    Initiator(UpdateInformation),
+    Target,
+}
+
+pub(crate) enum TunnelStatus {
+    Connected,
+    Connecting,
+}
+
 pub(crate) struct OnionTunnel {
     listeners: Arc<Mutex<HashSet<ConnectionId>>>, // all the api connection listeners
     listeners_available: Arc<Mutex<bool>>,        // are the listeners set, important for managing
     tunnel_id: TunnelId,                          // unique tunnel id
     lifo_event_sender: Sender<FsmEvent>,
+    pub tunnel_type: TunnelType,
+    pub status: TunnelStatus,
 }
 
 impl OnionTunnel {
@@ -71,12 +90,13 @@ impl OnionTunnel {
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
         listeners: Arc<Mutex<HashSet<ConnectionId>>>,
         listeners_available: Arc<Mutex<bool>>,
-        tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+        tunnel_manager: Arc<RwLock<TunnelManager>>,
         event_tx: Sender<FsmEvent>,
         tunnel_id: TunnelId,
         mut mgmt_rx: Receiver<IncomingEventMessage>,
         api_interface: Weak<ApiInterface>,
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
+        tunnel_type: TunnelType,
     ) {
         // clone the sender for init
         let event_tx_clone = event_tx.clone();
@@ -89,12 +109,16 @@ impl OnionTunnel {
             listeners_available: listeners_available.clone(),
             tunnel_id,
             lifo_event_sender,
+            tunnel_type,
+            status: TunnelStatus::Connecting,
         };
 
         // register tunnel at registry
         {
-            let mut tunnels = tunnel_registry.lock().await;
-            let _ = tunnels.insert(tunnel_id, tunnel);
+            tunnel_manager
+                .write()
+                .await
+                .insert_tunnel(tunnel_id, tunnel);
         }
 
         // start management task that manages tunnel cleanup and listener notification
@@ -103,15 +127,15 @@ impl OnionTunnel {
             loop {
                 match mgmt_rx.recv().await {
                     None => {
-                        // here the FSM has been dropped. this is the only point where tunnels are removed from the registry
+                        // here the FSM has been dropped.
                         log::debug!(
                             "Tunnel={:?}: Received a closure from the FSM. Unregister the tunnel and shutdown the management layer",
                             tunnel_id
                         );
-                        let mut registry = tunnel_registry.lock().await;
-                        let _ = registry.remove(&tunnel_id);
-                        let mut frame_id_manager = frame_id_manager.write().await;
-                        frame_id_manager.tunnel_closure(tunnel_id);
+                        let mut tunnel_manager_guard = tunnel_manager.write().await;
+                        tunnel_manager_guard.remove_tunnel(&tunnel_id);
+                        tunnel_manager_guard.remove_redirection_link(&tunnel_id);
+                        frame_id_manager.write().await.tunnel_closure(tunnel_id);
                         return;
                     }
 
@@ -124,6 +148,7 @@ impl OnionTunnel {
                                         "Tunnel={:?}: Received IncomingTunnelCompletion, delegate to API",
                                         tunnel_id
                                     );
+                                    tunnel_manager.write().await.set_connected(&tunnel_id);
 
                                     // get listeners
                                     let connections = iface.connections.lock().await;
@@ -140,9 +165,13 @@ impl OnionTunnel {
 
                                     // check if listeners are empty, then we want to terminate the tunnel
                                     if raw_listeners.is_empty() {
-                                        let registry = tunnel_registry.lock().await;
-                                        let tunnel = registry.get(&tunnel_id).unwrap();
-                                        tunnel.close_tunnel().await;
+                                        tunnel_manager
+                                            .read()
+                                            .await
+                                            .get_tunnel(&tunnel_id)
+                                            .unwrap()
+                                            .close_tunnel()
+                                            .await;
                                         continue;
                                     }
 
@@ -157,18 +186,85 @@ impl OnionTunnel {
                                     iface.incoming_tunnel(tunnel_id, listeners.clone()).await;
                                 }
 
-                                IncomingEventMessage::TunnelUpdate(_tunnel_update_ref) => {
+                                IncomingEventMessage::TunnelUpdate(tunnel_update_ref) => {
+                                    tunnel_manager.write().await.set_connected(&tunnel_id);
                                     // this target tunnel is an update for an old one
-                                    // TODO close the old tunnel and replace the tunnel_ids
+
+                                    // redirect tunnel id
+                                    let old_tunnel_id = match frame_id_manager
+                                        .read()
+                                        .await
+                                        .get_tunnel_id(&tunnel_update_ref)
+                                    {
+                                        None => {
+                                            // failure, close tunnel, cleanup
+                                            let mut tunnel_manager_guard =
+                                                tunnel_manager.write().await;
+                                            log::debug!("Tunnel={:?}: Cannot find tunnel_update_reference. Close tunnel again", tunnel_id);
+                                            if let Some(tunnel) =
+                                                tunnel_manager_guard.get_tunnel(&tunnel_id)
+                                            {
+                                                tunnel.close_tunnel().await;
+                                            }
+                                            tunnel_manager_guard.remove_tunnel(&tunnel_id);
+                                            tunnel_manager_guard
+                                                .remove_redirection_link(&tunnel_id);
+                                            frame_id_manager
+                                                .write()
+                                                .await
+                                                .tunnel_closure(tunnel_id);
+                                            return;
+                                        }
+                                        Some((tunnel_id, _)) => tunnel_id,
+                                    };
+
+                                    // redirect tunnel ids
+                                    tunnel_manager
+                                        .write()
+                                        .await
+                                        .add_redirection_link(old_tunnel_id, tunnel_id);
+
+                                    // destroy the old tunnel
+                                    let mut tunnel_manager_guard = tunnel_manager.write().await;
+                                    match tunnel_manager_guard.get_tunnel(&old_tunnel_id) {
+                                        None => {
+                                            // the old tunnel has been closed during the tunnel update, close the new one
+                                            log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", tunnel_id, old_tunnel_id);
+                                            if let Some(tunnel) =
+                                                tunnel_manager_guard.get_tunnel(&tunnel_id)
+                                            {
+                                                tunnel.close_tunnel().await;
+                                            }
+                                            tunnel_manager_guard.remove_tunnel(&tunnel_id);
+                                            tunnel_manager_guard
+                                                .remove_redirection_link(&tunnel_id);
+                                            frame_id_manager
+                                                .write()
+                                                .await
+                                                .tunnel_closure(tunnel_id);
+                                        }
+                                        Some(tunnel) => {
+                                            tunnel.shutdown_tunnel().await;
+                                        }
+                                    }
                                 }
 
                                 IncomingEventMessage::Data(data) => {
+                                    let redirected_tunnel_id = tunnel_manager
+                                        .read()
+                                        .await
+                                        .resolve_reverse_tunnel_id(tunnel_id);
                                     log::debug!(
-                                        "Tunnel={:?}: Received incoming data, delegate to API",
-                                        tunnel_id
+                                        "Tunnel={:?} (redirected to id={:?}): Received incoming data, delegate to API",
+                                        tunnel_id,
+                                        redirected_tunnel_id
                                     );
                                     iface
-                                        .incoming_data(data, tunnel_id, listeners.clone())
+                                        .incoming_data(
+                                            data,
+                                            redirected_tunnel_id,
+                                            listeners.clone(),
+                                        )
                                         .await;
                                 }
                             }
@@ -247,7 +343,7 @@ impl OnionTunnel {
         socket: Arc<UdpSocket>,
         target: SocketAddr,
         target_host_key: Vec<u8>,
-        tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+        tunnel_manager: Arc<RwLock<TunnelManager>>,
         hop_count: u8,
         rps_api_address: SocketAddr,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
@@ -256,6 +352,7 @@ impl OnionTunnel {
         handshake_timeout: Duration,
         timeout: Duration,
         tunnel_update_ref: Option<FrameId>,
+        update_information: UpdateInformation,
     ) -> Result<TunnelId, ProtocolError> {
         // select intermediate hops via rps module and hop count
         // TODO robustness isAlive checks during tunnel establishment, maybe add some more backup peers
@@ -286,7 +383,7 @@ impl OnionTunnel {
         let (mgmt_tx, mgmt_rx) = tokio::sync::mpsc::channel(32);
 
         // create new tunnel id
-        let tunnel_id = get_id();
+        let tunnel_id = TunnelManager::get_id();
         log::debug!("Create new initiator tunnel with new ID={:?}", tunnel_id);
 
         // create initiator FSM
@@ -321,12 +418,13 @@ impl OnionTunnel {
             frame_id_manager,
             listeners,
             Arc::new(Mutex::new(true)),
-            tunnel_registry,
+            tunnel_manager,
             event_tx,
             tunnel_id,
             mgmt_rx,
             api_interface,
             fsm_lock,
+            TunnelType::Initiator(update_information),
         )
         .await;
         Ok(tunnel_id)
@@ -340,7 +438,7 @@ impl OnionTunnel {
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
         socket: Arc<UdpSocket>,
         source: SocketAddr,
-        tunnel_registry: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+        tunnel_manager: Arc<RwLock<TunnelManager>>,
         api_interface: Weak<ApiInterface>,
         local_crypto_context: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
@@ -353,7 +451,7 @@ impl OnionTunnel {
         let (mgmt_tx, mgmt_rx) = tokio::sync::mpsc::channel(32);
 
         // create new tunnel id
-        let tunnel_id = get_id();
+        let tunnel_id = TunnelManager::get_id();
         log::debug!("Create new target tunnel with new ID={:?}", tunnel_id);
 
         // create target FSM
@@ -379,12 +477,13 @@ impl OnionTunnel {
             frame_id_manager,
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(Mutex::new(false)),
-            tunnel_registry,
+            tunnel_manager,
             event_tx,
             tunnel_id,
             mgmt_rx,
             api_interface,
             fsm_lock,
+            TunnelType::Target,
         )
         .await;
         tunnel_id
@@ -412,10 +511,16 @@ impl OnionTunnel {
         }
     }
 
-    async fn close_tunnel(&self) {
+    pub async fn close_tunnel(&self) {
         // send close event
         log::trace!("Tunnel={:?}: Send close event to FSM", self.tunnel_id);
         let _ = self.forward_event(FsmEvent::Close).await;
+    }
+
+    pub async fn shutdown_tunnel(&self) {
+        // send shutdown event
+        log::trace!("Tunnel={:?}: Send shutdown event to FSM", self.tunnel_id);
+        let _ = self.forward_event(FsmEvent::Shutdown).await;
     }
 
     pub async fn unsubscribe(&self, connection_id: u64) {

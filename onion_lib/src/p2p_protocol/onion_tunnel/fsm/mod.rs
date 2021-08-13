@@ -265,13 +265,13 @@ pub(super) trait FiniteStateMachine {
         Ok(State::Connected)
     }
 
-    async fn action_close(&mut self) -> Result<State, ProtocolError> {
+    async fn action_close(&mut self, shutdown: bool) -> Result<State, ProtocolError> {
         // all connection listeners have left
         log::debug!(
             "Tunnel={:?}: Received close event, notify tunnel peers and shutdown tunnel",
             self.tunnel_id()
         );
-        self.get_codec().lock().await.close(false).await;
+        self.get_codec().lock().await.close(shutdown).await;
         Ok(State::Terminated)
     }
 
@@ -365,7 +365,8 @@ pub(super) trait FiniteStateMachine {
                         );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::Close => self.action_close().await,
+                    FsmEvent::Close => self.action_close(false).await,
+                    FsmEvent::Shutdown => self.action_close(true).await,
                     FsmEvent::Send(_) => {
                         log::warn!(
                             "Tunnel={:?}: Received send event for non-connected FSM.",
@@ -388,7 +389,8 @@ pub(super) trait FiniteStateMachine {
                         );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::Close => self.action_close().await,
+                    FsmEvent::Close => self.action_close(false).await,
+                    FsmEvent::Shutdown => self.action_close(true).await,
                     FsmEvent::Send(data) => self.action_send(data).await,
                     FsmEvent::IncomingFrame((data, dir, iv)) => {
                         // we expect encrypted application data
@@ -858,7 +860,8 @@ type IsTargetEndpoint = bool;
 pub enum FsmEvent {
     Init,                                                                        // Start the FSM
     Close,                                                                       // Close the Tunnel
-    Send(Vec<u8>),                         // Send Data via the Tunnel
+    Shutdown,      // Shutdown without sending close to other endpoint
+    Send(Vec<u8>), // Send Data via the Tunnel
     IncomingFrame((Bytes, Direction, IV)), // Received data frame
     HandshakeResult(Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>), // HandshakeResult from handshake fsm
 }

@@ -7,13 +7,15 @@ use crate::config_parser::OnionConfiguration;
 use crate::p2p_protocol::messages::p2p_messages::TunnelFrame;
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
-use crate::p2p_protocol::onion_tunnel::{OnionTunnel, TunnelResult};
+use crate::p2p_protocol::onion_tunnel::tunnel_manager::TunnelManager;
+use crate::p2p_protocol::onion_tunnel::{
+    OnionTunnel, TunnelResult, TunnelStatus, TunnelType, UpdateInformation,
+};
 use protobuf::Message;
+use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
-use std::{collections::HashMap, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 use tokio::sync::{oneshot, RwLock};
 
 // hard coded packet size should not be configurable and equal for all modules
@@ -32,7 +34,7 @@ pub enum Direction {
 }
 
 pub(crate) struct P2pInterface {
-    onion_tunnels: Arc<Mutex<HashMap<TunnelId, OnionTunnel>>>,
+    tunnel_manager: Arc<RwLock<TunnelManager>>,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     socket: Arc<UdpSocket>,
     config: OnionConfiguration,
@@ -45,7 +47,7 @@ impl P2pInterface {
         api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            onion_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
             frame_id_manager: Arc::new(RwLock::new(FrameIdManager::new())),
             socket: Arc::new(
                 UdpSocket::bind(format!("{}:{:?}", config.p2p_hostname, config.p2p_port)).await?,
@@ -84,7 +86,7 @@ impl P2pInterface {
                                         self.frame_id_manager.clone(),
                                         self.socket.clone(),
                                         addr,
-                                        self.onion_tunnels.clone(),
+                                        self.tunnel_manager.clone(),
                                         self.api_interface.clone(),
                                         self.config.crypto_config.clone(),
                                         self.config.handshake_message_timeout,
@@ -114,8 +116,8 @@ impl P2pInterface {
                                 let event =
                                     FsmEvent::IncomingFrame((frame.data, direction, frame.iv));
 
-                                let tunnels = self.onion_tunnels.lock().await;
-                                match tunnels.get(&tunnel_id) {
+                                let tunnel_manager = self.tunnel_manager.read().await;
+                                match tunnel_manager.get_tunnel(&tunnel_id) {
                                     None => {
                                         // should never happen, means outdated frame_ids
                                         log::warn!(
@@ -169,10 +171,11 @@ impl P2pInterface {
             "Unsubscribe connection {:?} from all tunnels",
             connection_id
         );
-        let mut onion_tunnels = self.onion_tunnels.lock().await;
-        for (_, tunnel) in onion_tunnels.iter_mut() {
-            tunnel.unsubscribe(connection_id).await;
-        }
+        self.tunnel_manager
+            .write()
+            .await
+            .unsubscribe(connection_id)
+            .await;
     }
 
     /**
@@ -195,7 +198,7 @@ impl P2pInterface {
             self.socket.clone(),
             target,
             host_key.clone(),
-            self.onion_tunnels.clone(),
+            self.tunnel_manager.clone(),
             self.config.hop_count,
             self.config.rps_api_address,
             tx,
@@ -204,6 +207,7 @@ impl P2pInterface {
             self.config.handshake_message_timeout,
             self.config.timeout,
             None,
+            UpdateInformation::new(listener, (target, host_key.clone())),
         )
         .await
         {
@@ -215,6 +219,7 @@ impl P2pInterface {
         match rx.await {
             Ok(res) => match res {
                 TunnelResult::Connected => {
+                    self.tunnel_manager.write().await.set_connected(&tunnel_id);
                     log::debug!("Tunnel with ID={:?} established", tunnel_id);
                     Ok((tunnel_id, host_key))
                 }
@@ -242,13 +247,15 @@ impl P2pInterface {
         connection_id: ConnectionId,
     ) -> Result<(), P2pError> {
         // call unsubscribe on specific tunnel
+        let tunnel_manager = self.tunnel_manager.read().await;
+        let redirected_tunnel_id = tunnel_manager.resolve_tunnel_id(tunnel_id);
         log::debug!(
-            "Destroy tunnel reference connection={:?}, tunnel={:?}",
+            "Destroy tunnel reference connection={:?}, tunnel={:?}, redirected_tunnel_id={:?}",
             connection_id,
-            tunnel_id
+            tunnel_id,
+            redirected_tunnel_id
         );
-        let onion_tunnels = self.onion_tunnels.lock().await;
-        match onion_tunnels.get(&tunnel_id) {
+        match tunnel_manager.get_tunnel(&redirected_tunnel_id) {
             None => Err(P2pError::InvalidTunnelId(tunnel_id)),
             Some(tunnel) => {
                 tunnel.unsubscribe(connection_id).await;
@@ -265,11 +272,16 @@ impl P2pInterface {
         tunnel_id: TunnelId,
         data: Vec<u8>,
     ) -> Result<(), P2pError> {
-        let tunnels = self.onion_tunnels.lock().await;
-        let tunnel = tunnels.get(&tunnel_id);
+        let tunnel_manager = self.tunnel_manager.read().await;
+        let redirected_tunnel_id = tunnel_manager.resolve_tunnel_id(tunnel_id);
+        let tunnel = tunnel_manager.get_tunnel(&redirected_tunnel_id);
         match tunnel {
             Some(tunnel) => {
-                log::debug!("Tunnel={:?}: Send data", tunnel_id);
+                log::debug!(
+                    "Tunnel={:?} (redirected_tunnel_id={:?}): Send data",
+                    tunnel_id,
+                    redirected_tunnel_id
+                );
                 tunnel.send(data).await
             }
             None => {
@@ -286,14 +298,120 @@ impl P2pInterface {
         Ok(())
     }
 
-    async fn _update_tunnel(&mut self) {
-        // TODO
-        // only update connected tunnels where we are the initiator
-        // create a new tunnel from Initiator to target and reference the old tunnel
+    async fn update_tunnel(&mut self, tunnel_id: TunnelId) {
+        log::debug!("Tunnel={:?}: Start updating", tunnel_id);
+        // get tunnel update reference
+        let frame_id = match self
+            .frame_id_manager
+            .read()
+            .await
+            .get_tunnel_reference(&tunnel_id)
+        {
+            None => {
+                log::warn!(
+                    "Tunnel={:?}: Cannot update tunnel, reference id not available.",
+                    tunnel_id
+                );
+                return;
+            }
+            Some(id) => *id,
+        };
 
-        // update the tunnel id
+        // only update connected tunnels where we are the initiator
+        let update_info = match self.tunnel_manager.read().await.get_tunnel(&tunnel_id) {
+            None => {
+                log::warn!(
+                    "Tunnel with id={:?} not found in registry. Update failed.",
+                    tunnel_id
+                );
+                return;
+            }
+            Some(tunnel) => match tunnel.status {
+                TunnelStatus::Connected => match &tunnel.tunnel_type {
+                    TunnelType::Initiator(update_info) => {
+                        UpdateInformation::new(update_info.listener, update_info.target.clone())
+                    }
+                    TunnelType::Target => {
+                        log::warn!("Tunnel={:?}: Cannot update target tunnel.", tunnel_id);
+                        return;
+                    }
+                },
+                TunnelStatus::Connecting => {
+                    log::warn!(
+                        "Tunnel={:?}: Cannot update non-connected tunnel.",
+                        tunnel_id
+                    );
+                    return;
+                }
+            },
+        };
+
+        // create a new tunnel from Initiator to target and reference the old tunnel
+        let (tx, rx) = oneshot::channel::<TunnelResult>();
+        let new_tunnel_id = match OnionTunnel::new_initiator_tunnel(
+            update_info.listener,
+            self.frame_id_manager.clone(),
+            self.socket.clone(),
+            update_info.target.0,
+            update_info.target.1.clone(),
+            self.tunnel_manager.clone(),
+            self.config.hop_count,
+            self.config.rps_api_address,
+            tx,
+            self.api_interface.clone(),
+            self.config.crypto_config.clone(),
+            self.config.handshake_message_timeout,
+            self.config.timeout,
+            Some(frame_id),
+            update_info,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                log::warn!("Tunnel={:?}: Cannot update tunnel: {:?}", tunnel_id, e);
+                return;
+            }
+        };
+
+        // wait until connected or failure
+        match rx.await {
+            Ok(res) => match res {
+                TunnelResult::Connected => {
+                    self.tunnel_manager.write().await.set_connected(&tunnel_id);
+                    log::debug!("Tunnel with ID={:?} established", tunnel_id);
+                }
+                TunnelResult::Failure(e) => {
+                    log::warn!("Tunnel={:?}: Cannot update tunnel: {:?}", tunnel_id, e);
+                    return;
+                }
+            },
+            Err(e) => {
+                log::warn!("Tunnel={:?}: Cannot update tunnel: {:?}", tunnel_id, e);
+                return;
+            }
+        }
+
+        // redirect the tunnel id
+        self.tunnel_manager
+            .write()
+            .await
+            .add_redirection_link(tunnel_id, new_tunnel_id);
 
         // destroy the old tunnel
+        let tunnel_manager_guard = self.tunnel_manager.read().await;
+        match tunnel_manager_guard.get_tunnel(&tunnel_id) {
+            None => {
+                // the old tunnel has been closed during the tunnel update, close the new one
+                log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", new_tunnel_id, tunnel_id);
+                if let Some(tunnel) = tunnel_manager_guard.get_tunnel(&new_tunnel_id) {
+                    tunnel.close_tunnel().await;
+                }
+            }
+            Some(tunnel) => {
+                tunnel.shutdown_tunnel().await;
+            }
+        }
     }
 }
 

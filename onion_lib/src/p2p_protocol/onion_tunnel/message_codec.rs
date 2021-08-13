@@ -837,9 +837,11 @@ impl P2pCodec for TargetEndpoint {
         }
     }
 
-    async fn close(&mut self, _: bool) {
-        log::debug!("Tunnel={:?}: Send close at target endpoint", self.tunnel_id);
-        let _ = self.write(DataType::Close(true)).await;
+    async fn close(&mut self, without_last_hop: bool) {
+        if !without_last_hop {
+            log::debug!("Tunnel={:?}: Send close at target endpoint", self.tunnel_id);
+            let _ = self.write(DataType::Close(true)).await;
+        }
     }
 
     fn as_any(&mut self) -> &mut dyn Any {

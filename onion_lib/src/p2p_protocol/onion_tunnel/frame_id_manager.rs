@@ -101,6 +101,10 @@ impl FrameIdManager {
     pub fn add_tunnel_reference(&mut self, tunnel_id: TunnelId, ref_id: FrameId) {
         let _ = self.ref_ids.insert(tunnel_id, ref_id);
     }
+
+    pub fn get_tunnel_reference(&self, tunnel_id: &TunnelId) -> Option<&FrameId> {
+        self.ref_ids.get(tunnel_id)
+    }
 }
 
 #[cfg(test)]
