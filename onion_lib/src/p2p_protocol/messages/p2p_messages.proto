@@ -63,7 +63,15 @@ message RoutingInformation {
 
 message ApplicationData {
   fixed32 sequence_number = 1;
-  bytes data = 2;
+  oneof message {
+    bytes data = 2;
+    CoverTraffic cover_traffic = 3;
+  }
+}
+
+message CoverTraffic {
+  bytes data = 1;
+  bool mirrored = 2;
 }
 
 message Close {}

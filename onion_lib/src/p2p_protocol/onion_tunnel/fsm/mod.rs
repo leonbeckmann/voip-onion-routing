@@ -6,9 +6,8 @@ use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::handshake_fsm::{
     Client, HandshakeEvent, HandshakeStateMachine, Server,
 };
-use crate::p2p_protocol::onion_tunnel::message_codec::DataType::AppData;
 use crate::p2p_protocol::onion_tunnel::message_codec::{
-    InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
+    DataType, InitiatorEndpoint, P2pCodec, ProcessedData, TargetEndpoint,
 };
 use crate::p2p_protocol::onion_tunnel::{FsmLockState, IncomingEventMessage, Peer, TunnelResult};
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
@@ -186,7 +185,7 @@ pub(super) trait FiniteStateMachine {
                     }
                 }
             }
-            ProcessedData::IncomingData(_) => {
+            ProcessedData::IncomingData(_) | ProcessedData::IncomingCover(_, _) => {
                 log::warn!(
                     "Tunnel={:?}: Not expecting incoming application data in connecting state",
                     self.tunnel_id()
@@ -252,6 +251,24 @@ pub(super) trait FiniteStateMachine {
                     .send(IncomingEventMessage::Data(data))
                     .await;
             }
+            ProcessedData::IncomingCover(data, mirrored) => {
+                if mirrored {
+                    log::trace!(
+                        "Tunnel={:?}: Received mirrored cover traffic",
+                        self.tunnel_id()
+                    );
+                } else {
+                    log::trace!(
+                        "Tunnel={:?}: Mirror incoming cover traffic to initiator",
+                        self.tunnel_id()
+                    );
+                    self.get_codec()
+                        .lock()
+                        .await
+                        .write(DataType::Cover(data, true))
+                        .await?;
+                }
+            }
             ProcessedData::HandshakeData(_) => {
                 log::trace!(
                     "Tunnel={:?}: Not expecting handshake message in connected state",
@@ -275,9 +292,14 @@ pub(super) trait FiniteStateMachine {
         Ok(State::Terminated)
     }
 
-    async fn action_send(&mut self, data: Vec<u8>) -> Result<State, ProtocolError> {
+    async fn action_send(&mut self, data: Vec<u8>, cover: bool) -> Result<State, ProtocolError> {
         // send data to the target via the tunnel
-        self.get_codec().lock().await.write(AppData(data)).await?;
+        let data = if cover {
+            DataType::Cover(data, false)
+        } else {
+            DataType::AppData(data)
+        };
+        self.get_codec().lock().await.write(data).await?;
         Ok(State::Connected)
     }
 
@@ -367,9 +389,9 @@ pub(super) trait FiniteStateMachine {
                     }
                     FsmEvent::Close => self.action_close(false).await,
                     FsmEvent::Shutdown => self.action_close(true).await,
-                    FsmEvent::Send(_) => {
+                    FsmEvent::Send(_) | FsmEvent::Cover(_) => {
                         log::warn!(
-                            "Tunnel={:?}: Received send event for non-connected FSM.",
+                            "Tunnel={:?}: Received send/cover event for non-connected FSM.",
                             self.tunnel_id()
                         );
                         Err(ProtocolError::UnexpectedMessageType)
@@ -391,7 +413,8 @@ pub(super) trait FiniteStateMachine {
                     }
                     FsmEvent::Close => self.action_close(false).await,
                     FsmEvent::Shutdown => self.action_close(true).await,
-                    FsmEvent::Send(data) => self.action_send(data).await,
+                    FsmEvent::Send(data) => self.action_send(data, false).await,
+                    FsmEvent::Cover(data) => self.action_send(data, true).await,
                     FsmEvent::IncomingFrame((data, dir, iv)) => {
                         // we expect encrypted application data
                         self.action_app_data(data, dir, iv).await
@@ -860,8 +883,9 @@ type IsTargetEndpoint = bool;
 pub enum FsmEvent {
     Init,                                                                        // Start the FSM
     Close,                                                                       // Close the Tunnel
-    Shutdown,      // Shutdown without sending close to other endpoint
-    Send(Vec<u8>), // Send Data via the Tunnel
+    Shutdown,       // Shutdown without sending close to other endpoint
+    Send(Vec<u8>),  // Send Data via the Tunnel
+    Cover(Vec<u8>), // Send cover traffic via Tunnel
     IncomingFrame((Bytes, Direction, IV)), // Received data frame
     HandshakeResult(Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>), // HandshakeResult from handshake fsm
 }

@@ -516,6 +516,10 @@ impl OnionTunnel {
         self.forward_event(FsmEvent::Send(data)).await
     }
 
+    pub(crate) async fn send_cover(&self, data: Vec<u8>) -> Result<(), P2pError> {
+        self.forward_event(FsmEvent::Cover(data)).await
+    }
+
     pub(crate) async fn forward_event(&self, e: FsmEvent) -> Result<(), P2pError> {
         log::trace!(
             "Tunnel={:?}: Forward event=({:?}) to tunnel",

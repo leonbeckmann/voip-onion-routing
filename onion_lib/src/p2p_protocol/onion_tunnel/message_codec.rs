@@ -1,7 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use crate::p2p_protocol::messages::p2p_messages::{
-    ApplicationData, ClientHello, HandshakeData, RoutingInformation, ServerHello, TunnelFrame,
+    ApplicationData, ApplicationData_oneof_message, ClientHello, CoverTraffic, HandshakeData,
+    RoutingInformation, ServerHello, TunnelFrame,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTH_PLACEHOLDER, IV_SIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
@@ -36,6 +37,7 @@ pub enum ProcessedData {
     TransferredToNextHop,
     HandshakeData(HandshakeData),
     IncomingData(Vec<u8>),
+    IncomingCover(Vec<u8>, bool),
     ReceivedClose,
 }
 
@@ -43,6 +45,7 @@ pub enum DataType {
     ForwardFrameIds(Vec<FrameId>),
     Close(bool),
     AppData(Vec<u8>),
+    Cover(Vec<u8>, bool),
     ClientHello(ClientHello),
     ServerHello(ServerHello),
     RoutingInformation(RoutingInformation),
@@ -448,6 +451,43 @@ impl P2pCodec for InitiatorEndpoint {
 
                 chunks
             }
+            DataType::Cover(data, _) => {
+                // fragmentation
+                let mut chunks = vec![];
+                for data_chunk in data.chunks(EFFECTIVE_PACKET_SIZE) {
+                    let mut app_data = ApplicationData::new();
+                    let mut cover_packet = CoverTraffic::new();
+                    cover_packet.set_data(Bytes::copy_from_slice(data_chunk));
+                    cover_packet.set_mirrored(false);
+                    app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
+                    app_data.set_cover_traffic(cover_packet);
+                    let raw_data = app_data.write_to_bytes().unwrap();
+                    let mut raw_data =
+                        RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
+
+                    // Unencrypted data transfer is not allowed
+                    assert!(!self.crypto_contexts.is_empty());
+
+                    // layered encryption via iv and keys using the crypto contexts
+                    let mut iv: Option<Vec<u8>> = None;
+                    for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
+                        let (iv_, data_) = cc.encrypt(iv.as_deref(), &raw_data, i == 0)?;
+                        iv = Some(iv_);
+                        raw_data = data_;
+                    }
+                    assert_eq!(raw_data.len(), PAYLOAD_SIZE);
+                    chunks.push((iv, raw_data));
+                }
+
+                log::debug!(
+                    "Tunnel={:?}: Send encrypted application data ({:?} fragment(s)) to next hop {:?}.",
+                    self.tunnel_id,
+                    chunks.len(),
+                    self.next_hop
+                );
+
+                chunks
+            }
             DataType::ClientHello(mut client_hello) => {
                 // calculate frame_id
                 if self.next_hop_backward_frame_id == 0 {
@@ -566,18 +606,28 @@ impl P2pCodec for InitiatorEndpoint {
         let raw_data = RawData::deserialize(dec_data.as_ref(), self.tunnel_id)?;
         match raw_data.message_type {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
-                Ok(data) => {
+                Ok(message) => {
                     log::trace!(
                         "Tunnel={:?}: Initiator receives application data with sequence_number={:?}",
                         self.tunnel_id,
-                        data.sequence_number
+                        message.sequence_number
                     );
-                    return match self
+                    if let Err(e) = self
                         .seq_nr_context
-                        .verify_incoming_seq_nr(data.sequence_number)
+                        .verify_incoming_seq_nr(message.sequence_number)
                     {
-                        Ok(_) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
-                        Err(e) => Err(e),
+                        return Err(e);
+                    }
+                    return match message.message {
+                        None => Err(ProtocolError::EmptyMessage),
+                        Some(data) => match data {
+                            ApplicationData_oneof_message::data(data) => {
+                                Ok(ProcessedData::IncomingData(data.to_vec()))
+                            }
+                            ApplicationData_oneof_message::cover_traffic(cover) => Ok(
+                                ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
+                            ),
+                        },
                     };
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
@@ -803,18 +853,28 @@ impl P2pCodec for TargetEndpoint {
         let raw_data = RawData::deserialize(data.as_ref(), self.tunnel_id)?;
         match raw_data.message_type {
             APP_DATA => match ApplicationData::parse_from_bytes(raw_data.data.as_ref()) {
-                Ok(data) => {
+                Ok(message) => {
                     log::trace!(
                         "Tunnel={:?}: Target receives application data with sequence_number={:?}",
                         self.tunnel_id,
-                        data.sequence_number
+                        message.sequence_number
                     );
-                    return match self
+                    if let Err(e) = self
                         .seq_nr_context
-                        .verify_incoming_seq_nr(data.sequence_number)
+                        .verify_incoming_seq_nr(message.sequence_number)
                     {
-                        Ok(_) => Ok(ProcessedData::IncomingData(data.data.to_vec())),
-                        Err(e) => Err(e),
+                        return Err(e);
+                    }
+                    return match message.message {
+                        None => Err(ProtocolError::EmptyMessage),
+                        Some(data) => match data {
+                            ApplicationData_oneof_message::data(data) => {
+                                Ok(ProcessedData::IncomingData(data.to_vec()))
+                            }
+                            ApplicationData_oneof_message::cover_traffic(cover) => Ok(
+                                ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
+                            ),
+                        },
                     };
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
