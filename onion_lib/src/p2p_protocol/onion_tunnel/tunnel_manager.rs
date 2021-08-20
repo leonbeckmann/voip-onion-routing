@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
+type AvailableForNextRound = bool;
+
 pub(crate) struct TunnelManager {
-    tunnel_registry: HashMap<TunnelId, OnionTunnel>,
+    tunnel_registry: HashMap<TunnelId, (OnionTunnel, AvailableForNextRound)>,
     links: HashMap<TunnelId, TunnelId>, // old_tunnel_ids to new_tunnel_ids
     reverse_links: HashMap<TunnelId, TunnelId>, // new_tunnel_ids to old_tunnel_ids
 }
@@ -26,7 +28,7 @@ impl TunnelManager {
 
     pub(crate) fn insert_tunnel(&mut self, tunnel_id: TunnelId, onion_tunnel: OnionTunnel) {
         log::trace!("Tunnel Manager: Insert tunnel with id={:?}", tunnel_id);
-        let _ = self.tunnel_registry.insert(tunnel_id, onion_tunnel);
+        let _ = self.tunnel_registry.insert(tunnel_id, (onion_tunnel, true));
     }
 
     pub(crate) fn remove_tunnel(&mut self, tunnel_id: &TunnelId) {
@@ -35,11 +37,13 @@ impl TunnelManager {
     }
 
     pub(crate) fn get_tunnel(&self, tunnel_id: &TunnelId) -> Option<&OnionTunnel> {
-        self.tunnel_registry.get(tunnel_id)
+        self.tunnel_registry
+            .get(tunnel_id)
+            .map(|(tunnel, _)| tunnel)
     }
 
     pub(crate) fn set_connected(&mut self, tunnel_id: &TunnelId, cover_only: bool) {
-        if let Some(tunnel) = self.tunnel_registry.get_mut(tunnel_id) {
+        if let Some((tunnel, _)) = self.tunnel_registry.get_mut(tunnel_id) {
             log::trace!(
                 "Tunnel Manager: Mark tunnel with id={:?} as connected",
                 tunnel_id
@@ -55,7 +59,7 @@ impl TunnelManager {
     pub(crate) fn get_connected_initiator_tunnel_ids(&self) -> Vec<TunnelId> {
         self.tunnel_registry
             .iter()
-            .filter(|(_, tunnel)| tunnel.is_initiator() && tunnel.is_connected())
+            .filter(|(_, (tunnel, _))| tunnel.is_initiator() && tunnel.is_connected())
             .map(|(id, _)| *id)
             .collect()
     }
@@ -131,8 +135,20 @@ impl TunnelManager {
     }
 
     pub(crate) async fn unsubscribe(&mut self, connection_id: ConnectionId) {
-        for (_, tunnel) in self.tunnel_registry.iter_mut() {
+        for (_, (tunnel, _)) in self.tunnel_registry.iter_mut() {
             tunnel.unsubscribe(connection_id).await;
+        }
+    }
+
+    pub(crate) async fn round_cleanup(&mut self) {
+        // close all active tunnels from the previous round
+        // TODO design closing procedure, shutdown or close? Intermediates?
+        for (_, (tunnel, next_round)) in self.tunnel_registry.iter_mut() {
+            if *next_round {
+                *next_round = false;
+            } else {
+                tunnel.close_tunnel().await;
+            }
         }
     }
 }

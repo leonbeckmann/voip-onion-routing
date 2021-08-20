@@ -93,7 +93,7 @@ impl RoundSynchronizer {
         drop(status);
     }
 
-    async fn run(&self) {
+    async fn run(&self, tunnel_manager: Arc<RwLock<TunnelManager>>) {
         let update_notify = self.update_notify.clone();
         let new_notify = self.new_notify.clone();
         let cover_notify = self.cover_notify.clone();
@@ -147,9 +147,10 @@ impl RoundSynchronizer {
                 });
                 // sleep for the rest of the round
                 sleep(build_window).await;
+                let tunnel_manager = tunnel_manager.clone();
                 tokio::spawn(async move {
                     // shutdown old tunnels
-                    // TODO
+                    tunnel_manager.write().await.round_cleanup().await;
                 });
             }
         });
@@ -223,6 +224,7 @@ impl RoundSynchronizer {
                 if required {
                     match rps_api::rps_get_peer(p2p_interface.config.rps_api_address).await {
                         Ok((target, key)) => {
+                            log::debug!("Build cover tunnel");
                             if let Err(e) =
                                 p2p_interface.inner_build_tunnel(None, target, key).await
                             {
@@ -299,7 +301,7 @@ impl P2pInterface {
         // run the cover tunnel task
         self.round_sync.run_cover_task(self_ref.clone()).await;
         // run the round synchronizer
-        self.round_sync.run().await;
+        self.round_sync.run(self_ref.tunnel_manager.clone()).await;
         // Allow to receive more than expected to detect messages exceeding the fixed size.
         // Otherwise recv_from would silently discards exceeding bytes.
         let mut buf = [0u8; MAX_PACKET_SIZE + 1];

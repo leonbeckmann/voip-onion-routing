@@ -12,8 +12,8 @@ use std::time::Duration;
 use tempdir::TempDir;
 
 use onion_lib::api_protocol::messages::{
-    OnionError, OnionMessageHeader, OnionTunnelBuild, OnionTunnelData, OnionTunnelDestroy,
-    OnionTunnelIncoming, OnionTunnelReady,
+    OnionCover, OnionError, OnionMessageHeader, OnionTunnelBuild, OnionTunnelData,
+    OnionTunnelDestroy, OnionTunnelIncoming, OnionTunnelReady,
 };
 use onion_lib::p2p_protocol::rps_api::{RpsPeer, ONION_PORT, RPS_PEER, RPS_QUERY};
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ const ONION_TUNNEL_INCOMING: u16 = 562; // outgoing to all api connection listen
 const ONION_TUNNEL_DESTROY: u16 = 563; // incoming Destroy a tunnel for this api connection, destroy if no listeners available anymore
 const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tunnel
 const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
-const _ONION_COVER: u16 = 566; // send cover traffic to random peer
+const ONION_COVER: u16 = 566; // send cover traffic to random peer
 
 #[allow(clippy::too_many_arguments)]
 fn run_peer(
@@ -59,7 +59,7 @@ fn run_peer(
         .set("p2p_hostname", "127.0.0.1")
         .set("hop_count", "2")
         .set("api_address", onion_api_addr)
-        .set("round_time", "2")
+        .set("round_time", "5")
         .set("private_hostkey", priv_key_file.to_str().unwrap())
         .set("handshake_timeout", "3000");
     config
@@ -293,8 +293,17 @@ fn integration_test() {
     )
     .unwrap();
 
-    // TEST: destroy non-existent tunnel id
+    // TEST: send cover traffic, should return an error because no cover tunnel is available in the beginning
+    log::info!("TEST: Send cover traffic via cover tunnel");
+    let tunnel_cover = OnionCover::new(300).to_be_vec();
+    write_msg(ONION_COVER, tunnel_cover, &mut alice_api);
+    let (hdr, data) = read_msg(&mut alice_api);
+    assert_eq!(hdr.msg_type, ONION_ERROR);
+    let error = OnionError::try_from(data).unwrap();
+    assert_eq!(error.tunnel_id, 0);
+    assert_eq!(error.request_type, ONION_COVER);
 
+    // TEST: destroy non-existent tunnel id
     log::info!("TEST: Request TunnelDestroy for non-existent tunnel ID");
     let tunnel_destroy = OnionTunnelDestroy::new(20).to_be_vec();
     write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
@@ -305,7 +314,6 @@ fn integration_test() {
     assert_eq!(error.request_type, ONION_TUNNEL_DESTROY);
 
     // TEST: build tunnel to non-existent peer
-
     log::info!("TEST: Request TunnelBuild from Alice to non-existent peer 127.0.0.1:10000");
     let unknown_peer = IpAddr::from_str("127.0.0.1").unwrap();
     let unknown_port = 10000;
@@ -318,7 +326,6 @@ fn integration_test() {
     assert_eq!(error.request_type, ONION_TUNNEL_BUILD);
 
     // TEST: send data via non-existent tunnel
-
     log::info!("TEST: Request TunnelData via non-existent tunnel");
     let tunnel_data = OnionTunnelData::new(20, "hello".as_bytes().to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
@@ -328,13 +335,12 @@ fn integration_test() {
     assert_eq!(error.tunnel_id, 20);
     assert_eq!(error.request_type, ONION_TUNNEL_DATA);
 
-    sleep(Duration::from_secs(1));
-    // TEST: request new tunnel from alice to bob
-
+    // TEST: request new tunnel from alice to bob in next round
     log::info!("TEST: Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
     let bob_hostname = IpAddr::from_str("127.0.0.1").unwrap();
     let bob_port = 3001;
-    let tunnel_build = OnionTunnelBuild::new(bob_hostname, bob_port, bob_host_key_der).to_be_vec();
+    let tunnel_build =
+        OnionTunnelBuild::new(bob_hostname, bob_port, bob_host_key_der.clone()).to_be_vec();
     write_msg(ONION_TUNNEL_BUILD, tunnel_build, &mut alice_api);
 
     // expect TunnelReady response
@@ -358,7 +364,6 @@ fn integration_test() {
     );
 
     // TEST: send data from Alice to Bob
-
     log::info!("TEST: Request TunnelData='PING' from Alice to Bob");
     let message_ping = "PING".as_bytes();
     let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, message_ping.to_vec()).to_be_vec();
@@ -373,7 +378,6 @@ fn integration_test() {
     log::info!("TEST: Bob has received PING");
 
     // TEST: send data from Bob to Alice
-
     log::info!("TEST: Request TunnelData='PONG' from Bob to Alice");
     let message_pong = "PONG".as_bytes();
     let tunnel_data =
@@ -389,7 +393,7 @@ fn integration_test() {
     log::info!("TEST: Alice has received PONG");
 
     // wait for new round to test tunnel update
-    sleep(Duration::from_millis(2500));
+    sleep(Duration::from_millis(5000));
 
     // send fragmented data from Alice to Bob
     log::info!("TEST: Request fragmented TunnelData from Alice to Bob");
@@ -410,7 +414,7 @@ fn integration_test() {
     log::info!("TEST: Bob has received fragmented data");
 
     // wait for another round to test multiple tunnel updates
-    sleep(Duration::from_millis(2500));
+    sleep(Duration::from_millis(5000));
 
     // send fragmented data from Bob to Alice
     log::info!("TEST: Request fragmented TunnelData from Bob to Alice");
@@ -431,7 +435,6 @@ fn integration_test() {
     log::info!("TEST: Alice has received fragmented data");
 
     // TEST: destroy the connection via alice
-
     log::info!("TEST: Request TunnelDestroy from Alice");
     let tunnel_destroy = OnionTunnelDestroy::new(alice_to_bob_tunnel).to_be_vec();
     write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
@@ -459,5 +462,27 @@ fn integration_test() {
     assert_eq!(error.tunnel_id, bob_from_alice_tunnel);
     assert_eq!(error.request_type, ONION_TUNNEL_DATA);
 
-    // TODO test inactive after timeout
+    // wait for another round with no new tunnel
+    sleep(Duration::from_millis(5000));
+    log::info!("TEST: Send cover traffic via cover tunnel");
+    let tunnel_cover = OnionCover::new(300).to_be_vec();
+    write_msg(ONION_COVER, tunnel_cover, &mut alice_api);
+
+    // TEST: request multiple connections and expect error while one connection is established
+    log::info!("TEST: Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
+    let bob_hostname = IpAddr::from_str("127.0.0.1").unwrap();
+    let bob_port = 3001;
+    let tunnel_build =
+        OnionTunnelBuild::new(bob_hostname, bob_port, bob_host_key_der.clone()).to_be_vec();
+    let tunnel_build2 = OnionTunnelBuild::new(bob_hostname, bob_port, bob_host_key_der).to_be_vec();
+    write_msg(ONION_TUNNEL_BUILD, tunnel_build, &mut alice_api);
+    write_msg(ONION_TUNNEL_BUILD, tunnel_build2, &mut alice_api);
+
+    // expect TunnelReady response and error response
+    let (hdr1, _) = read_msg(&mut alice_api);
+    let (hdr2, _) = read_msg(&mut alice_api);
+    assert!(
+        hdr1.msg_type == ONION_TUNNEL_READY && hdr2.msg_type == ONION_ERROR
+            || hdr2.msg_type == ONION_TUNNEL_READY && hdr1.msg_type == ONION_ERROR
+    )
 }
