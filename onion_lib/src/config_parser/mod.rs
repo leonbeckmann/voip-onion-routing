@@ -120,9 +120,7 @@ impl OnionConfiguration {
 
         // parse hop_count
         let hop_count = match onion_sec.get("hop_count") {
-            None => {
-                return Err(ParsingError::from_str("Missing component: 'hop_count'"));
-            }
+            None => 2, // default
             Some(count) => match count.parse::<u8>() {
                 Ok(count) => {
                     // must be at least two
@@ -205,7 +203,7 @@ impl OnionConfiguration {
 
         // round time (seconds)
         let round_time = match onion_sec.get("round_time") {
-            None => Duration::from_secs(60), // default
+            None => Duration::from_secs(600), // default
             Some(duration) => match duration.parse::<u64>() {
                 Ok(duration) => Duration::from_secs(duration),
                 Err(_) => return Err(ParsingError::from_str("Cannot parse 'round_time' to u64")),
@@ -355,7 +353,6 @@ mod tests {
         let config_missing_hostkey = dir.path().join("missing-hostkey.config");
         let config_der_hostkey = dir.path().join("der-hostkey.config");
         let config_invalid_hostkey_path = dir.path().join("invalid_hostkey.config");
-        let config_missing_hop_count = dir.path().join("missing_hops.config");
         let config_invalid_hop_count = dir.path().join("invalid_hops.config");
         let config_missing_onion_api_address = dir.path().join("missing_o_api_address.config");
         let config_missing_rps_api_address = dir.path().join("missing_r_api_address.config");
@@ -509,21 +506,6 @@ mod tests {
             Some("100"),
             Some("2000"),
             &config_invalid_hostkey_path,
-        );
-
-        create_config_file(
-            true,
-            true,
-            Some("1234"),
-            Some("localhost"),
-            None,
-            Some("localhost:1234"),
-            Some("localhost:1235"),
-            Some(host_key_file.to_str().unwrap()),
-            Some(host_key_priv_file.to_str().unwrap()),
-            Some("100"),
-            Some("2000"),
-            &config_missing_hop_count,
         );
 
         create_config_file(
@@ -726,7 +708,6 @@ mod tests {
         assert!(OnionConfiguration::parse_from_file(config_invalid_hostkey_path).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_hostkey).is_err());
         assert!(OnionConfiguration::parse_from_file(config_der_hostkey).is_err());
-        assert!(OnionConfiguration::parse_from_file(config_missing_hop_count).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_hop_count).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_onion_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_rps_api_address).is_err());

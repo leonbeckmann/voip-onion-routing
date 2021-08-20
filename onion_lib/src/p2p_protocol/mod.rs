@@ -12,12 +12,13 @@ use crate::p2p_protocol::onion_tunnel::{
     OnionTunnel, TunnelResult, TunnelStatus, TunnelType, UpdateInformation,
 };
 use protobuf::Message;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::net::UdpSocket;
-use tokio::sync::{oneshot, Notify, RwLock};
+use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::sleep;
 
 // hard coded packet size should not be configurable and equal for all modules
@@ -28,6 +29,7 @@ const CLIENT_HELLO_FORWARD_ID: FrameId = 1;
 pub type TunnelId = u32;
 type FrameId = u64;
 pub type ConnectionId = u64;
+type Registration = Arc<(Mutex<NotifyState>, Notify)>;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Direction {
@@ -35,34 +37,222 @@ pub enum Direction {
     Backward,
 }
 
+#[derive(PartialEq)]
+enum NotifyState {
+    Inactive,
+    Processing,
+    Processed,
+    Permitted,
+    Cancelled,
+}
+
 struct RoundSynchronizer {
-    notify: Arc<Notify>,
+    update_notify: Arc<(Mutex<NotifyState>, Notify, Notify)>,
+    new_notify: Arc<Mutex<VecDeque<Registration>>>,
+    cover_notify: Arc<(Mutex<NotifyState>, Notify, Notify)>,
     round_time: Duration,
+    registration_window: Duration,
+    tunnel_registration_counter: Arc<Mutex<u8>>,
+    round_cover_tunnel: Arc<Mutex<Option<TunnelId>>>,
 }
 
 impl RoundSynchronizer {
     fn new(round_time: Duration) -> RoundSynchronizer {
         RoundSynchronizer {
-            notify: Arc::new(Notify::new()),
+            update_notify: Arc::new((
+                Mutex::new(NotifyState::Inactive),
+                Notify::new(),
+                Notify::new(),
+            )),
+            new_notify: Arc::new(Mutex::new(VecDeque::new())),
+            cover_notify: Arc::new((
+                Mutex::new(NotifyState::Inactive),
+                Notify::new(),
+                Notify::new(),
+            )),
             round_time,
+            registration_window: round_time.saturating_sub(Duration::from_secs(3)),
+            tunnel_registration_counter: Arc::new(Mutex::new(0)),
+            round_cover_tunnel: Arc::new(Mutex::new(None)),
         }
     }
 
+    async fn process_tunnels(notify: Arc<(Mutex<NotifyState>, Notify, Notify)>) {
+        let (lock, notifier_a, notifier_b) = &*notify;
+        let mut status = lock.lock().await;
+        *status = NotifyState::Processing;
+        notifier_a.notify_one();
+
+        // wait for result
+        while *status != NotifyState::Processed {
+            drop(status);
+            notifier_b.notified().await;
+            status = lock.lock().await;
+        }
+        *status = NotifyState::Inactive;
+        drop(status);
+    }
+
     async fn run(&self) {
-        let notify = self.notify.clone();
+        let update_notify = self.update_notify.clone();
+        let new_notify = self.new_notify.clone();
+        let cover_notify = self.cover_notify.clone();
         let round_time = self.round_time;
+        let registration_window = self.registration_window;
+        let build_window = round_time.saturating_sub(registration_window);
+        let registration_counter = self.tunnel_registration_counter.clone();
         tokio::spawn(async move {
             loop {
                 log::debug!("New round has started. Duration={:?}", round_time);
-                sleep(round_time).await;
-                notify.notify_waiters();
+                // sleep until registration_window is closed
+                sleep(registration_window).await;
+                let update_notify = update_notify.clone();
+                let new_notify = new_notify.clone();
+                let cover_notify = cover_notify.clone();
+                let registration_counter = registration_counter.clone();
+                tokio::spawn(async move {
+                    // first rebuild existent tunnels preprocessing
+                    log::trace!("Process tunnel updates for new round");
+                    RoundSynchronizer::process_tunnels(update_notify).await;
+
+                    // secondly new tunnels
+                    let mut registrations = new_notify.lock().await;
+                    log::trace!(
+                        "Process {:?} new tunnel requests for new round",
+                        registrations.len()
+                    );
+                    let mut registration_counter2 = registration_counter.lock().await;
+                    while !registrations.is_empty() {
+                        let entry = registrations.pop_front().unwrap();
+                        let (lock, notifier) = &*entry;
+                        let mut status = lock.lock().await;
+                        // currently only allow one registration
+                        if *registration_counter2 < 1 {
+                            *status = NotifyState::Permitted;
+                            *registration_counter2 += 1;
+                        } else {
+                            *status = NotifyState::Cancelled;
+                        }
+                        notifier.notify_one();
+                    }
+                    assert!(registrations.is_empty());
+                    drop(registration_counter2);
+                    drop(registrations);
+
+                    // build cover tunnel
+                    log::trace!("Process cover tunnels for new round");
+                    RoundSynchronizer::process_tunnels(cover_notify).await;
+                    // clear registration_counter again for next registration window
+                    *(registration_counter.lock().await) = 0;
+                });
+                // sleep for the rest of the round
+                sleep(build_window).await;
+                tokio::spawn(async move {
+                    // shutdown old tunnels
+                    // TODO
+                });
             }
         });
     }
 
-    async fn wait(&self) {
-        let notify = self.notify.clone();
-        notify.notified().await;
+    async fn run_update_task(&self, p2p_interface: Arc<P2pInterface>) {
+        let notify = self.update_notify.clone();
+        let registration_counter = self.tunnel_registration_counter.clone();
+        tokio::spawn(async move {
+            loop {
+                // wait for round change
+                let (lock, notifier_a, notifier_b) = &*notify;
+                let mut status = lock.lock().await;
+                while *status != NotifyState::Processing {
+                    drop(status);
+                    notifier_a.notified().await;
+                    status = lock.lock().await;
+                }
+
+                // get connected initiator tunnels and register them all
+                let ids = p2p_interface
+                    .tunnel_manager
+                    .read()
+                    .await
+                    .get_connected_initiator_tunnel_ids();
+                assert!(ids.len() <= 1);
+                let mut registration_counter = registration_counter.lock().await;
+                *registration_counter = ids.len() as u8;
+                drop(registration_counter);
+
+                // update status and notify synchronizer
+                *status = NotifyState::Processed;
+                drop(status);
+                notifier_b.notify_one();
+
+                // update tunnel if available
+                log::debug!("Registration_window is over, update initiator tunnel if available");
+                if let Some(id) = ids.first() {
+                    p2p_interface.update_tunnel(*id).await;
+                }
+            }
+        });
+    }
+
+    async fn run_cover_task(&self, _p2p_interface: Arc<P2pInterface>) {
+        let notify = self.cover_notify.clone();
+        let registration_counter = self.tunnel_registration_counter.clone();
+        let _cover_tunnel_id = self.round_cover_tunnel.clone();
+        tokio::spawn(async move {
+            loop {
+                // wait for round change
+                let (lock, notifier_a, notifier_b) = &*notify;
+                let mut status = lock.lock().await;
+                while *status != NotifyState::Processing {
+                    drop(status);
+                    notifier_a.notified().await;
+                    status = lock.lock().await;
+                }
+
+                // check if cover tunnel is required
+                let registration_counter = registration_counter.lock().await;
+                let required = *registration_counter < 1;
+                drop(registration_counter);
+
+                // update status and notify synchronizer
+                *status = NotifyState::Processed;
+                drop(status);
+                notifier_b.notify_one();
+
+                // build cover tunnel if required
+                if required {
+                    // TODO
+                    // TODO update cover_tunnel_id
+                }
+            }
+        });
+    }
+
+    async fn wait(&self) -> Result<(), P2pError> {
+        // create new waiter
+        let notify = Arc::new((Mutex::new(NotifyState::Processing), Notify::new()));
+        let notify2 = notify.clone();
+
+        // register at synchronizer
+        let (lock, notifier) = &*notify;
+        let mut status = lock.lock().await;
+        let mut guard = self.new_notify.lock().await;
+        guard.push_back(notify2);
+        drop(guard);
+
+        // wait until result
+        while *status == NotifyState::Processing {
+            drop(status);
+            notifier.notified().await;
+            status = lock.lock().await;
+        }
+
+        // return result
+        if *status == NotifyState::Permitted {
+            Ok(())
+        } else {
+            Err(P2pError::OnionModuleEngaged)
+        }
     }
 }
 
@@ -94,26 +284,12 @@ impl P2pInterface {
     }
 
     pub(crate) async fn listen(&self, self_ref: Arc<P2pInterface>) -> Result<(), P2pError> {
+        // run the tunnel update task
+        self.round_sync.run_update_task(self_ref.clone()).await;
+        // run the cover tunnel task
+        self.round_sync.run_cover_task(self_ref.clone()).await;
         // run the round synchronizer
         self.round_sync.run().await;
-        // run the tunnel update task
-        let notify = self.round_sync.notify.clone();
-        tokio::spawn(async move {
-            loop {
-                // wait for round change
-                notify.notified().await;
-                // update old tunnels
-                log::debug!("Round is over, update all initiator tunnels.");
-                let ids = self_ref
-                    .tunnel_manager
-                    .read()
-                    .await
-                    .get_connected_initiator_tunnel_ids();
-                for id in ids {
-                    self_ref.update_tunnel(id).await;
-                }
-            }
-        });
         // Allow to receive more than expected to detect messages exceeding the fixed size.
         // Otherwise recv_from would silently discards exceeding bytes.
         let mut buf = [0u8; MAX_PACKET_SIZE + 1];
@@ -247,7 +423,7 @@ impl P2pInterface {
     ) -> Result<(TunnelId, Vec<u8>), P2pError> {
         // wait for new round
         log::debug!("Received build_tunnel request from connection {:?} to {:?}. Wait for new round,build initiator tunnel and wait for handshake result", listener, target);
-        self.round_sync.wait().await;
+        self.round_sync.wait().await?;
         let (tx, rx) = oneshot::channel::<TunnelResult>();
         let tunnel_id = match OnionTunnel::new_initiator_tunnel(
             listener,
@@ -277,6 +453,7 @@ impl P2pInterface {
             Ok(res) => match res {
                 TunnelResult::Connected => {
                     self.tunnel_manager.write().await.set_connected(&tunnel_id);
+                    *self.round_sync.round_cover_tunnel.lock().await = Some(tunnel_id);
                     log::debug!("Tunnel with ID={:?} established", tunnel_id);
                     Ok((tunnel_id, host_key))
                 }
@@ -350,9 +527,27 @@ impl P2pInterface {
 
     /// Send cover traffic via new random tunnel
     /// API protocol
-    pub(crate) async fn send_cover_traffic(&self, _cover_size: u16) -> Result<(), P2pError> {
-        // TODO implement logic
-        Ok(())
+    pub(crate) async fn send_cover_traffic(&self, cover_size: u16) -> Result<(), P2pError> {
+        match *self.round_sync.round_cover_tunnel.lock().await {
+            None => Err(P2pError::CoverFailure),
+            Some(id) => {
+                let tunnel_manager = self.tunnel_manager.read().await;
+                let redirected_tunnel_id = tunnel_manager.resolve_tunnel_id(id);
+                let tunnel = tunnel_manager.get_tunnel(&redirected_tunnel_id);
+                match tunnel {
+                    Some(tunnel) => {
+                        log::trace!(
+                            "Tunnel={:?} (redirected_tunnel_id={:?}): Send cover traffic",
+                            id,
+                            redirected_tunnel_id
+                        );
+                        let data = (0..cover_size).map(|_| rand::random::<u8>()).collect();
+                        tunnel.send_cover(data).await
+                    }
+                    None => Err(P2pError::CoverFailure),
+                }
+            }
+        }
     }
 
     async fn update_tunnel(&self, tunnel_id: TunnelId) {
@@ -487,4 +682,10 @@ pub enum P2pError {
     HandshakeFailure(ProtocolError),
     #[error("IO Error: {0}")]
     IOError(std::io::Error),
+    #[error("Cannot create onion tunnel since module is already in use by too many callers")]
+    OnionModuleEngaged,
+    #[error("Cannot rebuild the onion tunnel")]
+    TunnelRebuildFailure,
+    #[error("Cannot send cover traffic since no cover tunnel is available")]
+    CoverFailure,
 }
