@@ -59,6 +59,7 @@ message RoutingInformation {
 
   repeated uint64 backward_frame_ids = 5;
   uint64 tunnel_update_reference = 6;
+  bool cover_only = 7;
 }
 
 message ApplicationData {

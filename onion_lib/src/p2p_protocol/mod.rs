@@ -194,7 +194,7 @@ impl RoundSynchronizer {
         });
     }
 
-    async fn run_cover_task(&self, _p2p_interface: Arc<P2pInterface>) {
+    async fn run_cover_task(&self, p2p_interface: Arc<P2pInterface>) {
         let notify = self.cover_notify.clone();
         let registration_counter = self.tunnel_registration_counter.clone();
         let _cover_tunnel_id = self.round_cover_tunnel.clone();
@@ -221,8 +221,18 @@ impl RoundSynchronizer {
 
                 // build cover tunnel if required
                 if required {
-                    // TODO
-                    // TODO update cover_tunnel_id
+                    match rps_api::rps_get_peer(p2p_interface.config.rps_api_address).await {
+                        Ok((target, key)) => {
+                            if let Err(e) =
+                                p2p_interface.inner_build_tunnel(None, target, key).await
+                            {
+                                log::warn!("Cannot build cover tunnel: {:?}", e);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Cannot request random target peer from rps: {:?}", e);
+                        }
+                    }
                 }
             }
         });
@@ -424,52 +434,8 @@ impl P2pInterface {
         // wait for new round
         log::debug!("Received build_tunnel request from connection {:?} to {:?}. Wait for new round,build initiator tunnel and wait for handshake result", listener, target);
         self.round_sync.wait().await?;
-        let (tx, rx) = oneshot::channel::<TunnelResult>();
-        let tunnel_id = match OnionTunnel::new_initiator_tunnel(
-            listener,
-            self.frame_id_manager.clone(),
-            self.socket.clone(),
-            target,
-            host_key.clone(),
-            self.tunnel_manager.clone(),
-            self.config.hop_count,
-            self.config.rps_api_address,
-            tx,
-            self.api_interface.clone(),
-            self.config.crypto_config.clone(),
-            self.config.handshake_message_timeout,
-            self.config.timeout,
-            None,
-            UpdateInformation::new(listener, (target, host_key.clone())),
-        )
-        .await
-        {
-            Ok(id) => id,
-            Err(e) => return Err(P2pError::HandshakeFailure(e)),
-        };
-
-        // wait until connected or failure
-        match rx.await {
-            Ok(res) => match res {
-                TunnelResult::Connected => {
-                    self.tunnel_manager.write().await.set_connected(&tunnel_id);
-                    *self.round_sync.round_cover_tunnel.lock().await = Some(tunnel_id);
-                    log::debug!("Tunnel with ID={:?} established", tunnel_id);
-                    Ok((tunnel_id, host_key))
-                }
-                TunnelResult::Failure(e) => {
-                    log::warn!("Request build_tunnel failed: Handshake failure {:?}", e);
-                    Err(P2pError::HandshakeFailure(e))
-                }
-            },
-            Err(_) => {
-                log::warn!(
-                    "Request build_tunnel failed: Tunnel (ID={:?}) has closed",
-                    tunnel_id
-                );
-                Err(P2pError::TunnelClosed)
-            }
-        }
+        self.inner_build_tunnel(Some(listener), target, host_key)
+            .await
     }
 
     /*
@@ -550,6 +516,65 @@ impl P2pInterface {
         }
     }
 
+    async fn inner_build_tunnel(
+        &self,
+        listener: Option<ConnectionId>,
+        target: SocketAddr,
+        host_key: Vec<u8>,
+    ) -> Result<(TunnelId, Vec<u8>), P2pError> {
+        let (tx, rx) = oneshot::channel::<TunnelResult>();
+        let update_info = listener
+            .map(|listener_id| UpdateInformation::new(listener_id, (target, host_key.clone())));
+        let tunnel_id = match OnionTunnel::new_initiator_tunnel(
+            listener,
+            self.frame_id_manager.clone(),
+            self.socket.clone(),
+            target,
+            host_key.clone(),
+            self.tunnel_manager.clone(),
+            self.config.hop_count,
+            self.config.rps_api_address,
+            tx,
+            self.api_interface.clone(),
+            self.config.crypto_config.clone(),
+            self.config.handshake_message_timeout,
+            self.config.timeout,
+            None,
+            update_info,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => return Err(P2pError::HandshakeFailure(e)),
+        };
+
+        // wait until connected or failure
+        match rx.await {
+            Ok(res) => match res {
+                TunnelResult::Connected => {
+                    self.tunnel_manager
+                        .write()
+                        .await
+                        .set_connected(&tunnel_id, listener.is_none());
+                    *self.round_sync.round_cover_tunnel.lock().await = Some(tunnel_id);
+                    log::debug!("Tunnel with ID={:?} established", tunnel_id);
+                    Ok((tunnel_id, host_key))
+                }
+                TunnelResult::Failure(e) => {
+                    log::warn!("Building tunnel failed: Handshake failure {:?}", e);
+                    Err(P2pError::HandshakeFailure(e))
+                }
+            },
+            Err(_) => {
+                log::warn!(
+                    "Building tunnel failed: Tunnel (ID={:?}) has closed",
+                    tunnel_id
+                );
+                Err(P2pError::TunnelClosed)
+            }
+        }
+    }
+
     async fn update_tunnel(&self, tunnel_id: TunnelId) {
         log::debug!("Tunnel={:?}: Start updating", tunnel_id);
         // get tunnel update reference
@@ -588,8 +613,8 @@ impl P2pInterface {
                     TunnelType::Initiator(update_info) => {
                         UpdateInformation::new(update_info.listener, update_info.target.clone())
                     }
-                    TunnelType::Target => {
-                        log::warn!("Tunnel={:?}: Cannot update target tunnel.", tunnel_id);
+                    _ => {
+                        log::warn!("Tunnel={:?}: Cannot update target/cover tunnel.", tunnel_id);
                         return;
                     }
                 },
@@ -600,6 +625,10 @@ impl P2pInterface {
                     );
                     return;
                 }
+                TunnelStatus::Downgraded => {
+                    log::warn!("Tunnel={:?}: Cannot update downgraded tunnel.", tunnel_id);
+                    return;
+                }
             },
         };
 
@@ -607,7 +636,7 @@ impl P2pInterface {
         log::trace!("Tunnel={:?}: Start creating new tunnel", tunnel_id);
         let (tx, rx) = oneshot::channel::<TunnelResult>();
         let new_tunnel_id = match OnionTunnel::new_initiator_tunnel(
-            update_info.listener,
+            Some(update_info.listener),
             self.frame_id_manager.clone(),
             self.socket.clone(),
             update_info.target.0,
@@ -621,7 +650,7 @@ impl P2pInterface {
             self.config.handshake_message_timeout,
             self.config.timeout,
             Some(frame_id),
-            update_info,
+            Some(update_info),
         )
         .await
         {
@@ -637,7 +666,7 @@ impl P2pInterface {
             Ok(res) => match res {
                 TunnelResult::Connected => {
                     let mut tunnel_manager_guard = self.tunnel_manager.write().await;
-                    tunnel_manager_guard.set_connected(&new_tunnel_id);
+                    tunnel_manager_guard.set_connected(&new_tunnel_id, false);
                     log::debug!(
                         "Tunnel={:?}: New tunnel with ID={:?} established",
                         tunnel_id,
@@ -688,4 +717,6 @@ pub enum P2pError {
     TunnelRebuildFailure,
     #[error("Cannot send cover traffic since no cover tunnel is available")]
     CoverFailure,
+    #[error("Action not supported for cover-only tunnel")]
+    CoverOnlyTunnel,
 }

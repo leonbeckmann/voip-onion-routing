@@ -37,6 +37,7 @@ pub(super) struct InitiatorStateMachine {
     handshake_timeout: Duration,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_update_ref: Option<FrameId>,
+    cover_only: bool,
 }
 
 impl InitiatorStateMachine {
@@ -53,6 +54,7 @@ impl InitiatorStateMachine {
         local_crypto_config: Arc<HandshakeCryptoConfig>,
         handshake_timeout: Duration,
         tunnel_update_ref: Option<FrameId>,
+        cover_only: bool,
     ) -> Self {
         assert!(!hops.is_empty());
         let (next_hop, _) = hops.first().unwrap();
@@ -73,6 +75,7 @@ impl InitiatorStateMachine {
             handshake_timeout,
             frame_id_manager,
             tunnel_update_ref,
+            cover_only,
         }
     }
 }
@@ -305,7 +308,7 @@ pub(super) trait FiniteStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>,
+        res: Result<(IsTargetEndpoint, IsCoverOnly, Option<FrameId>), ProtocolError>,
     ) -> Result<State, ProtocolError>;
 
     const INIT_STATE: State = State::Closed;
@@ -497,6 +500,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
         } else {
             0
         };
+        let cover_only = self.cover_only;
 
         // create bw frame ids for the initiator codec
         let bf_ids =
@@ -570,6 +574,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
                     fsm_lock.clone(),
                     cc.clone(),
                     frame_id_manager.clone(),
+                    cover_only,
                 );
 
                 // create a channel for hooking the handshake results
@@ -651,7 +656,9 @@ impl FiniteStateMachine for InitiatorStateMachine {
                                         if target {
                                             log::debug!("Tunnel={:?}: Received handshake_result=ok for the target hop", tunnel_id);
                                             let _ = final_result_tx
-                                                .send(FsmEvent::HandshakeResult(Ok((true, None))))
+                                                .send(FsmEvent::HandshakeResult(Ok((
+                                                    true, false, None,
+                                                ))))
                                                 .await;
                                             return;
                                         } else {
@@ -711,7 +718,7 @@ impl FiniteStateMachine for InitiatorStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>,
+        res: Result<(IsTargetEndpoint, IsCoverOnly, Option<FrameId>), ProtocolError>,
     ) -> Result<State, ProtocolError> {
         let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
         let res = match res {
@@ -760,6 +767,7 @@ impl FiniteStateMachine for TargetStateMachine {
             self.fsm_lock.clone(),
             self.local_crypto_config.clone(),
             self.frame_id_manager.clone(),
+            false,
         );
 
         // create a channel for communicating with the handshake protocol
@@ -779,16 +787,21 @@ impl FiniteStateMachine for TargetStateMachine {
 
     async fn action_handshake_result(
         &mut self,
-        res: Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>,
+        res: Result<(IsTargetEndpoint, IsCoverOnly, Option<FrameId>), ProtocolError>,
     ) -> Result<State, ProtocolError> {
         let res = match res {
-            Ok((is_target_endpoint, tunnel_update_ref)) => {
+            Ok((is_target_endpoint, is_cover_only, tunnel_update_ref)) => {
                 log::debug!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 if is_target_endpoint {
                     if let Some(tunnel_update_ref) = tunnel_update_ref {
                         let _ = self
                             .listener_tx
                             .send(IncomingEventMessage::TunnelUpdate(tunnel_update_ref))
+                            .await;
+                    } else if is_cover_only {
+                        let _ = self
+                            .listener_tx
+                            .send(IncomingEventMessage::CoverTunnelCompletion)
                             .await;
                     } else {
                         let _ = self
@@ -878,14 +891,15 @@ pub(super) enum State {
 }
 
 type IsTargetEndpoint = bool;
+type IsCoverOnly = bool;
 
 #[derive(Debug)]
 pub enum FsmEvent {
-    Init,                                                                        // Start the FSM
-    Close,                                                                       // Close the Tunnel
-    Shutdown,       // Shutdown without sending close to other endpoint
-    Send(Vec<u8>),  // Send Data via the Tunnel
-    Cover(Vec<u8>), // Send cover traffic via Tunnel
+    Init,                                  // Start the FSM
+    Close,                                 // Close the Tunnel
+    Shutdown,                              // Shutdown without sending close to other endpoint
+    Send(Vec<u8>),                         // Send Data via the Tunnel
+    Cover(Vec<u8>),                        // Send cover traffic via Tunnel
     IncomingFrame((Bytes, Direction, IV)), // Received data frame
-    HandshakeResult(Result<(IsTargetEndpoint, Option<FrameId>), ProtocolError>), // HandshakeResult from handshake fsm
+    HandshakeResult(Result<(IsTargetEndpoint, IsCoverOnly, Option<FrameId>), ProtocolError>), // HandshakeResult from handshake fsm
 }

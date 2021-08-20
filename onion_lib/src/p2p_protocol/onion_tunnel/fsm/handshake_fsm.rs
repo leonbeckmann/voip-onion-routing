@@ -80,6 +80,7 @@ pub struct HandshakeStateMachine<PT> {
     fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
     crypto_context: HandshakeCryptoContext,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
+    cover_only: bool,
 }
 
 impl<PT: PeerType> HandshakeStateMachine<PT> {
@@ -93,6 +94,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         fsm_lock: Arc<(Mutex<FsmLockState>, Notify)>,
         crypto_config: Arc<HandshakeCryptoConfig>,
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
+        cover_only: bool,
     ) -> Self {
         Self {
             context,
@@ -103,6 +105,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             fsm_lock,
             crypto_context: HandshakeCryptoContext::new(crypto_config),
             frame_id_manager,
+            cover_only,
         }
     }
 
@@ -210,6 +213,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     pub async fn action_recv_server_hello(
         &mut self,
         data: ServerHello,
+        cover_only: bool,
     ) -> Result<(), ProtocolError> {
         log::debug!(
             "Tunnel={:?}: Process incoming ServerHello=({:?})",
@@ -292,6 +296,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         match self.next_hop {
             None => {
                 data.set_is_endpoint(true);
+                data.set_cover_only(cover_only);
                 data.set_tunnel_update_reference(self.context.tunnel_update_reference());
 
                 // Sign the challenge for the target peer
@@ -326,7 +331,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
     pub async fn action_recv_routing(
         &mut self,
         routing: RoutingInformation,
-    ) -> Result<(IsTargetEndpoint, FrameId), ProtocolError> {
+    ) -> Result<(IsTargetEndpoint, bool, FrameId), ProtocolError> {
         // get target endpoint
         log::debug!(
             "Tunnel={:?}: Process incoming RoutingInformation=({:?})",
@@ -379,7 +384,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             }
 
             target_endpoint.lock_as_target_endpoint().await;
-            Ok((true, routing.tunnel_update_reference))
+            Ok((true, routing.cover_only, routing.tunnel_update_reference))
         } else {
             // parse socket addr
             let addr = match u16::try_from(routing.next_hop_port) {
@@ -416,7 +421,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             let new_codec = Box::new(IntermediateHopCodec::from(target_endpoint, addr));
             *codec_guard = new_codec;
 
-            Ok((false, 0))
+            Ok((false, false, 0))
         }
     }
 
@@ -497,14 +502,14 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
                 HandshakeState::WaitForServerHello => match event {
                     HandshakeEvent::ServerHello(data) => {
-                        match self.action_recv_server_hello(data).await {
+                        match self.action_recv_server_hello(data, self.cover_only).await {
                             Ok(_) => {
                                 log::trace!(
                                     "Tunnel={:?}: Send handshake_result=ok",
                                     self.tunnel_id
                                 );
                                 let _ = event_tx
-                                    .send(FsmEvent::HandshakeResult(Ok((false, None))))
+                                    .send(FsmEvent::HandshakeResult(Ok((false, false, None))))
                                     .await;
                                 return;
                             }
@@ -524,7 +529,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 HandshakeState::WaitForRoutingInformation => match event {
                     HandshakeEvent::RoutingInformation(data) => {
                         match self.action_recv_routing(data).await {
-                            Ok((is_target_endpoint, tunnel_update_ref)) => {
+                            Ok((is_target_endpoint, is_cover_only, tunnel_update_ref)) => {
                                 log::trace!(
                                     "Tunnel={:?}: Send handshake_result=ok",
                                     self.tunnel_id
@@ -537,6 +542,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                                 let _ = event_tx
                                     .send(FsmEvent::HandshakeResult(Ok((
                                         is_target_endpoint,
+                                        is_cover_only,
                                         tunnel_update_ref,
                                     ))))
                                     .await;

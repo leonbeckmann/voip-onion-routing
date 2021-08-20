@@ -48,12 +48,14 @@ pub enum FsmLockState {
  */
 enum IncomingEventMessage {
     TunnelCompletion,
+    CoverTunnelCompletion,
     TunnelUpdate(FrameId),
     Data(Vec<u8>),
 }
 
 pub(crate) type Peer = (SocketAddr, Vec<u8>);
 
+#[derive(PartialEq)]
 pub(crate) struct UpdateInformation {
     pub listener: ConnectionId,
     pub target: Peer,
@@ -65,14 +67,17 @@ impl UpdateInformation {
     }
 }
 
+#[derive(PartialEq)]
 pub(crate) enum TunnelType {
     Initiator(UpdateInformation),
     Target,
+    CoverOnly,
 }
 
 pub(crate) enum TunnelStatus {
     Connected,
     Connecting,
+    Downgraded,
 }
 
 pub(crate) struct OnionTunnel {
@@ -86,17 +91,11 @@ pub(crate) struct OnionTunnel {
 
 impl OnionTunnel {
     pub fn is_connected(&self) -> bool {
-        match self.status {
-            TunnelStatus::Connected => true,
-            TunnelStatus::Connecting => false,
-        }
+        matches!(self.status, TunnelStatus::Connected)
     }
 
     pub fn is_initiator(&self) -> bool {
-        match self.tunnel_type {
-            TunnelType::Initiator(_) => true,
-            TunnelType::Target => false,
-        }
+        matches!(self.tunnel_type, TunnelType::Initiator(_))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -159,10 +158,13 @@ impl OnionTunnel {
                             match m {
                                 IncomingEventMessage::TunnelCompletion => {
                                     log::debug!(
-                                        "Tunnel={:?}: Received IncomingTunnelCompletion, delegate to API",
+                                        "Tunnel={:?}: Received TunnelCompletion, delegate to API",
                                         tunnel_id
                                     );
-                                    tunnel_manager.write().await.set_connected(&tunnel_id);
+                                    tunnel_manager
+                                        .write()
+                                        .await
+                                        .set_connected(&tunnel_id, false);
 
                                     // get listeners
                                     let connections = iface.connections.lock().await;
@@ -199,9 +201,18 @@ impl OnionTunnel {
 
                                     iface.incoming_tunnel(tunnel_id, listeners.clone()).await;
                                 }
-
+                                IncomingEventMessage::CoverTunnelCompletion => {
+                                    log::debug!(
+                                        "Tunnel={:?}: Received CoverTunnelCompletion",
+                                        tunnel_id
+                                    );
+                                    tunnel_manager.write().await.set_connected(&tunnel_id, true);
+                                }
                                 IncomingEventMessage::TunnelUpdate(tunnel_update_ref) => {
-                                    tunnel_manager.write().await.set_connected(&tunnel_id);
+                                    tunnel_manager
+                                        .write()
+                                        .await
+                                        .set_connected(&tunnel_id, false);
                                     // this target tunnel is an update for an old one
 
                                     // redirect tunnel id
@@ -361,7 +372,7 @@ impl OnionTunnel {
      */
     #[allow(clippy::too_many_arguments)]
     pub async fn new_initiator_tunnel(
-        listener: ConnectionId,
+        listener: Option<ConnectionId>,
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
         socket: Arc<UdpSocket>,
         target: SocketAddr,
@@ -375,7 +386,7 @@ impl OnionTunnel {
         handshake_timeout: Duration,
         timeout: Duration,
         tunnel_update_ref: Option<FrameId>,
-        update_information: UpdateInformation,
+        update_information: Option<UpdateInformation>,
     ) -> Result<TunnelId, ProtocolError> {
         // select intermediate hops via rps module and hop count
         // TODO robustness isAlive checks during tunnel establishment, maybe add some more backup peers
@@ -423,6 +434,7 @@ impl OnionTunnel {
             local_crypto_context,
             handshake_timeout,
             tunnel_update_ref,
+            listener.is_none(),
         );
 
         // run the fsm
@@ -431,11 +443,20 @@ impl OnionTunnel {
         });
 
         // create the tunnel
-        let listeners = Arc::new(Mutex::new(
+        let listeners = if let Some(listener) = listener {
             vec![listener]
-                .into_iter()
-                .collect::<HashSet<ConnectionId>>(),
+        } else {
+            vec![]
+        };
+        let listeners = Arc::new(Mutex::new(
+            listeners.into_iter().collect::<HashSet<ConnectionId>>(),
         ));
+
+        let tunnel_type = if let Some(update_info) = update_information {
+            TunnelType::Initiator(update_info)
+        } else {
+            TunnelType::CoverOnly
+        };
 
         Self::new_tunnel(
             frame_id_manager,
@@ -447,7 +468,7 @@ impl OnionTunnel {
             mgmt_rx,
             api_interface,
             fsm_lock,
-            TunnelType::Initiator(update_information),
+            tunnel_type,
         )
         .await;
         Ok(tunnel_id)
@@ -513,7 +534,11 @@ impl OnionTunnel {
     }
 
     pub(crate) async fn send(&self, data: Vec<u8>) -> Result<(), P2pError> {
-        self.forward_event(FsmEvent::Send(data)).await
+        if self.is_connected() {
+            self.forward_event(FsmEvent::Send(data)).await
+        } else {
+            Err(P2pError::CoverOnlyTunnel)
+        }
     }
 
     pub(crate) async fn send_cover(&self, data: Vec<u8>) -> Result<(), P2pError> {
@@ -551,22 +576,24 @@ impl OnionTunnel {
     }
 
     pub async fn unsubscribe(&self, connection_id: u64) {
-        let available_guard = self.listeners_available.lock().await;
-        if *available_guard {
-            let mut connections = self.listeners.lock().await;
-            log::trace!(
-                "Tunnel={:?}: Remove connection={:?}",
-                self.tunnel_id,
-                connection_id
-            );
-            let _ = connections.remove(&connection_id);
-            if connections.is_empty() {
-                // no more listeners exist, terminate tunnel
-                log::debug!(
-                    "Tunnel={:?}: No more listeners exist. Close the tunnel",
-                    self.tunnel_id
+        if self.tunnel_type != TunnelType::CoverOnly {
+            let available_guard = self.listeners_available.lock().await;
+            if *available_guard {
+                let mut connections = self.listeners.lock().await;
+                log::trace!(
+                    "Tunnel={:?}: Remove connection={:?}",
+                    self.tunnel_id,
+                    connection_id
                 );
-                self.close_tunnel().await;
+                let _ = connections.remove(&connection_id);
+                if connections.is_empty() {
+                    // no more listeners exist, terminate tunnel
+                    log::debug!(
+                        "Tunnel={:?}: No more listeners exist. Close the tunnel",
+                        self.tunnel_id
+                    );
+                    self.close_tunnel().await;
+                }
             }
         }
     }

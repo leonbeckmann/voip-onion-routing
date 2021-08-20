@@ -38,13 +38,17 @@ impl TunnelManager {
         self.tunnel_registry.get(tunnel_id)
     }
 
-    pub(crate) fn set_connected(&mut self, tunnel_id: &TunnelId) {
+    pub(crate) fn set_connected(&mut self, tunnel_id: &TunnelId, cover_only: bool) {
         if let Some(tunnel) = self.tunnel_registry.get_mut(tunnel_id) {
             log::trace!(
                 "Tunnel Manager: Mark tunnel with id={:?} as connected",
                 tunnel_id
             );
-            tunnel.status = TunnelStatus::Connected;
+            tunnel.status = if cover_only {
+                TunnelStatus::Downgraded
+            } else {
+                TunnelStatus::Connected
+            };
         }
     }
 
