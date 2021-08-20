@@ -688,6 +688,7 @@ impl P2pInterface {
                             }
                         }
                         Some(tunnel) => {
+                            // FIXME this should be done at the end of the round
                             tunnel.shutdown_tunnel().await;
                         }
                     }

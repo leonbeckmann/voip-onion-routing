@@ -288,6 +288,36 @@ fn integration_test() {
         SocketAddr::from_str("127.0.0.1:2003").unwrap(),
         4001,
         5001,
+        hop1_host_key_der.clone(),
+        hop2_host_key_der.clone(),
+    )
+    .unwrap();
+
+    // run rps api
+    run_rps_api(
+        SocketAddr::from_str("127.0.0.1:3003").unwrap(),
+        4001,
+        5001,
+        hop1_host_key_der.clone(),
+        hop2_host_key_der.clone(),
+    )
+    .unwrap();
+
+    // run rps api
+    run_rps_api(
+        SocketAddr::from_str("127.0.0.1:4003").unwrap(),
+        4001,
+        5001,
+        hop1_host_key_der.clone(),
+        hop2_host_key_der.clone(),
+    )
+    .unwrap();
+
+    // run rps api
+    run_rps_api(
+        SocketAddr::from_str("127.0.0.1:5003").unwrap(),
+        4001,
+        5001,
         hop1_host_key_der,
         hop2_host_key_der,
     )
@@ -393,10 +423,11 @@ fn integration_test() {
     log::info!("TEST: Alice has received PONG");
 
     // wait for new round to test tunnel update
+    log::info!("TEST: Wait for next round to check tunnel update");
     sleep(Duration::from_millis(5000));
 
     // send fragmented data from Alice to Bob
-    log::info!("TEST: Request fragmented TunnelData from Alice to Bob");
+    log::info!("TEST: Send fragmented TunnelData from Alice to Bob via updated tunnel");
     let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
     let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, message.to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
@@ -414,10 +445,11 @@ fn integration_test() {
     log::info!("TEST: Bob has received fragmented data");
 
     // wait for another round to test multiple tunnel updates
+    log::info!("TEST: Wait for another round to check multiple tunnel updates");
     sleep(Duration::from_millis(5000));
 
     // send fragmented data from Bob to Alice
-    log::info!("TEST: Request fragmented TunnelData from Bob to Alice");
+    log::info!("TEST: Send fragmented TunnelData from Bob to Alice");
     let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
     let tunnel_data = OnionTunnelData::new(bob_from_alice_tunnel, message.to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut bob_api);
@@ -438,7 +470,6 @@ fn integration_test() {
     log::info!("TEST: Request TunnelDestroy from Alice");
     let tunnel_destroy = OnionTunnelDestroy::new(alice_to_bob_tunnel).to_be_vec();
     write_msg(ONION_TUNNEL_DESTROY, tunnel_destroy, &mut alice_api);
-
     sleep(Duration::from_millis(500));
 
     // TEST: cannot send data from Alice to Bob anymore

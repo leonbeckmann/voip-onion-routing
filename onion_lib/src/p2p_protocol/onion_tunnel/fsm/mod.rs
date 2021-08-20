@@ -219,6 +219,7 @@ pub(super) trait FiniteStateMachine {
         data: Bytes,
         direction: Direction,
         iv: IV,
+        prev_state: State,
     ) -> Result<State, ProtocolError> {
         // send data to the target via the tunnel
         log::trace!(
@@ -235,7 +236,12 @@ pub(super) trait FiniteStateMachine {
         {
             ProcessedData::ReceivedClose => {
                 log::trace!("Tunnel={:?}: Received close", self.tunnel_id());
-                return Ok(State::Terminated);
+                // downgrade upper layer
+                let _ = self
+                    .get_listener()
+                    .send(IncomingEventMessage::Downgraded)
+                    .await;
+                return Ok(State::Downgraded);
             }
             ProcessedData::TransferredToNextHop => {
                 log::trace!(
@@ -244,15 +250,18 @@ pub(super) trait FiniteStateMachine {
                 );
             }
             ProcessedData::IncomingData(data) => {
-                log::trace!(
-                    "Tunnel={:?}: Send incoming application data to the upper layer",
-                    self.tunnel_id()
-                );
-                // we can ignore an error here since this will only fail when the tunnel has been closed
-                let _ = self
-                    .get_listener()
-                    .send(IncomingEventMessage::Data(data))
-                    .await;
+                // only pass to API if connected
+                if prev_state == State::Connected {
+                    log::trace!(
+                        "Tunnel={:?}: Send incoming application data to the upper layer",
+                        self.tunnel_id()
+                    );
+                    // we can ignore an error here since this will only fail when the tunnel has been closed
+                    let _ = self
+                        .get_listener()
+                        .send(IncomingEventMessage::Data(data))
+                        .await;
+                }
             }
             ProcessedData::IncomingCover(data, mirrored) => {
                 if mirrored {
@@ -281,29 +290,28 @@ pub(super) trait FiniteStateMachine {
             }
         };
 
-        // stay in state connected
-        Ok(State::Connected)
+        // stay in previous state
+        Ok(prev_state)
     }
 
-    async fn action_close(&mut self, shutdown: bool) -> Result<State, ProtocolError> {
+    async fn action_close(&mut self) -> Result<State, ProtocolError> {
         // all connection listeners have left
         log::debug!(
-            "Tunnel={:?}: Received close event, notify tunnel peers and shutdown tunnel",
+            "Tunnel={:?}: Received close event, notify tunnel peers and downgrade tunnel.",
             self.tunnel_id()
         );
-        self.get_codec().lock().await.close(shutdown).await;
-        Ok(State::Terminated)
+        self.get_codec().lock().await.close().await;
+        Ok(State::Downgraded)
     }
 
-    async fn action_send(&mut self, data: Vec<u8>, cover: bool) -> Result<State, ProtocolError> {
+    async fn action_send(&mut self, data: Vec<u8>, cover: bool) -> Result<(), ProtocolError> {
         // send data to the target via the tunnel
         let data = if cover {
             DataType::Cover(data, false)
         } else {
             DataType::AppData(data)
         };
-        self.get_codec().lock().await.write(data).await?;
-        Ok(State::Connected)
+        self.get_codec().lock().await.write(data).await
     }
 
     async fn action_handshake_result(
@@ -390,8 +398,15 @@ pub(super) trait FiniteStateMachine {
                         );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::Close => self.action_close(false).await,
-                    FsmEvent::Shutdown => self.action_close(true).await,
+                    FsmEvent::Close => {
+                        // TODO is this always avoided?
+                        log::warn!(
+                            "Tunnel={:?}: Received close event for non-connected FSM.",
+                            self.tunnel_id()
+                        );
+                        Err(ProtocolError::UnexpectedMessageType)
+                    }
+                    FsmEvent::Shutdown => Ok(State::Terminated),
                     FsmEvent::Send(_) | FsmEvent::Cover(_) => {
                         log::warn!(
                             "Tunnel={:?}: Received send/cover event for non-connected FSM.",
@@ -414,17 +429,62 @@ pub(super) trait FiniteStateMachine {
                         );
                         Err(ProtocolError::UnexpectedMessageType)
                     }
-                    FsmEvent::Close => self.action_close(false).await,
-                    FsmEvent::Shutdown => self.action_close(true).await,
-                    FsmEvent::Send(data) => self.action_send(data, false).await,
-                    FsmEvent::Cover(data) => self.action_send(data, true).await,
+                    FsmEvent::Close => self.action_close().await,
+                    FsmEvent::Shutdown => Ok(State::Terminated),
+                    FsmEvent::Send(data) => match self.action_send(data, false).await {
+                        Ok(_) => Ok(State::Connected),
+                        Err(e) => Err(e),
+                    },
+                    FsmEvent::Cover(data) => match self.action_send(data, true).await {
+                        Ok(_) => Ok(State::Connected),
+                        Err(e) => Err(e),
+                    },
                     FsmEvent::IncomingFrame((data, dir, iv)) => {
                         // we expect encrypted application data
-                        self.action_app_data(data, dir, iv).await
+                        self.action_app_data(data, dir, iv, State::Connected).await
                     }
                     FsmEvent::HandshakeResult(_) => {
                         log::warn!(
                             "Tunnel={:?}: Received handshake result for connected FSM.",
+                            self.tunnel_id()
+                        );
+                        Err(ProtocolError::UnexpectedMessageType)
+                    }
+                },
+
+                State::Downgraded => match event {
+                    FsmEvent::Init => {
+                        log::warn!(
+                            "Tunnel={:?}: Received init event for initialized FSM.",
+                            self.tunnel_id()
+                        );
+                        Err(ProtocolError::UnexpectedMessageType)
+                    }
+                    FsmEvent::Close => {
+                        log::warn!(
+                            "Tunnel={:?}: Received close event for downgraded FSM.",
+                            self.tunnel_id()
+                        );
+                        Err(ProtocolError::UnexpectedMessageType)
+                    }
+                    FsmEvent::Shutdown => Ok(State::Terminated),
+                    FsmEvent::Send(_) => {
+                        log::warn!(
+                            "Tunnel={:?}: Received send/cover event for downgraded FSM.",
+                            self.tunnel_id()
+                        );
+                        Err(ProtocolError::UnexpectedMessageType)
+                    }
+                    FsmEvent::Cover(data) => match self.action_send(data, true).await {
+                        Ok(_) => Ok(State::Downgraded),
+                        Err(e) => Err(e),
+                    },
+                    FsmEvent::IncomingFrame((data, dir, iv)) => {
+                        self.action_app_data(data, dir, iv, State::Downgraded).await
+                    }
+                    FsmEvent::HandshakeResult(_) => {
+                        log::warn!(
+                            "Tunnel={:?}: Received handshake result for downgraded FSM.",
                             self.tunnel_id()
                         );
                         Err(ProtocolError::UnexpectedMessageType)
@@ -652,12 +712,12 @@ impl FiniteStateMachine for InitiatorStateMachine {
                         Some(e) => match e {
                             InitiatorEvent::Result(res) => match res {
                                 FsmEvent::HandshakeResult(result) => match result {
-                                    Ok(_) => {
+                                    Ok((_, cover_only, _)) => {
                                         if target {
                                             log::debug!("Tunnel={:?}: Received handshake_result=ok for the target hop", tunnel_id);
                                             let _ = final_result_tx
                                                 .send(FsmEvent::HandshakeResult(Ok((
-                                                    true, false, None,
+                                                    true, cover_only, None,
                                                 ))))
                                                 .await;
                                             return;
@@ -722,10 +782,14 @@ impl FiniteStateMachine for InitiatorStateMachine {
     ) -> Result<State, ProtocolError> {
         let tunnel_result_tx = self.tunnel_result_tx.take().unwrap();
         let res = match res {
-            Ok(_) => {
+            Ok((_, cover_only, _)) => {
                 log::debug!("Tunnel={:?}: Handshake was successful", self.tunnel_id);
                 let _ = tunnel_result_tx.send(TunnelResult::Connected);
-                Ok(State::Connected)
+                if cover_only {
+                    Ok(State::Downgraded)
+                } else {
+                    Ok(State::Connected)
+                }
             }
             Err(e) => {
                 log::warn!("Tunnel={:?}: Handshake failure: {:?}", self.tunnel_id, e);
@@ -810,7 +874,11 @@ impl FiniteStateMachine for TargetStateMachine {
                             .await;
                     }
                 }
-                Ok(State::Connected)
+                if is_cover_only {
+                    Ok(State::Downgraded)
+                } else {
+                    Ok(State::Connected)
+                }
             }
             Err(e) => {
                 log::warn!("Tunnel={:?}: Handshake failure: {:?}", self.tunnel_id, e);
@@ -887,6 +955,7 @@ pub(super) enum State {
     Closed,
     Connecting(SenderWrapper),
     Connected,
+    Downgraded,
     Terminated,
 }
 
@@ -896,8 +965,8 @@ type IsCoverOnly = bool;
 #[derive(Debug)]
 pub enum FsmEvent {
     Init,                                  // Start the FSM
-    Close,                                 // Close the Tunnel
-    Shutdown,                              // Shutdown without sending close to other endpoint
+    Close,                                 // Close the Tunnel (connected -> downgraded)
+    Shutdown,                              // Shutdown
     Send(Vec<u8>),                         // Send Data via the Tunnel
     Cover(Vec<u8>),                        // Send cover traffic via Tunnel
     IncomingFrame((Bytes, Direction, IV)), // Received data frame

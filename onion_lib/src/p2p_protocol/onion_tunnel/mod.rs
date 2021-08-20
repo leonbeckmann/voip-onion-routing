@@ -51,6 +51,7 @@ enum IncomingEventMessage {
     CoverTunnelCompletion,
     TunnelUpdate(FrameId),
     Data(Vec<u8>),
+    Downgraded,
 }
 
 pub(crate) type Peer = (SocketAddr, Vec<u8>);
@@ -87,6 +88,7 @@ pub(crate) struct OnionTunnel {
     lifo_event_sender: Sender<FsmEvent>,
     pub tunnel_type: TunnelType,
     pub status: TunnelStatus,
+    tunnel_manager: Arc<RwLock<TunnelManager>>,
 }
 
 impl OnionTunnel {
@@ -124,6 +126,7 @@ impl OnionTunnel {
             lifo_event_sender,
             tunnel_type,
             status: TunnelStatus::Connecting,
+            tunnel_manager: tunnel_manager.clone(),
         };
 
         // register tunnel at registry
@@ -278,11 +281,15 @@ impl OnionTunnel {
                                             *listeners_guard = raw_listeners;
                                             *listeners_available_guard = true;
                                             drop(listeners_guard);
+                                            // FIXME this should only be done at the end of the round
                                             tunnel.shutdown_tunnel().await;
                                         }
                                     }
                                 }
-
+                                IncomingEventMessage::Downgraded => {
+                                    log::debug!("Tunnel={:?}: Received downgrade.", tunnel_id,);
+                                    tunnel_manager.write().await.downgrade_tunnel(&tunnel_id);
+                                }
                                 IncomingEventMessage::Data(data) => {
                                     let redirected_tunnel_id = tunnel_manager
                                         .read()
@@ -566,6 +573,10 @@ impl OnionTunnel {
     pub async fn close_tunnel(&self) {
         // send close event
         log::trace!("Tunnel={:?}: Send close event to FSM", self.tunnel_id);
+        self.tunnel_manager
+            .write()
+            .await
+            .downgrade_tunnel(&self.tunnel_id);
         let _ = self.forward_event(FsmEvent::Close).await;
     }
 

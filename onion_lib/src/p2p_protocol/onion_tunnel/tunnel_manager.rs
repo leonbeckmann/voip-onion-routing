@@ -56,6 +56,16 @@ impl TunnelManager {
         }
     }
 
+    pub(crate) fn downgrade_tunnel(&mut self, tunnel_id: &TunnelId) {
+        if let Some((tunnel, _)) = self.tunnel_registry.get_mut(tunnel_id) {
+            log::trace!(
+                "Tunnel Manager: Mark tunnel with id={:?} as downgraded",
+                tunnel_id
+            );
+            tunnel.status = TunnelStatus::Downgraded;
+        }
+    }
+
     pub(crate) fn get_connected_initiator_tunnel_ids(&self) -> Vec<TunnelId> {
         self.tunnel_registry
             .iter()
@@ -141,13 +151,14 @@ impl TunnelManager {
     }
 
     pub(crate) async fn round_cleanup(&mut self) {
-        // close all active tunnels from the previous round
-        // TODO design closing procedure, shutdown or close? Intermediates?
-        for (_, (tunnel, next_round)) in self.tunnel_registry.iter_mut() {
+        // shutdown all active tunnels from the previous round
+        for (id, (tunnel, next_round)) in self.tunnel_registry.iter_mut() {
             if *next_round {
+                log::trace!("Tunnel={:?}: New tunnel, skip cleanup", id);
                 *next_round = false;
             } else {
-                tunnel.close_tunnel().await;
+                log::trace!("Tunnel={:?}: Shutdown triggered by round cleanup", id);
+                tunnel.shutdown_tunnel().await;
             }
         }
     }

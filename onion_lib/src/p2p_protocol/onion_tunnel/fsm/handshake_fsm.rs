@@ -509,7 +509,11 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                                     self.tunnel_id
                                 );
                                 let _ = event_tx
-                                    .send(FsmEvent::HandshakeResult(Ok((false, false, None))))
+                                    .send(FsmEvent::HandshakeResult(Ok((
+                                        false,
+                                        self.cover_only,
+                                        None,
+                                    ))))
                                     .await;
                                 return;
                             }
