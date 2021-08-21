@@ -174,7 +174,7 @@ fn integration_test() {
 
     log::info!("Starting integration test");
 
-    // run alice and bob and hopa
+    // run alice and bob and hop1
     let dir = TempDir::new("onion-test").unwrap();
 
     let config_file_alice = dir.path().join("alice.config");
