@@ -143,6 +143,7 @@ impl OnionConfiguration {
             Some(address) => match address.to_socket_addrs() {
                 Ok(mut iter) => match iter.next() {
                     None => {
+                        #[cfg(not(tarpaulin_include))]
                         return Err(ParsingError::from_str("Cannot parse onion's api_address"));
                     }
                     Some(addr) => addr,
@@ -166,6 +167,7 @@ impl OnionConfiguration {
             Some(address) => match address.to_socket_addrs() {
                 Ok(mut iter) => match iter.next() {
                     None => {
+                        #[cfg(not(tarpaulin_include))]
                         return Err(ParsingError::from_str("Cannot parse rps's api_address"));
                     }
                     Some(addr) => addr,
@@ -257,6 +259,7 @@ impl std::fmt::Display for ParsingError {
 mod tests {
 
     extern crate tempdir;
+    use super::ParsingError;
     use super::ini::Ini;
     use crate::config_parser::OnionConfiguration;
     use openssl::rsa::Rsa;
@@ -279,6 +282,7 @@ mod tests {
         priv_key: Option<&str>,
         round_time: Option<&str>,
         handshake_timeout: Option<&str>,
+        timeout: Option<&str>,
         file_path: P,
     ) {
         let mut config = Ini::new();
@@ -317,6 +321,11 @@ mod tests {
                     .with_section(Some("onion"))
                     .set("handshake_timeout", timeout);
             }
+            if let Some(timeout) = timeout {
+                config
+                    .with_section(Some("onion"))
+                    .set("timeout", timeout);
+            }
             if let Some(duration) = round_time {
                 config
                     .with_section(Some("onion"))
@@ -328,6 +337,8 @@ mod tests {
                 config
                     .with_section(Some("rps"))
                     .set("api_address", api_addr);
+            } else {
+                config.with_section(Some("rps")).set("dummy", "dummy");
             }
         }
 
@@ -345,25 +356,32 @@ mod tests {
         let invalid_host_key_path = dir.path().join("not-available");
         let host_key_priv_file = dir.path().join("hostkey_priv");
         let invalid_host_key_priv_file = dir.path().join("hostkey_priv-der");
+        let empty_host_key_priv_file = dir.path().join("hostkey_priv-empty");
         let valid_config = dir.path().join("valid.config");
         let config_missing_port = dir.path().join("missing-port.config");
         let config_invalid_port = dir.path().join("invalid-port.config");
         let config_missing_hostname = dir.path().join("missing-hostname.config");
-        let config_missing_section = dir.path().join("missing-section.config");
+        let config_missing_onion_section = dir.path().join("missing-onion-section.config");
+        let config_missing_rps_section = dir.path().join("missing-rps-section.config");
         let config_missing_hostkey = dir.path().join("missing-hostkey.config");
         let config_der_hostkey = dir.path().join("der-hostkey.config");
         let config_invalid_hostkey_path = dir.path().join("invalid_hostkey.config");
-        let config_invalid_hop_count = dir.path().join("invalid_hops.config");
+        let config_too_high_hop_count = dir.path().join("too_high_hops.config");
+        let config_too_low_hop_count = dir.path().join("too_low_hops.config");
         let config_missing_onion_api_address = dir.path().join("missing_o_api_address.config");
         let config_missing_rps_api_address = dir.path().join("missing_r_api_address.config");
         let config_invalid_api_address = dir.path().join("invalid_api_address.config");
+        let config_invalid_rps_api_address = dir.path().join("invalid_rps_api_address.config");
         let config_api_address_v6 = dir.path().join("api_address_v6.config");
         let config_missing_round_time = dir.path().join("missing_round_time.config");
         let config_invalid_round_time = dir.path().join("invalid_round_time.config");
         let config_missing_handshake_timeout = dir.path().join("missing_handshake_timeout.config");
         let config_invalid_handshake_timeout = dir.path().join("invalid_handshake_timeout.config");
+        let config_missing_timeout = dir.path().join("missing_timeout.config");
+        let config_invalid_timeout = dir.path().join("invalid_timeout.config");
         let config_missing_private_key = dir.path().join("missing_private_key.config");
         let config_der_private_key = dir.path().join("der_private_key.config");
+        let config_empty_private_key = dir.path().join("empty_private_key.config");
         let config_invalid_priv_key_path = dir.path().join("invalid_priv_key_path.config");
 
         // create RSA key
@@ -378,6 +396,7 @@ mod tests {
         let mut rsa_der = File::create(&invalid_host_key_file).unwrap();
         let mut rsa_priv_pem = File::create(&host_key_priv_file).unwrap();
         let mut rsa_priv_der = File::create(&invalid_host_key_priv_file).unwrap();
+        File::create(&empty_host_key_priv_file).unwrap();
         rsa_pem.write_all(pub_pem.as_slice()).unwrap();
         rsa_pem.sync_all().unwrap();
         rsa_der.write_all(pub_der.as_slice()).unwrap();
@@ -400,11 +419,28 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &valid_config,
         );
 
         create_config_file(
             false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("1"),
+            &config_missing_onion_section,
+        );
+
+        create_config_file(
+            true,
             false,
             None,
             None,
@@ -415,7 +451,8 @@ mod tests {
             None,
             None,
             None,
-            &config_missing_section,
+            Some("1"),
+            &config_missing_rps_section,
         );
 
         create_config_file(
@@ -430,6 +467,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_missing_port,
         );
 
@@ -445,6 +483,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_invalid_port,
         );
 
@@ -460,6 +499,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_missing_hostname,
         );
 
@@ -475,6 +515,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_missing_hostkey,
         );
 
@@ -490,6 +531,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_der_hostkey,
         );
 
@@ -505,7 +547,24 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_invalid_hostkey_path,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2a"),
+            Some("localhost:1234"),
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            &config_too_high_hop_count,
         );
 
         create_config_file(
@@ -520,7 +579,8 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
-            &config_invalid_hop_count,
+            Some("1"),
+            &config_too_low_hop_count,
         );
 
         create_config_file(
@@ -535,6 +595,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_missing_onion_api_address,
         );
 
@@ -550,6 +611,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_missing_rps_api_address,
         );
 
@@ -565,7 +627,24 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_invalid_api_address,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("localhost:1234"),
+            Some("localhost:123400"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            &config_invalid_rps_api_address,
         );
 
         create_config_file(
@@ -580,6 +659,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_api_address_v6,
         );
 
@@ -595,6 +675,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             None,
             Some("2000"),
+            Some("1"),
             &config_missing_round_time,
         );
 
@@ -610,6 +691,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100a"),
             Some("2000"),
+            Some("1"),
             &config_invalid_round_time,
         );
 
@@ -625,6 +707,7 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             None,
+            Some("1"),
             &config_missing_handshake_timeout,
         );
 
@@ -640,7 +723,40 @@ mod tests {
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000a"),
+            Some("1"),
             &config_invalid_handshake_timeout,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            None,
+            &config_missing_timeout,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1a"),
+            &config_invalid_timeout,
         );
 
         create_config_file(
@@ -655,6 +771,7 @@ mod tests {
             None,
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_missing_private_key,
         );
 
@@ -670,7 +787,24 @@ mod tests {
             Some(invalid_host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_der_private_key,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("localhost"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(empty_host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            &config_empty_private_key,
         );
 
         create_config_file(
@@ -685,6 +819,7 @@ mod tests {
             Some(invalid_host_key_path.to_str().unwrap()),
             Some("100"),
             Some("2000"),
+            Some("1"),
             &config_invalid_priv_key_path,
         );
 
@@ -701,28 +836,41 @@ mod tests {
             Duration::from_millis(2000)
         );
 
-        assert!(OnionConfiguration::parse_from_file(config_missing_section).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_onion_section).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_rps_section).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_port).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_port).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_hostname).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_hostkey_path).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_hostkey).is_err());
         assert!(OnionConfiguration::parse_from_file(config_der_hostkey).is_err());
-        assert!(OnionConfiguration::parse_from_file(config_invalid_hop_count).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_too_high_hop_count).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_too_low_hop_count).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_onion_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_rps_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_api_address).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_rps_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_round_time).is_ok());
         assert!(OnionConfiguration::parse_from_file(config_invalid_round_time).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_handshake_timeout).is_ok());
         assert!(OnionConfiguration::parse_from_file(config_invalid_handshake_timeout).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_timeout).is_ok());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_timeout).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_private_key).is_err());
         assert!(OnionConfiguration::parse_from_file(invalid_host_key_priv_file).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_empty_private_key).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_priv_key_path).is_err());
         let config = OnionConfiguration::parse_from_file(config_api_address_v6).unwrap();
         assert_eq!(config.onion_api_address.port(), 1234);
         assert!(config.onion_api_address.is_ipv6());
 
         dir.close().unwrap();
+    }
+
+    #[test]
+    fn unit_parser_error() {
+        let e = ParsingError::from_str("abc");
+        let s = format!("{}", e);
+        assert_eq!("Cannot parse configuration from windows ini: abc", s);
     }
 }
