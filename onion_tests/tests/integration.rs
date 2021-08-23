@@ -170,7 +170,7 @@ fn run_rps_api(
 #[test]
 fn integration_test() {
     // enable logging
-    env::set_var("RUST_LOG", "trace");
+    env::set_var("RUST_LOG", "info");
     env_logger::init();
 
     log::info!("Starting integration test");
