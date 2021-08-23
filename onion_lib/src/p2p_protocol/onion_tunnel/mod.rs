@@ -148,7 +148,6 @@ impl OnionTunnel {
                         );
                         let mut tunnel_manager_guard = tunnel_manager.write().await;
                         tunnel_manager_guard.remove_tunnel(&tunnel_id);
-                        tunnel_manager_guard.remove_redirection_link(&tunnel_id);
                         frame_id_manager.write().await.tunnel_closure(tunnel_id);
                         return;
                     }
@@ -269,8 +268,6 @@ impl OnionTunnel {
                                             *listeners_guard = raw_listeners;
                                             *listeners_available_guard = true;
                                             drop(listeners_guard);
-                                            // FIXME this should only be done at the end of the round
-                                            tunnel.shutdown_tunnel().await;
                                         }
                                     }
                                 }

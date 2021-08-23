@@ -34,6 +34,7 @@ impl TunnelManager {
     pub(crate) fn remove_tunnel(&mut self, tunnel_id: &TunnelId) {
         log::trace!("Tunnel Manager: Remove tunnel with id={:?}", tunnel_id);
         let _ = self.tunnel_registry.remove(tunnel_id);
+        self.remove_redirection_link(tunnel_id);
     }
 
     pub(crate) fn get_tunnel(&self, tunnel_id: &TunnelId) -> Option<&OnionTunnel> {
@@ -76,34 +77,29 @@ impl TunnelManager {
 
     pub(crate) fn add_redirection_link(&mut self, id_old: TunnelId, id_new: TunnelId) {
         // check if there is already a link, which means that the original tunnel has been updated already
-        let origin_id = match self.reverse_links.remove(&id_old) {
+        let origin_id = match self.reverse_links.get(&id_old) {
             None => {
                 // mapping not available yet
-                let _ = self.reverse_links.insert(id_new, id_old);
-                log::trace!(
-                    "Tunnel Manager: Add reverse link <{:?}, {:?}>",
-                    id_new,
-                    id_old
-                );
                 id_old
             }
             Some(origin_id) => {
                 // mapping available yet
-                let _ = self.reverse_links.insert(id_new, origin_id);
-                log::trace!(
-                    "Tunnel Manager: Add reverse link <{:?}, {:?}>",
-                    id_new,
-                    origin_id
-                );
-                origin_id
+                // we have to ensure that the old reverse link stays until the tunnel is removed
+                *origin_id
             }
         };
+        log::trace!(
+            "Tunnel Manager: Add reverse link <{:?}, {:?}>",
+            id_new,
+            origin_id
+        );
+        let _ = self.reverse_links.insert(id_new, origin_id);
+        log::trace!("Tunnel Manager: Add link <{:?}, {:?}>", origin_id, id_new);
         let _ = self
             .links
             .entry(origin_id)
             .and_modify(|e| *e = id_new)
             .or_insert(id_new);
-        log::trace!("Tunnel Manager: Add link <{:?}, {:?}>", origin_id, id_new);
         assert_eq!(
             self.links.get_key_value(&origin_id).unwrap(),
             (&origin_id, &id_new)
@@ -121,12 +117,21 @@ impl TunnelManager {
                 tunnel_id,
                 old_id
             );
-            log::trace!(
-                "Tunnel Manager: Remove link <{:?}, {:?}>",
-                old_id,
-                tunnel_id
-            );
-            let _ = self.links.remove(&old_id);
+            // only remove link if it points to the tunnel_id, otherwise we are removing a tunnel that
+            // has been rebuilt but we dont want to remove the link for the new tunnel
+            let remove_link = if let Some(link_v) = self.reverse_links.get(&old_id) {
+                link_v == tunnel_id
+            } else {
+                false
+            };
+            if remove_link {
+                log::trace!(
+                    "Tunnel Manager: Remove link <{:?}, {:?}>",
+                    old_id,
+                    tunnel_id
+                );
+                let _ = self.links.remove(&old_id);
+            }
         }
     }
 

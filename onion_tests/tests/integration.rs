@@ -519,7 +519,7 @@ fn integration_test() {
     write_msg(ONION_COVER, tunnel_cover, &mut alice_api);
 
     // TEST: request multiple connections and expect error while one connection is established
-    log::info!("TEST: Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
+    log::info!("TEST: Request multiple tunnel builds and expect error on second request");
     let bob_hostname = IpAddr::from_str("127.0.0.1").unwrap();
     let bob_port = 3001;
     let tunnel_build =

@@ -709,18 +709,12 @@ impl P2pInterface {
                     tunnel_manager_guard.add_redirection_link(tunnel_id, new_tunnel_id);
 
                     // destroy the old tunnel
-                    match tunnel_manager_guard.get_tunnel(&tunnel_id) {
-                        None => {
-                            // the old tunnel has been closed during the tunnel update, close the new one
-                            log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", new_tunnel_id, tunnel_id);
-                            tunnel_manager_guard.downgrade_tunnel(&new_tunnel_id);
-                            if let Some(tunnel) = tunnel_manager_guard.get_tunnel(&new_tunnel_id) {
-                                tunnel.close_tunnel().await;
-                            }
-                        }
-                        Some(tunnel) => {
-                            // FIXME this should be done at the end of the round
-                            tunnel.shutdown_tunnel().await;
+                    if tunnel_manager_guard.get_tunnel(&tunnel_id).is_none() {
+                        // the old tunnel has been closed during the tunnel update, close the new one
+                        log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", new_tunnel_id, tunnel_id);
+                        tunnel_manager_guard.downgrade_tunnel(&new_tunnel_id);
+                        if let Some(tunnel) = tunnel_manager_guard.get_tunnel(&new_tunnel_id) {
+                            tunnel.close_tunnel().await;
                         }
                     }
                 }
