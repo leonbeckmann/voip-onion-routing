@@ -54,10 +54,11 @@ struct RoundSynchronizer {
     registration_window: Duration,
     tunnel_registration_counter: Arc<Mutex<u8>>,
     round_cover_tunnel: Arc<Mutex<Option<TunnelId>>>,
+    local_addr: String,
 }
 
 impl RoundSynchronizer {
-    fn new(round_time: Duration) -> RoundSynchronizer {
+    fn new(round_time: Duration, host: &str, port: u16) -> RoundSynchronizer {
         RoundSynchronizer {
             update_notify: Arc::new((
                 Mutex::new(NotifyState::Inactive),
@@ -71,9 +72,10 @@ impl RoundSynchronizer {
                 Notify::new(),
             )),
             round_time,
-            registration_window: round_time.saturating_sub(Duration::from_secs(3)),
+            registration_window: round_time.saturating_sub(Duration::from_secs(1)), // TODO configurable
             tunnel_registration_counter: Arc::new(Mutex::new(0)),
             round_cover_tunnel: Arc::new(Mutex::new(None)),
+            local_addr: format!("{}:{:?}", host, port),
         }
     }
 
@@ -101,25 +103,32 @@ impl RoundSynchronizer {
         let registration_window = self.registration_window;
         let build_window = round_time.saturating_sub(registration_window);
         let registration_counter = self.tunnel_registration_counter.clone();
+        let addr = self.local_addr.clone();
         tokio::spawn(async move {
             loop {
-                log::debug!("New round has started. Duration={:?}", round_time);
+                log::debug!(
+                    "New round has started at {}. Duration={:?}",
+                    addr,
+                    round_time
+                );
                 // sleep until registration_window is closed
                 sleep(registration_window).await;
                 let update_notify = update_notify.clone();
                 let new_notify = new_notify.clone();
                 let cover_notify = cover_notify.clone();
                 let registration_counter = registration_counter.clone();
+                let addr2 = addr.clone();
                 tokio::spawn(async move {
                     // first rebuild existent tunnels preprocessing
-                    log::trace!("Process tunnel updates for new round");
+                    log::trace!("Process tunnel updates at {} for new round", addr2);
                     RoundSynchronizer::process_tunnels(update_notify).await;
 
                     // secondly new tunnels
                     let mut registrations = new_notify.lock().await;
                     log::trace!(
-                        "Process {:?} new tunnel requests for new round",
-                        registrations.len()
+                        "Process {:?} new tunnel requests at {} for new round",
+                        registrations.len(),
+                        addr2
                     );
                     let mut registration_counter2 = registration_counter.lock().await;
                     while !registrations.is_empty() {
@@ -140,13 +149,15 @@ impl RoundSynchronizer {
                     drop(registrations);
 
                     // build cover tunnel
-                    log::trace!("Process cover tunnels for new round");
+                    log::trace!("Process cover tunnels at {} for new round", addr2);
                     RoundSynchronizer::process_tunnels(cover_notify).await;
                     // clear registration_counter again for next registration window
                     *(registration_counter.lock().await) = 0;
                 });
                 // sleep for the rest of the round
+                log::trace!("At {} sleep for the rest of the round", addr);
                 sleep(build_window).await;
+                log::trace!("At {} round is over, cleanup tunnels", addr);
                 let tunnel_manager = tunnel_manager.clone();
                 tokio::spawn(async move {
                     // shutdown old tunnels
@@ -159,6 +170,7 @@ impl RoundSynchronizer {
     async fn run_update_task(&self, p2p_interface: Arc<P2pInterface>) {
         let notify = self.update_notify.clone();
         let registration_counter = self.tunnel_registration_counter.clone();
+        let addr = self.local_addr.clone();
         tokio::spawn(async move {
             loop {
                 // wait for round change
@@ -187,7 +199,10 @@ impl RoundSynchronizer {
                 notifier_b.notify_one();
 
                 // update tunnel if available
-                log::debug!("Registration_window is over, update initiator tunnel if available");
+                log::debug!(
+                    "Registration_window is over, update initiator tunnel at {} if available",
+                    addr
+                );
                 if let Some(id) = ids.first() {
                     p2p_interface.update_tunnel(*id).await;
                 }
@@ -198,7 +213,7 @@ impl RoundSynchronizer {
     async fn run_cover_task(&self, p2p_interface: Arc<P2pInterface>) {
         let notify = self.cover_notify.clone();
         let registration_counter = self.tunnel_registration_counter.clone();
-        let _cover_tunnel_id = self.round_cover_tunnel.clone();
+        let addr = self.local_addr.clone();
         tokio::spawn(async move {
             loop {
                 // wait for round change
@@ -221,14 +236,18 @@ impl RoundSynchronizer {
                 notifier_b.notify_one();
 
                 // build cover tunnel if required
+                log::debug!(
+                    "Registration_window is over, build cover tunnel at {} if required",
+                    addr
+                );
                 if required {
                     match rps_api::rps_get_peer(p2p_interface.config.rps_api_address).await {
                         Ok((target, key)) => {
-                            log::debug!("Build cover tunnel");
+                            log::debug!("Build cover tunnel at {}", addr);
                             if let Err(e) =
                                 p2p_interface.inner_build_tunnel(None, target, key).await
                             {
-                                log::warn!("Cannot build cover tunnel: {:?}", e);
+                                log::warn!("Cannot build cover tunnel at {}: {:?}", addr, e);
                             }
                         }
                         Err(e) => {
@@ -282,7 +301,8 @@ impl P2pInterface {
         config: OnionConfiguration,
         api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<Self> {
-        let round_sync = RoundSynchronizer::new(config.round_time);
+        let round_sync =
+            RoundSynchronizer::new(config.round_time, &config.p2p_hostname, config.p2p_port);
         Ok(Self {
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
             frame_id_manager: Arc::new(RwLock::new(FrameIdManager::new())),
@@ -316,14 +336,17 @@ impl P2pInterface {
                         match TunnelFrame::parse_from_bytes(&buf[0..size]) {
                             Ok(frame) => {
                                 // check if data available, which should always be the case
-                                log::trace!("UDP packet successfully parsed to TunnelFrame");
+                                log::trace!(
+                                    "UDP packet successfully parsed to TunnelFrame at {}",
+                                    my_addr
+                                );
 
                                 let (tunnel_id, direction) = if frame.frame_id
                                     == CLIENT_HELLO_FORWARD_ID
                                 {
                                     // frame id one is the initial handshake message (client_hello)
                                     log::debug!(
-                                        "Frame is a new tunnel request. Create a new target tunnel"
+                                        "Frame is a new tunnel request. Create a new target tunnel at {}", my_addr
                                     );
                                     // build a new target tunnel
                                     let tunnel_id = OnionTunnel::new_target_tunnel(
@@ -337,7 +360,11 @@ impl P2pInterface {
                                         self.config.timeout,
                                     )
                                     .await;
-                                    log::trace!("New target tunnel has tunnel ID {:?}", tunnel_id);
+                                    log::trace!(
+                                        "New target tunnel at {} has tunnel ID {:?}",
+                                        my_addr,
+                                        tunnel_id
+                                    );
                                     (tunnel_id, Direction::Forward)
                                 } else {
                                     // not a new tunnel request, get corresponding tunnel id from frame id
@@ -346,12 +373,12 @@ impl P2pInterface {
                                         None => {
                                             // no tunnel available for the given frame
                                             log::warn!(
-                                                "Received unexpected frame id, drop the frame"
+                                                "Received unexpected frame id at {}, drop the frame", my_addr
                                             );
                                             continue;
                                         }
                                         Some((tunnel_id, d)) => {
-                                            log::debug!("Incoming frame (direction={:?}) belongs to tunnel with ID {:?} ", d, tunnel_id);
+                                            log::debug!("Incoming frame (direction={:?}) at {} belongs to tunnel with ID {:?} ", d, my_addr, tunnel_id);
                                             (tunnel_id, d)
                                         }
                                     }
@@ -365,8 +392,8 @@ impl P2pInterface {
                                     None => {
                                         // should never happen, means outdated frame_ids
                                         log::warn!(
-                                            "Received frame for not available tunnel with id {:?}",
-                                            tunnel_id
+                                            "Received frame for not available tunnel with id {:?} at {}",
+                                            tunnel_id, my_addr
                                         );
                                     }
                                     Some(tunnel) => {
@@ -449,7 +476,7 @@ impl P2pInterface {
         connection_id: ConnectionId,
     ) -> Result<(), P2pError> {
         // call unsubscribe on specific tunnel
-        let tunnel_manager = self.tunnel_manager.read().await;
+        let mut tunnel_manager = self.tunnel_manager.write().await;
         let redirected_tunnel_id = tunnel_manager.resolve_tunnel_id(tunnel_id);
         log::debug!(
             "Destroy tunnel reference connection={:?}, tunnel={:?}, redirected_tunnel_id={:?}",
@@ -457,13 +484,16 @@ impl P2pInterface {
             tunnel_id,
             redirected_tunnel_id
         );
-        match tunnel_manager.get_tunnel(&redirected_tunnel_id) {
-            None => Err(P2pError::InvalidTunnelId(tunnel_id)),
-            Some(tunnel) => {
-                tunnel.unsubscribe(connection_id).await;
-                Ok(())
+        let res = match tunnel_manager.get_tunnel(&redirected_tunnel_id) {
+            None => {
+                return Err(P2pError::InvalidTunnelId(tunnel_id));
             }
+            Some(tunnel) => tunnel.unsubscribe(connection_id).await,
+        };
+        if res {
+            tunnel_manager.downgrade_tunnel(&redirected_tunnel_id);
         }
+        Ok(())
     }
 
     /*
@@ -683,6 +713,7 @@ impl P2pInterface {
                         None => {
                             // the old tunnel has been closed during the tunnel update, close the new one
                             log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", new_tunnel_id, tunnel_id);
+                            tunnel_manager_guard.downgrade_tunnel(&new_tunnel_id);
                             if let Some(tunnel) = tunnel_manager_guard.get_tunnel(&new_tunnel_id) {
                                 tunnel.close_tunnel().await;
                             }

@@ -749,6 +749,40 @@ impl P2pCodec for TargetEndpoint {
                 );
                 chunks
             }
+            DataType::Cover(data, _) => {
+                // mirror received cover data frame
+                let mut chunks = vec![];
+                for data_chunk in data.chunks(EFFECTIVE_PACKET_SIZE) {
+                    let mut app_data = ApplicationData::new();
+                    let mut cover_packet = CoverTraffic::new();
+                    cover_packet.set_data(Bytes::copy_from_slice(data_chunk));
+                    cover_packet.set_mirrored(true);
+                    app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
+                    app_data.set_cover_traffic(cover_packet);
+                    let raw_data = app_data.write_to_bytes().unwrap();
+                    let raw_data =
+                        RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
+
+                    // Unencrypted data transfer is not allowed
+                    assert!(self.crypto_context.is_some());
+
+                    let (iv, raw_data) = self
+                        .crypto_context
+                        .as_mut()
+                        .unwrap()
+                        .encrypt(None, &raw_data, true)?;
+
+                    assert_eq!(raw_data.len(), PAYLOAD_SIZE);
+                    chunks.push((iv, raw_data));
+                }
+                log::debug!(
+                    "Tunnel={:?}: Send encrypted application data ({:?} fragment(s)) to prev hop {:?}",
+                    self.tunnel_id,
+                    chunks.len(),
+                    self.prev_hop
+                );
+                chunks
+            }
             DataType::ServerHello(server_hello) => {
                 log::debug!(
                     "Tunnel={:?}: Send ServerHello=({:?}) to/via prev hop {:?}",

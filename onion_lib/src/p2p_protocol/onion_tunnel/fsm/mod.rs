@@ -227,13 +227,16 @@ pub(super) trait FiniteStateMachine {
             self.tunnel_id(),
             direction
         );
-        match self
-            .get_codec()
-            .lock()
-            .await
-            .process_data(direction, data, iv)
-            .await?
-        {
+
+        let res = {
+            self.get_codec()
+                .lock()
+                .await
+                .process_data(direction, data, iv)
+                .await?
+        };
+
+        match res {
             ProcessedData::ReceivedClose => {
                 log::trace!("Tunnel={:?}: Received close", self.tunnel_id());
                 // downgrade upper layer
@@ -288,7 +291,7 @@ pub(super) trait FiniteStateMachine {
                 );
                 return Err(ProtocolError::UnexpectedMessageType);
             }
-        };
+        }
 
         // stay in previous state
         Ok(prev_state)

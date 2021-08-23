@@ -39,6 +39,7 @@ fn run_peer(
     priv_key_file: &Path,
     pub_pem: Vec<u8>,
     priv_pem: Vec<u8>,
+    round_time: Duration,
 ) {
     // create rsa files
     let mut rsa_pem = File::create(&key_file).unwrap();
@@ -59,9 +60,9 @@ fn run_peer(
         .set("p2p_hostname", "127.0.0.1")
         .set("hop_count", "2")
         .set("api_address", onion_api_addr)
-        .set("round_time", "5")
+        .set("round_time", format!("{:?}", round_time.as_secs()))
         .set("private_hostkey", priv_key_file.to_str().unwrap())
-        .set("handshake_timeout", "3000");
+        .set("handshake_timeout", "1000");
     config
         .with_section(Some("rps"))
         .set("api_address", rps_api_addr);
@@ -208,6 +209,7 @@ fn integration_test() {
     let hop2_priv_pem = hop2_key.private_key_to_pem().unwrap();
 
     log::info!("TEST: Starting peer alice ..");
+    let round_time = Duration::from_secs(3);
     run_peer(
         "2001",
         "127.0.0.1:2002",
@@ -217,6 +219,7 @@ fn integration_test() {
         &priv_key_file_alice,
         alice_pub_pem,
         alice_priv_pem,
+        round_time,
     );
 
     log::info!("TEST: Starting peer bob ..");
@@ -229,6 +232,7 @@ fn integration_test() {
         &priv_key_file_bob,
         bob_pub_pem,
         bob_priv_pem,
+        round_time,
     );
 
     log::info!("TEST: Starting peer hop1 ..");
@@ -241,6 +245,7 @@ fn integration_test() {
         &priv_key_file_hop1,
         hop1_pub_pem,
         hop1_priv_pem,
+        round_time,
     );
 
     log::info!("TEST: Starting peer hop2 ..");
@@ -253,6 +258,7 @@ fn integration_test() {
         &priv_key_file_hop2,
         hop2_pub_pem,
         hop2_priv_pem,
+        round_time,
     );
 
     // connect to alice from CM/CI
@@ -365,6 +371,12 @@ fn integration_test() {
     assert_eq!(error.tunnel_id, 20);
     assert_eq!(error.request_type, ONION_TUNNEL_DATA);
 
+    // TEST: cover tunnel at Bob
+    sleep(Duration::from_millis(500)); // wait until cover tunnel available at Bob
+    log::info!("TEST: Send cover traffic via cover tunnel");
+    let tunnel_cover = OnionCover::new(300).to_be_vec();
+    write_msg(ONION_COVER, tunnel_cover, &mut bob_api);
+
     // TEST: request new tunnel from alice to bob in next round
     log::info!("TEST: Request TunnelBuild from Alice to Bob at 127.0.0.1:3001");
     let bob_hostname = IpAddr::from_str("127.0.0.1").unwrap();
@@ -424,7 +436,7 @@ fn integration_test() {
 
     // wait for new round to test tunnel update
     log::info!("TEST: Wait for next round to check tunnel update");
-    sleep(Duration::from_millis(5000));
+    sleep(round_time);
 
     // send fragmented data from Alice to Bob
     log::info!("TEST: Send fragmented TunnelData from Alice to Bob via updated tunnel");
@@ -446,7 +458,7 @@ fn integration_test() {
 
     // wait for another round to test multiple tunnel updates
     log::info!("TEST: Wait for another round to check multiple tunnel updates");
-    sleep(Duration::from_millis(5000));
+    sleep(round_time);
 
     // send fragmented data from Bob to Alice
     log::info!("TEST: Send fragmented TunnelData from Bob to Alice");
@@ -493,8 +505,15 @@ fn integration_test() {
     assert_eq!(error.tunnel_id, bob_from_alice_tunnel);
     assert_eq!(error.request_type, ONION_TUNNEL_DATA);
 
+    // send cover traffic from Alice
+    log::info!("TEST: Send cover traffic via downgraded cover tunnel");
+    let tunnel_cover = OnionCover::new(300).to_be_vec();
+    write_msg(ONION_COVER, tunnel_cover, &mut alice_api);
+
     // wait for another round with no new tunnel
-    sleep(Duration::from_millis(5000));
+    log::info!("TEST: Wait for another round without tunnel update");
+    sleep(round_time);
+
     log::info!("TEST: Send cover traffic via cover tunnel");
     let tunnel_cover = OnionCover::new(300).to_be_vec();
     write_msg(ONION_COVER, tunnel_cover, &mut alice_api);

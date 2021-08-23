@@ -88,7 +88,6 @@ pub(crate) struct OnionTunnel {
     lifo_event_sender: Sender<FsmEvent>,
     pub tunnel_type: TunnelType,
     pub status: TunnelStatus,
-    tunnel_manager: Arc<RwLock<TunnelManager>>,
 }
 
 impl OnionTunnel {
@@ -126,7 +125,6 @@ impl OnionTunnel {
             lifo_event_sender,
             tunnel_type,
             status: TunnelStatus::Connecting,
-            tunnel_manager: tunnel_manager.clone(),
         };
 
         // register tunnel at registry
@@ -182,15 +180,15 @@ impl OnionTunnel {
                                         raw_listeners
                                     );
 
-                                    // check if listeners are empty, then we want to terminate the tunnel
+                                    // check if listeners are empty, then we want to downgrade the tunnel
                                     if raw_listeners.is_empty() {
-                                        tunnel_manager
-                                            .read()
-                                            .await
-                                            .get_tunnel(&tunnel_id)
-                                            .unwrap()
-                                            .close_tunnel()
-                                            .await;
+                                        let mut tunnel_manager_guard = tunnel_manager.write().await;
+                                        tunnel_manager_guard.downgrade_tunnel(&tunnel_id);
+                                        if let Some(tunnel) =
+                                            tunnel_manager_guard.get_tunnel(&tunnel_id)
+                                        {
+                                            tunnel.close_tunnel().await;
+                                        }
                                         continue;
                                     }
 
@@ -212,6 +210,7 @@ impl OnionTunnel {
                                     tunnel_manager.write().await.set_connected(&tunnel_id, true);
                                 }
                                 IncomingEventMessage::TunnelUpdate(tunnel_update_ref) => {
+                                    log::debug!("Tunnel={:?}: Received TunnelUpdate", tunnel_id);
                                     tunnel_manager
                                         .write()
                                         .await
@@ -225,23 +224,17 @@ impl OnionTunnel {
                                         .get_tunnel_id(&tunnel_update_ref)
                                     {
                                         None => {
-                                            // failure, close tunnel, cleanup
+                                            // failure, downgrade new tunnel to cover tunnel
                                             let mut tunnel_manager_guard =
                                                 tunnel_manager.write().await;
                                             log::debug!("Tunnel={:?}: Cannot find tunnel_update_reference. Close tunnel again", tunnel_id);
+                                            tunnel_manager_guard.downgrade_tunnel(&tunnel_id);
                                             if let Some(tunnel) =
                                                 tunnel_manager_guard.get_tunnel(&tunnel_id)
                                             {
                                                 tunnel.close_tunnel().await;
                                             }
-                                            tunnel_manager_guard.remove_tunnel(&tunnel_id);
-                                            tunnel_manager_guard
-                                                .remove_redirection_link(&tunnel_id);
-                                            frame_id_manager
-                                                .write()
-                                                .await
-                                                .tunnel_closure(tunnel_id);
-                                            return;
+                                            continue;
                                         }
                                         Some((tunnel_id, _)) => tunnel_id,
                                     };
@@ -256,20 +249,15 @@ impl OnionTunnel {
                                     let mut tunnel_manager_guard = tunnel_manager.write().await;
                                     match tunnel_manager_guard.get_tunnel(&old_tunnel_id) {
                                         None => {
-                                            // the old tunnel has been closed during the tunnel update, close the new one
+                                            // the old tunnel has been closed during the tunnel update, downgrade the new one
                                             log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", tunnel_id, old_tunnel_id);
+                                            tunnel_manager_guard.downgrade_tunnel(&tunnel_id);
                                             if let Some(tunnel) =
                                                 tunnel_manager_guard.get_tunnel(&tunnel_id)
                                             {
                                                 tunnel.close_tunnel().await;
                                             }
-                                            tunnel_manager_guard.remove_tunnel(&tunnel_id);
-                                            tunnel_manager_guard
-                                                .remove_redirection_link(&tunnel_id);
-                                            frame_id_manager
-                                                .write()
-                                                .await
-                                                .tunnel_closure(tunnel_id);
+                                            continue;
                                         }
                                         Some(tunnel) => {
                                             // take listeners from old tunnel
@@ -573,10 +561,6 @@ impl OnionTunnel {
     pub async fn close_tunnel(&self) {
         // send close event
         log::trace!("Tunnel={:?}: Send close event to FSM", self.tunnel_id);
-        self.tunnel_manager
-            .write()
-            .await
-            .downgrade_tunnel(&self.tunnel_id);
         let _ = self.forward_event(FsmEvent::Close).await;
     }
 
@@ -586,7 +570,7 @@ impl OnionTunnel {
         let _ = self.forward_event(FsmEvent::Shutdown).await;
     }
 
-    pub async fn unsubscribe(&self, connection_id: u64) {
+    pub async fn unsubscribe(&self, connection_id: u64) -> bool {
         if self.tunnel_type != TunnelType::CoverOnly {
             let available_guard = self.listeners_available.lock().await;
             if *available_guard {
@@ -604,8 +588,10 @@ impl OnionTunnel {
                         self.tunnel_id
                     );
                     self.close_tunnel().await;
+                    return true;
                 }
             }
         }
+        false
     }
 }

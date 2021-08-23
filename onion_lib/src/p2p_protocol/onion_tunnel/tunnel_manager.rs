@@ -57,6 +57,7 @@ impl TunnelManager {
     }
 
     pub(crate) fn downgrade_tunnel(&mut self, tunnel_id: &TunnelId) {
+        self.remove_redirection_link(tunnel_id);
         if let Some((tunnel, _)) = self.tunnel_registry.get_mut(tunnel_id) {
             log::trace!(
                 "Tunnel Manager: Mark tunnel with id={:?} as downgraded",
@@ -145,8 +146,14 @@ impl TunnelManager {
     }
 
     pub(crate) async fn unsubscribe(&mut self, connection_id: ConnectionId) {
-        for (_, (tunnel, _)) in self.tunnel_registry.iter_mut() {
-            tunnel.unsubscribe(connection_id).await;
+        let mut downgrades = vec![];
+        for (id, (tunnel, _)) in self.tunnel_registry.iter_mut() {
+            if tunnel.unsubscribe(connection_id).await {
+                downgrades.push(*id);
+            }
+        }
+        for id in downgrades {
+            self.downgrade_tunnel(&id);
         }
     }
 
