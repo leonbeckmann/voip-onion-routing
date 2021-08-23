@@ -330,7 +330,7 @@ fn integration_test() {
     .unwrap();
 
     // TEST: send cover traffic, should return an error because no cover tunnel is available in the beginning
-    log::info!("TEST: Send cover traffic via cover tunnel");
+    log::info!("TEST: Send cover traffic via cover tunnel and expect error");
     let tunnel_cover = OnionCover::new(300).to_be_vec();
     write_msg(ONION_COVER, tunnel_cover, &mut alice_api);
     let (hdr, data) = read_msg(&mut alice_api);

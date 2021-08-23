@@ -57,7 +57,6 @@ impl TunnelManager {
     }
 
     pub(crate) fn downgrade_tunnel(&mut self, tunnel_id: &TunnelId) {
-        self.remove_redirection_link(tunnel_id);
         if let Some((tunnel, _)) = self.tunnel_registry.get_mut(tunnel_id) {
             log::trace!(
                 "Tunnel Manager: Mark tunnel with id={:?} as downgraded",
