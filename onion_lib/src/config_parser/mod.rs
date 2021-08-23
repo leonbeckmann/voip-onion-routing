@@ -259,8 +259,8 @@ impl std::fmt::Display for ParsingError {
 mod tests {
 
     extern crate tempdir;
-    use super::ParsingError;
     use super::ini::Ini;
+    use super::ParsingError;
     use crate::config_parser::OnionConfiguration;
     use openssl::rsa::Rsa;
     use std::fs::File;
@@ -322,9 +322,7 @@ mod tests {
                     .set("handshake_timeout", timeout);
             }
             if let Some(timeout) = timeout {
-                config
-                    .with_section(Some("onion"))
-                    .set("timeout", timeout);
+                config.with_section(Some("onion")).set("timeout", timeout);
             }
             if let Some(duration) = round_time {
                 config

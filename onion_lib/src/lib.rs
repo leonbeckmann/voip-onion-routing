@@ -104,7 +104,11 @@ mod tests {
         run_peer(invalid_config_file);
     }
 
-    async fn run_valid_peer(dir: &TempDir, p2p_port: &str, api_port: &str) -> tokio::task::JoinHandle<()> {
+    async fn run_valid_peer(
+        dir: &TempDir,
+        p2p_port: &str,
+        api_port: &str,
+    ) -> tokio::task::JoinHandle<()> {
         let key_file = dir.path().join("peer.key");
         let priv_key_file = dir.path().join("peer_priv.key");
         // create RSA keys
