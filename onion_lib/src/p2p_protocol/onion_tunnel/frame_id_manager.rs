@@ -19,7 +19,7 @@ impl FrameIdManager {
     }
 
     pub fn new_frame_id(&mut self, tunnel_id: TunnelId, direction: Direction) -> FrameId {
-        let mut new_id: u64 = rand::random();
+        let mut new_id: FrameId = rand::random();
         while new_id < 2 || self.frame_ids.contains_key(&new_id) {
             new_id = rand::random();
         }

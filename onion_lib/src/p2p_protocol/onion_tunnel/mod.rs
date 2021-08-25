@@ -567,7 +567,7 @@ impl OnionTunnel {
         let _ = self.forward_event(FsmEvent::Shutdown).await;
     }
 
-    pub async fn unsubscribe(&self, connection_id: u64) -> bool {
+    pub async fn unsubscribe(&self, connection_id: ConnectionId) -> bool {
         if self.tunnel_type != TunnelType::CoverOnly {
             let available_guard = self.listeners_available.lock().await;
             if *available_guard {

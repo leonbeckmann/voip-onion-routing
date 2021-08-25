@@ -36,7 +36,7 @@ pub trait PeerType {
 impl PeerType for Client {
     const INIT_STATE: HandshakeState = HandshakeState::Start;
 
-    fn tunnel_update_reference(&self) -> u64 {
+    fn tunnel_update_reference(&self) -> FrameId {
         self.tunnel_update_ref
     }
 }
@@ -50,7 +50,7 @@ impl Client {
 impl PeerType for Server {
     const INIT_STATE: HandshakeState = HandshakeState::WaitForClientHello;
 
-    fn tunnel_update_reference(&self) -> u64 {
+    fn tunnel_update_reference(&self) -> FrameId {
         0
     }
 }

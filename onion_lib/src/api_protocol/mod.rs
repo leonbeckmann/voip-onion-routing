@@ -23,7 +23,6 @@ pub(crate) const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv da
 pub(crate) const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
 pub(crate) const ONION_COVER: u16 = 566; // send cover traffic to random peer
 
-type TunnelId = u32;
 type ConnectionId = u64;
 
 async fn handle_incoming_event(
@@ -283,7 +282,7 @@ impl ApiInterface {
      */
     pub async fn incoming_tunnel(
         &self,
-        tunnel_id: TunnelId,
+        tunnel_id: u32,
         listeners: Arc<Mutex<HashSet<ConnectionId>>>,
     ) {
         let connections = self.connections.lock().await;
@@ -312,7 +311,7 @@ impl ApiInterface {
     pub async fn incoming_data(
         &self,
         data: Vec<u8>,
-        tunnel_id: TunnelId,
+        tunnel_id: u32,
         listeners: Arc<Mutex<HashSet<ConnectionId>>>,
     ) {
         let connections = self.connections.lock().await;

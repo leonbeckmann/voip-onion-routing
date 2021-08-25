@@ -1,5 +1,6 @@
 use crate::api_protocol::event::{IncomingEvent, OutgoingEvent};
 use crate::api_protocol::messages::OnionMessageHeader;
+use crate::api_protocol::ConnectionId;
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -7,12 +8,12 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-fn get_id() -> u64 {
+fn get_id() -> ConnectionId {
     ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 pub struct Connection {
-    pub(super) internal_id: u64,
+    pub(super) internal_id: ConnectionId,
     write_tx: Sender<OutgoingEvent>,
 }
 

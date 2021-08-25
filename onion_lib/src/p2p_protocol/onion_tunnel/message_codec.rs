@@ -21,7 +21,7 @@ use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 
 const PADDING_LEN_SIZE: usize = size_of::<u16>();
 const MSG_TYPE_SIZE: usize = size_of::<u8>();
-const SEQ_NR_SIZE: usize = size_of::<u32>();
+const SEQ_NR_SIZE: usize = size_of::<SequenceNumber>();
 
 const FORWARD_FRAME_IDS_MAGIC_NUMBER: &[u8] = "FORWARD_FRAME_IDS_MAGIC_NUMBER".as_bytes();
 
@@ -132,12 +132,13 @@ impl RawData {
 }
 
 type IV = Bytes;
+type SequenceNumber = u32;
 
 #[derive(Debug, Clone)]
 struct SequenceNumberContext {
-    outgoing: u32,
-    newest_received: u32,
-    used_seq_nrs: HashSet<u32>,
+    outgoing: SequenceNumber,
+    newest_received: SequenceNumber,
+    used_seq_nrs: HashSet<SequenceNumber>,
 }
 
 impl SequenceNumberContext {
@@ -149,12 +150,12 @@ impl SequenceNumberContext {
         }
     }
 
-    fn get_next_seq_nr(&mut self) -> u32 {
+    fn get_next_seq_nr(&mut self) -> SequenceNumber {
         self.outgoing += 1;
         self.outgoing
     }
 
-    fn verify_incoming_seq_nr(&mut self, seq_nr: u32) -> Result<(), ProtocolError> {
+    fn verify_incoming_seq_nr(&mut self, seq_nr: SequenceNumber) -> Result<(), ProtocolError> {
         // reject packets that are too old, window is 20 sequence numbers in the past
         if self.newest_received >= 20 && self.newest_received - 20 > seq_nr {
             return Err(ProtocolError::ExpiredSequenceNumber);
@@ -1001,10 +1002,10 @@ impl P2pCodec for IntermediateHopCodec {
                         len_buf.copy_from_slice(len_raw);
                         let len = u16::from_le_bytes(len_buf) as usize;
 
-                        for chunk in remainder.chunks(size_of::<u64>()) {
-                            let mut current_id_buf = [0u8; size_of::<u64>()];
+                        for chunk in remainder.chunks(size_of::<FrameId>()) {
+                            let mut current_id_buf = [0u8; size_of::<FrameId>()];
                             current_id_buf.copy_from_slice(chunk);
-                            let id = u64::from_le_bytes(current_id_buf);
+                            let id = FrameId::from_le_bytes(current_id_buf);
                             ids.push(id);
                             if ids.len() == len {
                                 break;

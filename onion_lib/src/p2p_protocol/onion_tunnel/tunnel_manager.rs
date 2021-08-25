@@ -22,7 +22,7 @@ impl TunnelManager {
         }
     }
 
-    pub(crate) fn get_id() -> u32 {
+    pub(crate) fn get_id() -> TunnelId {
         ID_COUNTER.fetch_add(1, Ordering::Relaxed)
     }
 

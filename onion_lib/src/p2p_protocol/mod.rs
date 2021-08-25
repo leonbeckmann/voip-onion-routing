@@ -732,7 +732,7 @@ impl P2pInterface {
 #[derive(Error, Debug)]
 pub enum P2pError {
     #[error("Onion tunnel with ID '{0}' is not existent")]
-    InvalidTunnelId(u32),
+    InvalidTunnelId(TunnelId),
     #[error("Onion tunnel closed")]
     TunnelClosed,
     #[error("Handshake failed: {0}")]
