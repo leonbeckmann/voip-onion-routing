@@ -27,7 +27,7 @@ pub(crate) const MAX_PACKET_SIZE: usize = 2048;
 const CLIENT_HELLO_FORWARD_ID: FrameId = 1;
 
 pub type TunnelId = u32;
-type FrameId = u64;
+type FrameId = u32;
 pub type ConnectionId = u64;
 type Registration = Arc<(Mutex<NotifyState>, Notify)>;
 
