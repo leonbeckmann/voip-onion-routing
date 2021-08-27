@@ -58,7 +58,7 @@ struct RoundSynchronizer {
 }
 
 impl RoundSynchronizer {
-    fn new(round_time: Duration, host: &str, port: u16) -> RoundSynchronizer {
+    fn new(round_time: Duration, build_window: Duration, host: &str, port: u16) -> RoundSynchronizer {
         RoundSynchronizer {
             update_notify: Arc::new((
                 Mutex::new(NotifyState::Inactive),
@@ -72,7 +72,7 @@ impl RoundSynchronizer {
                 Notify::new(),
             )),
             round_time,
-            registration_window: round_time.saturating_sub(Duration::from_secs(1)), // TODO configurable
+            registration_window: round_time.saturating_sub(build_window),
             tunnel_registration_counter: Arc::new(Mutex::new(0)),
             round_cover_tunnel: Arc::new(Mutex::new(None)),
             local_addr: format!("{}:{:?}", host, port),
@@ -302,7 +302,7 @@ impl P2pInterface {
         api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<Self> {
         let round_sync =
-            RoundSynchronizer::new(config.round_time, &config.p2p_hostname, config.p2p_port);
+            RoundSynchronizer::new(config.round_time, config.build_window, &config.p2p_hostname, config.p2p_port);
         Ok(Self {
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
             frame_id_manager: Arc::new(RwLock::new(FrameIdManager::new())),

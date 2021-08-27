@@ -19,6 +19,7 @@ pub struct OnionConfiguration {
     pub onion_api_address: SocketAddr,
     pub rps_api_address: SocketAddr,
     pub round_time: Duration,
+    pub build_window: Duration,
     pub handshake_message_timeout: Duration,
     pub timeout: Duration,
 }
@@ -212,6 +213,15 @@ impl OnionConfiguration {
             },
         };
 
+        // round time (milli seconds)
+        let build_window = match onion_sec.get("build_window") {
+            None => Duration::from_secs(1), // default
+            Some(duration) => match duration.parse::<u64>() {
+                Ok(duration) => Duration::from_millis(duration),
+                Err(_) => return Err(ParsingError::from_str("Cannot parse 'build_window' to u64")),
+            },
+        };
+
         Ok(OnionConfiguration {
             p2p_port,
             p2p_hostname,
@@ -220,6 +230,7 @@ impl OnionConfiguration {
             onion_api_address,
             rps_api_address,
             round_time,
+            build_window,
             handshake_message_timeout,
             timeout,
         })

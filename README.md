@@ -48,6 +48,7 @@ The module requires a Windows INI configuration file for configuring the Onion m
 | hop_count         | onion   | u8                                    | Number of intermediate hops per tunnel, >= 2 |
 | api_address       | onion   | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for Onion layer |
 | round_time        | onion   | u64                                   | Round time in seconds (default=600s)| 
+| build_window      | onion   | u64                                   | Build window in milliseconds (default=1000ms)|
 | handshake_timeout | onion   | u64                                   | Handshake message timeout in ms (default=1000ms)| 
 | timeout           | onion   | u64                                   | Timeout for recognize inactive tunnels (default=15s)|
 | private_hostkey   | onion   | str                                   | Path to peer's private hostkey in PEM format |
@@ -64,7 +65,8 @@ p2p_port = 2000
 p2p_hostname = localhost
 hop_count = 3           
 api_address = localhost:2001
-round_time = 100    
+round_time = 100  
+build_window = 2000  
 private_hostkey = /etc/hostkey_priv.pem
 handshake_timeout = 1000
 timeout = 20s
