@@ -1,8 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use crate::p2p_protocol::messages::p2p_messages::{
-    ApplicationData, ApplicationData_oneof_message, ClientHello, CoverTraffic, HandshakeData,
-    RoutingInformation, ServerHello, TunnelFrame,
+    ApplicationData, ApplicationData_oneof_message, ClientHello, Close, CoverTraffic,
+    HandshakeData, RoutingInformation, ServerHello, TunnelFrame,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTH_PLACEHOLDER, IV_SIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
@@ -59,7 +59,6 @@ struct RawData {
 
 const APP_DATA: u8 = 1;
 const HANDSHAKE_DATA: u8 = 2;
-const CLOSE: u8 = 3;
 
 impl RawData {
     fn new(len: u16, message_type: u8, data: Vec<u8>) -> Self {
@@ -100,7 +99,7 @@ impl RawData {
         padding_size.copy_from_slice(padding_size_buf);
         let padding_len = u16::from_le_bytes(padding_size);
         let message_type = message_type_buf[0];
-        if message_type != APP_DATA && message_type != HANDSHAKE_DATA && message_type != CLOSE {
+        if message_type != APP_DATA && message_type != HANDSHAKE_DATA {
             log::warn!(
                 "Tunnel={:?}: Invalid message type: {}",
                 tunnel_id,
@@ -374,6 +373,7 @@ impl P2pCodec for InitiatorEndpoint {
                 // layered encryption via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
                 for (_, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
+                    // TODO makes this end-to-end AES-GCM for integrity protection
                     let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, false)?;
                     iv = Some(iv_);
                     data = data_;
@@ -383,7 +383,12 @@ impl P2pCodec for InitiatorEndpoint {
             }
             DataType::Close => {
                 // send close similar as app_data without fragmentation
-                let mut raw_data = RawData::new(PAYLOAD_SIZE as u16, CLOSE, vec![]).serialize();
+                let mut app_data = ApplicationData::new();
+                app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
+                app_data.set_close(Close::new());
+                let raw_data = app_data.write_to_bytes().unwrap();
+                let mut raw_data =
+                    RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
 
                 // layered encryption via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
@@ -605,6 +610,14 @@ impl P2pCodec for InitiatorEndpoint {
                             ApplicationData_oneof_message::cover_traffic(cover) => Ok(
                                 ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
                             ),
+                            ApplicationData_oneof_message::close(_) => {
+                                // initiator received close, deconstruct tunnel
+                                log::trace!(
+                                    "Tunnel={:?}: Initiator receives close",
+                                    self.tunnel_id
+                                );
+                                Ok(ProcessedData::ReceivedClose)
+                            }
                         },
                     };
                 }
@@ -620,11 +633,6 @@ impl P2pCodec for InitiatorEndpoint {
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
-            CLOSE => {
-                // initiator received close, deconstruct tunnel
-                log::trace!("Tunnel={:?}: Initiator receives close", self.tunnel_id);
-                Ok(ProcessedData::ReceivedClose)
-            }
             _ => return Err(ProtocolError::UnexpectedMessageType),
         }
     }
@@ -704,7 +712,12 @@ impl P2pCodec for TargetEndpoint {
         let iv_data_bytes = match data {
             DataType::Close => {
                 // send close to initiator endpoint similar to appData
-                let raw_data = RawData::new(PAYLOAD_SIZE as u16, CLOSE, vec![]).serialize();
+                let mut app_data = ApplicationData::new();
+                app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
+                app_data.set_close(Close::new());
+                let raw_data = app_data.write_to_bytes().unwrap();
+                let raw_data = RawData::new(PAYLOAD_SIZE as u16, APP_DATA, raw_data).serialize();
+
                 // encrypt via iv and key
                 assert!(self.crypto_context.is_some());
                 let (iv, raw_data) = self
@@ -873,6 +886,10 @@ impl P2pCodec for TargetEndpoint {
                             ApplicationData_oneof_message::cover_traffic(cover) => Ok(
                                 ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
                             ),
+                            ApplicationData_oneof_message::close(_) => {
+                                log::trace!("Tunnel={:?}: Target receives close", self.tunnel_id);
+                                Ok(ProcessedData::ReceivedClose)
+                            }
                         },
                     };
                 }
@@ -888,10 +905,6 @@ impl P2pCodec for TargetEndpoint {
                 }
                 Err(_) => Err(ProtocolError::ProtobufError),
             },
-            CLOSE => {
-                log::trace!("Tunnel={:?}: Target receives close", self.tunnel_id);
-                Ok(ProcessedData::ReceivedClose)
-            }
             _ => return Err(ProtocolError::UnexpectedMessageType),
         }
     }
@@ -981,6 +994,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Forward => {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
+                // TODO intermediate hop should never use end-to-end, no integrity protection required
                 let (iv, decrypted_data) =
                     self.crypto_context
                         .decrypt(&iv, &data, !self.server_hello_forwarded)?;
@@ -1046,6 +1060,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Backward => {
                 // encrypt using iv and key
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
+                // TODO intermediate hop should never use end-to-end, no integrity protection required
                 let (iv, encrypted_data) =
                     self.crypto_context
                         .encrypt(Some(&iv), &data, !self.server_hello_forwarded)?;

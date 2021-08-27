@@ -67,6 +67,7 @@ message ApplicationData {
   oneof message {
     bytes data = 2;
     CoverTraffic cover_traffic = 3;
+    Close close = 4;
   }
 }
 
