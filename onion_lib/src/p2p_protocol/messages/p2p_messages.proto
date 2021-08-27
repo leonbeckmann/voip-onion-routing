@@ -30,22 +30,22 @@ message ClientHello {
 }
 
 message ServerHello {
-  // used for hops to tell next hop how to address prev hop
-  uint32 backward_frame_id = 1;
   // public ECDHE parameter
-  bytes ecdh_public_key = 2;
+  bytes ecdh_public_key = 1;
   // challenge for client authentication
-  bytes challenge = 3;
+  bytes challenge = 2;
   // iv for encrypted data
-  bytes iv = 4;
+  bytes iv = 3;
   // encrypted data
-  bytes encrypted_data = 5;
+  bytes encrypted_data = 4;
 }
 
 message EncryptedServerHelloData {
   bytes signature = 1;
-  repeated uint32 backward_frame_ids = 2;
-  repeated uint32 forward_frame_ids = 3;
+  // used for hops to tell next hop how to address prev hop
+  uint32 backward_frame_id = 2;
+  repeated uint32 backward_frame_ids = 3;
+  repeated uint32 forward_frame_ids = 4;
 }
 
 message RoutingInformation {

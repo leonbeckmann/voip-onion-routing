@@ -174,6 +174,12 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             Direction::Backward,
             10,
         ));
+        encrypted_data.set_backward_frame_id(
+            self.frame_id_manager
+                .write()
+                .await
+                .new_frame_id(self.tunnel_id, Direction::Backward),
+        );
         let raw_enc_data = encrypted_data.write_to_bytes().unwrap();
 
         // encrypt signature for anonymity
@@ -186,12 +192,6 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
 
         // create server hello and give it to message_codec
         let mut server_hello = ServerHello::new();
-        server_hello.set_backward_frame_id(
-            self.frame_id_manager
-                .write()
-                .await
-                .new_frame_id(self.tunnel_id, Direction::Backward),
-        );
         server_hello.set_ecdh_public_key(receiver_pub_der.into());
         server_hello.set_challenge(self.crypto_context.get_challenge().to_owned().into());
         server_hello.set_iv(iv.into());
@@ -287,7 +287,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         codec
             .process_forward_frame_ids(enc_server_hello_data.forward_frame_ids)
             .await?;
-        codec.set_backward_frame_id(data.backward_frame_id);
+        codec.set_backward_frame_id(enc_server_hello_data.backward_frame_id);
         codec.set_backward_frame_ids(enc_server_hello_data.backward_frame_ids);
         codec.add_crypto_context(cc);
 
