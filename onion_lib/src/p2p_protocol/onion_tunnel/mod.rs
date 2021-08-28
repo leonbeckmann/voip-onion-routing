@@ -313,11 +313,19 @@ impl OnionTunnel {
                                 }
                                 IncomingEventMessage::Downgraded => {
                                     log::debug!("Tunnel={:?}: Received downgrade.", tunnel_id,);
-                                    tunnel_manager
-                                        .write()
-                                        .await
+                                    let mut tunnel_manager_guard = tunnel_manager.write().await;
+                                    tunnel_manager_guard
                                         .downgrade_tunnel(&tunnel_id, false)
                                         .await;
+                                    // check for tunnel_update, then we would have downgrade also the new tunnel
+                                    let new_tunnel_id = tunnel_manager_guard.resolve_tunnel_id(
+                                        tunnel_manager_guard.resolve_reverse_tunnel_id(tunnel_id),
+                                    );
+                                    if new_tunnel_id != tunnel_id {
+                                        tunnel_manager_guard
+                                            .downgrade_tunnel(&new_tunnel_id, false)
+                                            .await;
+                                    }
                                 }
                                 IncomingEventMessage::Data(data) => {
                                     let redirected_tunnel_id = tunnel_manager
