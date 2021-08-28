@@ -58,7 +58,12 @@ struct RoundSynchronizer {
 }
 
 impl RoundSynchronizer {
-    fn new(round_time: Duration, build_window: Duration, host: &str, port: u16) -> RoundSynchronizer {
+    fn new(
+        round_time: Duration,
+        build_window: Duration,
+        host: &str,
+        port: u16,
+    ) -> RoundSynchronizer {
         RoundSynchronizer {
             update_notify: Arc::new((
                 Mutex::new(NotifyState::Inactive),
@@ -301,8 +306,12 @@ impl P2pInterface {
         config: OnionConfiguration,
         api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<Self> {
-        let round_sync =
-            RoundSynchronizer::new(config.round_time, config.build_window, &config.p2p_hostname, config.p2p_port);
+        let round_sync = RoundSynchronizer::new(
+            config.round_time,
+            config.build_window,
+            &config.p2p_hostname,
+            config.p2p_port,
+        );
         Ok(Self {
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
             frame_id_manager: Arc::new(RwLock::new(FrameIdManager::new())),
@@ -491,7 +500,9 @@ impl P2pInterface {
             Some(tunnel) => tunnel.unsubscribe(connection_id).await,
         };
         if res {
-            tunnel_manager.downgrade_tunnel(&redirected_tunnel_id);
+            tunnel_manager
+                .downgrade_tunnel(&redirected_tunnel_id, true)
+                .await;
         }
         Ok(())
     }
@@ -584,10 +595,15 @@ impl P2pInterface {
         match rx.await {
             Ok(res) => match res {
                 TunnelResult::Connected => {
-                    self.tunnel_manager
-                        .write()
-                        .await
-                        .set_connected(&tunnel_id, listener.is_none());
+                    if listener.is_none() {
+                        self.tunnel_manager
+                            .write()
+                            .await
+                            .downgrade_tunnel(&tunnel_id, false)
+                            .await;
+                    } else {
+                        self.tunnel_manager.write().await.set_connected(&tunnel_id);
+                    }
                     *self.round_sync.round_cover_tunnel.lock().await = Some(tunnel_id);
                     log::debug!("Tunnel with ID={:?} established", tunnel_id);
                     Ok((tunnel_id, host_key))
@@ -697,25 +713,25 @@ impl P2pInterface {
         match rx.await {
             Ok(res) => match res {
                 TunnelResult::Connected => {
-                    let mut tunnel_manager_guard = self.tunnel_manager.write().await;
-                    tunnel_manager_guard.set_connected(&new_tunnel_id, false);
                     log::debug!(
                         "Tunnel={:?}: New tunnel with ID={:?} established",
                         tunnel_id,
                         new_tunnel_id
                     );
-
-                    // redirect the tunnel id
+                    // acquire the write lock for the tunnel manager
+                    let mut tunnel_manager_guard = self.tunnel_manager.write().await;
+                    // redirect the tunnel id such that the old tunnel is not used anymore for outgoing traffic
                     tunnel_manager_guard.add_redirection_link(tunnel_id, new_tunnel_id);
-
-                    // destroy the old tunnel
-                    if tunnel_manager_guard.get_tunnel(&tunnel_id).is_none() {
-                        // the old tunnel has been closed during the tunnel update, close the new one
-                        log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, close new tunnel", new_tunnel_id, tunnel_id);
-                        tunnel_manager_guard.downgrade_tunnel(&new_tunnel_id);
-                        if let Some(tunnel) = tunnel_manager_guard.get_tunnel(&new_tunnel_id) {
-                            tunnel.close_tunnel().await;
-                        }
+                    // downgrade the new tunnel if the old has been downgraded or shutdown
+                    let res = tunnel_manager_guard.get_tunnel(&tunnel_id);
+                    if res.is_none() || res.unwrap().status == TunnelStatus::Downgraded {
+                        // the old tunnel has been downgraded during the tunnel update, downgrade the new one
+                        log::debug!("Tunnel={:?}: Tunnel with id={:?} has been closed during updating, downgrade new tunnel", new_tunnel_id, tunnel_id);
+                        tunnel_manager_guard
+                            .downgrade_tunnel(&new_tunnel_id, true)
+                            .await;
+                    } else {
+                        tunnel_manager_guard.set_connected(&new_tunnel_id);
                     }
                 }
                 TunnelResult::Failure(e) => {

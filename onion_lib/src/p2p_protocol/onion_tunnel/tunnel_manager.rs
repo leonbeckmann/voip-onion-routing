@@ -1,6 +1,6 @@
-use crate::p2p_protocol::onion_tunnel::{OnionTunnel, TunnelStatus};
+use crate::p2p_protocol::onion_tunnel::OnionTunnel;
 use crate::p2p_protocol::{ConnectionId, TunnelId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
@@ -43,27 +43,36 @@ impl TunnelManager {
             .map(|(tunnel, _)| tunnel)
     }
 
-    pub(crate) fn set_connected(&mut self, tunnel_id: &TunnelId, cover_only: bool) {
+    pub(crate) fn set_connected(&mut self, tunnel_id: &TunnelId) {
         if let Some((tunnel, _)) = self.tunnel_registry.get_mut(tunnel_id) {
             log::trace!(
                 "Tunnel Manager: Mark tunnel with id={:?} as connected",
-                tunnel_id
+                tunnel_id,
             );
-            tunnel.status = if cover_only {
-                TunnelStatus::Downgraded
-            } else {
-                TunnelStatus::Connected
-            };
+            tunnel.set_connected();
         }
     }
 
-    pub(crate) fn downgrade_tunnel(&mut self, tunnel_id: &TunnelId) {
+    pub(crate) async fn downgrade_tunnel(&mut self, tunnel_id: &TunnelId, close: bool) {
         if let Some((tunnel, _)) = self.tunnel_registry.get_mut(tunnel_id) {
-            log::trace!(
+            log::debug!(
                 "Tunnel Manager: Mark tunnel with id={:?} as downgraded",
                 tunnel_id
             );
-            tunnel.status = TunnelStatus::Downgraded;
+            if close {
+                tunnel.close_tunnel().await;
+            }
+            tunnel.downgrade().await;
+        }
+    }
+
+    pub(crate) async fn register_listeners(
+        &mut self,
+        tunnel_id: &TunnelId,
+        listeners: HashSet<ConnectionId>,
+    ) {
+        if let Some((tunnel, _)) = self.tunnel_registry.get_mut(tunnel_id) {
+            tunnel.set_listeners(listeners, false).await;
         }
     }
 
@@ -157,7 +166,7 @@ impl TunnelManager {
             }
         }
         for id in downgrades {
-            self.downgrade_tunnel(&id);
+            self.downgrade_tunnel(&id, true).await;
         }
     }
 
