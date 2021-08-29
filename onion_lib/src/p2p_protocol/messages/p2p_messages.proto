@@ -2,16 +2,27 @@ syntax = "proto3";
 
 // P2P Onion Tunnel frame
 message TunnelFrame {
-
   // an identifier for identifying the corresponding tunnel of this frame
   fixed32 frame_id = 1;
 
   // random, unpredictable iv used for encryption
   bytes iv = 2;
 
-  // auth_tag + [padding_size: u16, data_type: u8, data, padding] encrypted
+  // auth_tag | FrameData as bytes (encrypted)
   bytes data = 3;
+}
 
+message FrameData {
+  fixed32 data_size = 1;
+  bool app_data = 2;
+  bytes data = 3;
+}
+
+message FrameDataType {
+  oneof message {
+    HandshakeData handshake_data = 1;
+    ApplicationData app_data = 2;
+  }
 }
 
 message HandshakeData {

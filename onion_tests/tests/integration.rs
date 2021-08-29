@@ -29,6 +29,8 @@ const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tu
 const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
 const ONION_COVER: u16 = 566; // send cover traffic to random peer
 
+const PAYLOAD_CHUNK_SIZE: usize = 964;
+
 #[allow(clippy::too_many_arguments)]
 fn run_peer(
     p2p_port: &str,
@@ -440,7 +442,9 @@ fn integration_test() {
 
     // send fragmented data from Alice to Bob
     log::info!("TEST: Send fragmented TunnelData from Alice to Bob via updated tunnel");
-    let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
+    let message = (0..PAYLOAD_CHUNK_SIZE + 1)
+        .map(|_| rand::random::<u8>())
+        .collect::<Vec<u8>>();
     let tunnel_data = OnionTunnelData::new(alice_to_bob_tunnel, message.to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut alice_api);
 
@@ -462,7 +466,9 @@ fn integration_test() {
 
     // send fragmented data from Bob to Alice
     log::info!("TEST: Send fragmented TunnelData from Bob to Alice");
-    let message = (0..1024).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
+    let message = (0..PAYLOAD_CHUNK_SIZE + 1)
+        .map(|_| rand::random::<u8>())
+        .collect::<Vec<u8>>();
     let tunnel_data = OnionTunnelData::new(bob_from_alice_tunnel, message.to_vec()).to_be_vec();
     write_msg(ONION_TUNNEL_DATA, tunnel_data, &mut bob_api);
 
