@@ -149,6 +149,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             data
         );
 
+        // check if backward frame id valid
+        FrameIdManager::verify_frame_id(data.backward_frame_id)?;
+
         // get public ECDHE parameter
         let receiver_pub_der = self.crypto_context.get_public_key();
 
@@ -234,14 +237,11 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let enc_server_hello_data = match EncryptedServerHelloData::parse_from_bytes(&dec_data_raw)
         {
             Ok(data) => {
-                if data.forward_frame_ids.is_empty() || data.backward_frame_ids.is_empty() {
-                    log::warn!(
-                        "Tunnel={:?}: Provided frame IDS in ServerHello are empty",
-                        self.tunnel_id
-                    );
-                    return Err(ProtocolError::EmptyFrameIds);
-                }
-                // frame ids available
+                // valida frame ids
+                FrameIdManager::verify_frame_id(data.backward_frame_id)?;
+                FrameIdManager::verify_frame_ids(&data.forward_frame_ids, 10)?;
+                FrameIdManager::verify_frame_ids(&data.backward_frame_ids, 10)?;
+                // frame ids valid and available
                 if self.next_hop.is_none() {
                     // frame ids for target, store one identifier for tunnel updates, unwrap is safe
                     self.frame_id_manager.write().await.add_tunnel_reference(
@@ -339,6 +339,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             routing
         );
 
+        FrameIdManager::verify_frame_ids(&routing.backward_frame_ids, 10)?;
         let mut codec_guard = self.message_codec.lock().await;
         codec_guard.set_backward_frame_ids(routing.backward_frame_ids);
         let target_endpoint = match (*codec_guard).as_any().downcast_mut::<TargetEndpoint>() {

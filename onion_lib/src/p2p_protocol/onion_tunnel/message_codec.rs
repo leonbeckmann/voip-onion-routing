@@ -345,7 +345,6 @@ impl P2pCodec for InitiatorEndpoint {
             frame.set_frame_id(CLIENT_HELLO_FORWARD_ID);
         } else {
             // choose a random
-            // TODO check not zero
             let index = rand::random::<usize>() % self.forward_frame_ids.len();
             assert!(index < self.forward_frame_ids.len());
             frame.set_frame_id(*self.forward_frame_ids.get(index).unwrap());
@@ -690,7 +689,6 @@ impl P2pCodec for TargetEndpoint {
         if self.backward_frame_ids.is_empty() {
             return Err(ProtocolError::EmptyFrameIds);
         } else {
-            // TODO check not zero
             let index = rand::random::<usize>() % self.backward_frame_ids.len();
             assert!(index < self.backward_frame_ids.len());
             frame.set_frame_id(*self.backward_frame_ids.get(index).unwrap());
@@ -1028,7 +1026,6 @@ impl P2pCodec for IntermediateHopCodec {
                     frame.set_frame_id(CLIENT_HELLO_FORWARD_ID);
                 } else {
                     // choose random forward id
-                    // TODO check FrameId not zero
                     let index = rand::random::<usize>() % self.forward_frame_ids.len();
                     assert!(index < self.forward_frame_ids.len());
                     frame.set_frame_id(*self.forward_frame_ids.get(index).unwrap());
@@ -1049,7 +1046,6 @@ impl P2pCodec for IntermediateHopCodec {
                                                     // choose random backward id
                 let index = rand::random::<usize>() % self.backward_frame_ids.len();
                 assert!(index < self.backward_frame_ids.len());
-                // TODO check frameID not zero
                 frame.set_frame_id(*self.backward_frame_ids.get(index).unwrap());
                 // TODO check IV
                 frame.set_iv(iv.into());

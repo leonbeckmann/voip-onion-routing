@@ -939,6 +939,8 @@ pub enum ProtocolError {
     EmptyFrameIds,
     #[error("Unsupported acction")]
     UnsupportedAction,
+    #[error("Received an invalid frame ID within the handshake")]
+    InvalidFrameId,
 }
 
 #[derive(Debug)]

@@ -1,6 +1,7 @@
+use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub struct FrameIdManager {
@@ -16,6 +17,30 @@ impl FrameIdManager {
             used_frame_ids: HashMap::new(),
             ref_ids: HashMap::new(),
         }
+    }
+
+    pub fn verify_frame_ids(ids: &[FrameId], count: usize) -> Result<(), ProtocolError> {
+        let mut unique_ids = HashSet::new();
+        if ids.len() != count {
+            return Err(ProtocolError::EmptyFrameIds);
+        }
+        for id in ids {
+            if *id < 2 {
+                return Err(ProtocolError::InvalidFrameId);
+            }
+            let _ = unique_ids.insert(*id);
+        }
+        if unique_ids.len() != count {
+            return Err(ProtocolError::InvalidFrameId);
+        }
+        Ok(())
+    }
+
+    pub fn verify_frame_id(id: FrameId) -> Result<(), ProtocolError> {
+        if id < 2 {
+            return Err(ProtocolError::InvalidFrameId);
+        }
+        Ok(())
     }
 
     pub fn new_frame_id(&mut self, tunnel_id: TunnelId, direction: Direction) -> FrameId {
