@@ -169,6 +169,7 @@ mod tests {
 
     #[test]
     fn unit_api_connection() {
+        // TODO: move test setup into single function for all tests
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async {
@@ -180,6 +181,14 @@ mod tests {
             connection.start(client, tx_in, rx_out).await;
 
             // In the following task 1 and 2 referes to the async tasks created in connection.start()
+
+            // Assert boths tasks are running
+            timeout(Duration::from_millis(50), tx_out.closed())
+                .await
+                .unwrap_err();
+            timeout(Duration::from_millis(50), rx_in.recv())
+                .await
+                .unwrap_err();
 
             // Close API endpoint
             drop(server);
@@ -240,6 +249,52 @@ mod tests {
             server.write_all(&incoming_event).await.unwrap();
 
             // Task 2 fails to forward the incoming event to the API and exits
+            // Assert task 1 running, task 2 exited
+            timeout(Duration::from_millis(50), tx_out.closed())
+                .await
+                .unwrap_err();
+            assert!(timeout(Duration::from_secs(1), rx_in.recv())
+                .await
+                .unwrap()
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn unit_api_connection_substraction_overflow() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            let (client, mut server) = tokio::io::duplex(64);
+            let (tx_out, rx_out) = tokio::sync::mpsc::channel(16);
+            let (tx_in, mut rx_in) = tokio::sync::mpsc::channel(16);
+
+            let connection = Connection::new(tx_out.clone());
+            connection.start(client, tx_in, rx_out).await;
+
+            // In the following task 1 and 2 referes to the async tasks created in connection.start()
+
+            // Assert boths tasks are running
+            timeout(Duration::from_millis(50), tx_out.closed())
+                .await
+                .unwrap_err();
+            timeout(Duration::from_millis(50), rx_in.recv())
+                .await
+                .unwrap_err();
+
+            // Close API receiver endpoint
+            rx_in.close();
+            // Send event to task 2
+            let incoming_event: Vec<u8> = vec![0, 0, 4, 210, 127, 0, 0, 1, 107, 101, 121];
+            let hdr = OnionMessageHeader::new(
+                (OnionMessageHeader::hdr_size() - 1) as u16,
+                api_protocol::ONION_TUNNEL_BUILD,
+            )
+            .to_be_vec();
+            server.write_all(&hdr).await.unwrap();
+            server.write_all(&incoming_event).await.unwrap();
+
+            // Task 2 fails due to the substraction overflow and exits
             // Assert task 1 running, task 2 exited
             timeout(Duration::from_millis(50), tx_out.closed())
                 .await
