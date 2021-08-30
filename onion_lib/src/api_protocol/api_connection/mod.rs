@@ -1,10 +1,10 @@
 use crate::api_protocol::event::{IncomingEvent, OutgoingEvent};
 use crate::api_protocol::messages::OnionMessageHeader;
 use crate::api_protocol::ConnectionId;
+use ignore_result::Ignore;
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -17,7 +17,10 @@ pub struct Connection {
     write_tx: Sender<OutgoingEvent>,
 }
 
-async fn read_event(rx: &mut ReadHalf<TcpStream>) -> anyhow::Result<IncomingEvent> {
+async fn read_event<T>(rx: &mut ReadHalf<T>) -> anyhow::Result<IncomingEvent>
+where
+    T: AsyncRead,
+{
     // read message header
     let mut buf = [0u8; OnionMessageHeader::hdr_size()];
     rx.read_exact(&mut buf).await?;
@@ -40,7 +43,10 @@ async fn read_event(rx: &mut ReadHalf<TcpStream>) -> anyhow::Result<IncomingEven
     IncomingEvent::try_from((buf.to_vec(), hdr))
 }
 
-async fn write_event(tx: &mut WriteHalf<TcpStream>, e: OutgoingEvent) -> anyhow::Result<()> {
+async fn write_event<T>(tx: &mut WriteHalf<T>, e: OutgoingEvent) -> anyhow::Result<()>
+where
+    T: AsyncWrite,
+{
     // parse event to raw
     let msg_type = match e {
         OutgoingEvent::TunnelReady(_) => super::ONION_TUNNEL_READY,
@@ -74,12 +80,14 @@ impl Connection {
         Ok(())
     }
 
-    pub(crate) async fn start(
+    pub(crate) async fn start<T>(
         &self,
-        stream: TcpStream,
+        stream: T,
         read_tx: Sender<IncomingEvent>,
         mut write_rx: Receiver<OutgoingEvent>,
-    ) {
+    ) where
+        T: AsyncRead + AsyncWrite + Send + 'static,
+    {
         log::trace!(
             "Connection={:?}: Start the connection listeners",
             self.internal_id
@@ -108,7 +116,7 @@ impl Connection {
                 }
             }
             log::trace!("Connection={:?}: Close SenderHalf", id);
-            let _ = tx.shutdown();
+            tx.shutdown().await.ignore();
             write_rx.close();
         });
 
