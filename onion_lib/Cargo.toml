@@ -29,3 +29,4 @@ protoc-rust = "2.23.0"
 [dev-dependencies]
 tempdir = "0.3.7"       # used for creating temp dir for testing config-parser
 pin-utils = "0.1.0"
+ctor = "0.1.20"

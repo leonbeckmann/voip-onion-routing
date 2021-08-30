@@ -113,7 +113,7 @@ mod tests {
                 assert_eq!(packet.host_key, vec![107, 101, 121]);
             }
             _ => {
-                panic!("Invalid event. Expected: OnionTunnelBuild");
+                panic!("Invalid event. Expected: OnionTunnelBuild"); // coverage-unreachable
             }
         };
 
@@ -127,7 +127,7 @@ mod tests {
                 assert_eq!(packet.host_key, vec![107, 101, 121]);
             }
             _ => {
-                panic!("Invalid event. Expected: OnionTunnelBuild");
+                panic!("Invalid event. Expected: OnionTunnelBuild"); // coverage-unreachable
             }
         };
 
@@ -143,7 +143,7 @@ mod tests {
                 assert_eq!(packet.tunnel_id, 1025);
             }
             _ => {
-                panic!("Invalid event. Expected: OnionTunnelDestroy");
+                panic!("Invalid event. Expected: OnionTunnelDestroy"); // coverage-unreachable
             }
         };
 
@@ -166,7 +166,7 @@ mod tests {
                 assert_eq!(packet.data, vec![68, 97, 116, 97])
             }
             _ => {
-                panic!("Invalid event. Expected: OnionTunnelData");
+                panic!("Invalid event. Expected: OnionTunnelData"); // coverage-unreachable
             }
         };
 
@@ -184,7 +184,7 @@ mod tests {
                 assert_eq!(packet.cover_size, 1025);
             }
             _ => {
-                panic!("Invalid event. Expected: OnionCover");
+                panic!("Invalid event. Expected: OnionCover"); // coverage-unreachable
             }
         };
 

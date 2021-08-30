@@ -95,8 +95,7 @@ impl Connection {
                     None => {
                         // sender side was closed by api_protocol
                         // This is unreachable, because `self` owns the sender half of write_rx and therefore the channel will never be closed.
-                        #[cfg(not(tarpaulin_include))]
-                        break;
+                        break; // coverage-unreachable
                     }
                     Some(e) => {
                         if let Err(e) = write_event(&mut tx, e).await {

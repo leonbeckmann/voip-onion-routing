@@ -9,6 +9,17 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::select;
 
+// Enable trace logging for all tests when coverage is enabled
+#[cfg(all(test, coverage))]
+#[ctor::ctor]
+fn init() {
+    env_logger::Builder::new()
+        .target(env_logger::Target::Stdout)
+        .parse_filters("trace")
+        .try_init()
+        .unwrap();
+}
+
 pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(run_peer_async(config_file))

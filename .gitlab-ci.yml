@@ -44,19 +44,20 @@ rust-code-lint:
 
 rust-coverage:
   stage: build
-  image: rust:latest
+  image: rust:nightly
   <<: *caching_rust
   tags:
     - docker
-    # cargo-tarpaulin only works on linux with privileges to disable ASLR
     - linux
   before_script:
     - apt-get update -yq && apt-get install -y protobuf-compiler && protoc --version
-    - cargo install cargo-tarpaulin
+    - rustup component add llvm-tools-preview
+    - cargo install grcov
   script:
-    - cargo tarpaulin --exclude-files "onion_lib/src/p2p_protocol/messages/*" "onion_bin/*" --all-features --out=Xml --out=Html --output-dir=coverage
+    - RUSTFLAGS="-Zinstrument-coverage --cfg coverage" LLVM_PROFILE_FILE="coverage-%p-%m.profraw" cargo test
+    - "$CI_PROJECT_DIR/.cargo/bin/grcov" . -s . --binary-path ./target/debug/ -t html --branch --ignore-not-existing --ignore 'onion_lib/src/p2p_protocol/messages/*' --ignore 'onion_bin/*' --ignore 'onion_examples/*' --ignore 'onion_tests/*' -o coverage --excl-line coverage-unreachable
+    - "$CI_PROJECT_DIR/.cargo/bin/grcov" . -s . --binary-path ./target/debug/ -t cobertura --branch --ignore-not-existing --ignore 'onion_lib/src/p2p_protocol/messages/*' --ignore 'onion_bin/*' --ignore 'onion_examples/*' --ignore 'onion_tests/*' -o coverage --excl-line coverage-unreachable
   after_script:
-    - mv coverage/tarpaulin-report.html coverage/index.html
     - mkdir -p public
     - mv coverage/ public/coverage/
   artifacts:
@@ -64,7 +65,6 @@ rust-coverage:
       - public/
     reports:
       cobertura: public/coverage/cobertura.xml
-  coverage: '/(\d+\.\d+)% coverage/'
 
 rust-latest-linux:
   before_script:
