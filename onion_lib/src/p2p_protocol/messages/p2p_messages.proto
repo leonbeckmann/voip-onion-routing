@@ -22,7 +22,12 @@ message FrameDataType {
   oneof message {
     HandshakeData handshake_data = 1;
     ApplicationData app_data = 2;
+    ForwardFrameIds forward_frame_ids = 3;
   }
+}
+
+message ForwardFrameIds {
+  repeated uint32 forward_frame_ids = 1;
 }
 
 message HandshakeData {
