@@ -377,9 +377,9 @@ impl P2pCodec for InitiatorEndpoint {
 
                 // layered encryption via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
-                for (_, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
+                for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
                     // TODO makes this end-to-end AES-GCM for integrity protection
-                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, false)?;
+                    let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0)?;
                     iv = Some(iv_);
                     data = data_;
                 }
@@ -983,10 +983,14 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Forward => {
                 log::debug!("Tunnel={:?}: Hop receives a forward message, decrypt the payload and pass it to the next hop {:?}", self.tunnel_id, self.next_hop);
                 // decrypt using iv and key
-                // TODO intermediate hop should never use end-to-end, no integrity protection required
-                let (iv, decrypted_data) =
-                    self.crypto_context
-                        .decrypt(&iv, &data, !self.server_hello_forwarded)?;
+                // An intermediate hop is the final decrypting hop in two cases:
+                // 1. server_hello was not forwarded so far: Then we will forward an unencrypted client_hello message
+                // 2. forward_frame_ids is empty: After server_hello is received by the server, the server sends us the forward_frame_ids
+                let (iv, decrypted_data) = self.crypto_context.decrypt(
+                    &iv,
+                    &data,
+                    !self.server_hello_forwarded || self.forward_frame_ids.is_empty(),
+                )?;
 
                 if self.server_hello_forwarded && self.forward_frame_ids.is_empty() {
                     // expect frame ids

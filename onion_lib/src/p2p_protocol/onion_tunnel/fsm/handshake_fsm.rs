@@ -3,7 +3,7 @@ use crate::p2p_protocol::messages::p2p_messages::{
     RoutingInformation_oneof_optional_challenge_response, ServerHello,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{
-    CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext,
+    CryptoContext, HandshakeCryptoConfig, HandshakeCryptoContext, AUTH_PLACEHOLDER, AUTH_SIZE,
 };
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, IsTargetEndpoint, ProtocolError};
@@ -183,10 +183,11 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 .await
                 .new_frame_id(self.tunnel_id, Direction::Backward),
         );
-        let raw_enc_data = encrypted_data.write_to_bytes().unwrap();
+        let mut raw_enc_data = vec![AUTH_PLACEHOLDER; AUTH_SIZE];
+        raw_enc_data.append(&mut encrypted_data.write_to_bytes().unwrap());
 
         // encrypt signature for anonymity
-        let (iv, enc_data) = cc.encrypt(None, &raw_enc_data, false)?;
+        let (iv, enc_data) = cc.encrypt(None, &raw_enc_data, true)?;
 
         // store context at codec and set backward frame id on target endpoint
         let mut codec = self.message_codec.lock().await;
@@ -231,7 +232,8 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let mut cc = CryptoContext::new(shared_secret, true);
 
         // decrypt signature
-        let (_, dec_data_raw) = cc.decrypt(&data.iv, &data.encrypted_data, false)?;
+        let (_, dec_data_raw) = cc.decrypt(&data.iv, &data.encrypted_data, true)?;
+        let dec_data_raw = dec_data_raw[AUTH_SIZE..].to_vec();
 
         // parse dec_data into EncryptedServerHello
         let enc_server_hello_data = match EncryptedServerHelloData::parse_from_bytes(&dec_data_raw)
@@ -321,11 +323,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             self.tunnel_id,
             data
         );
-        if let Err(e) = codec.write(DataType::RoutingInformation(data)).await {
-            Err(e)
-        } else {
-            Ok(())
-        }
+        codec.write(DataType::RoutingInformation(data)).await
     }
 
     pub async fn action_recv_routing(

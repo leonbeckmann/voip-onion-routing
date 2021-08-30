@@ -13,6 +13,7 @@ use crate::p2p_protocol::onion_tunnel::{FsmLockState, IncomingEventMessage, Peer
 use crate::p2p_protocol::{Direction, FrameId, TunnelId};
 use async_trait::async_trait;
 use bytes::Bytes;
+use ignore_result::Ignore;
 use std::net::SocketAddr;
 use std::ops::{Add, Sub};
 use std::sync::Arc;
@@ -682,7 +683,6 @@ impl FiniteStateMachine for InitiatorStateMachine {
                 });
 
                 // run the handshake fsm
-                let handshake_timeout = handshake_timeout;
                 tokio::spawn(async move {
                     handshake_fsm
                         .run(event_hooked_rx, hooked_result_tx.clone(), handshake_timeout)
@@ -696,11 +696,12 @@ impl FiniteStateMachine for InitiatorStateMachine {
                         "Tunnel={:?}: Cannot start the handshake, send handshake failure to FSM",
                         tunnel_id
                     );
-                    let _ = final_result_tx
+                    final_result_tx
                         .send(FsmEvent::HandshakeResult(Err(
                             ProtocolError::HandshakeSendFailure,
                         )))
-                        .await;
+                        .await
+                        .ignore();
                     return;
                 }
 
