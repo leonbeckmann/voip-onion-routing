@@ -232,4 +232,29 @@ mod tests {
         v2.extend(vec![0, 0, 0, 0, 4, 1]);
         assert_eq!(v, v2);
     }
+
+    #[test]
+    fn unit_incoming_event_invalid_message_size() {
+        let raw = vec![0, 0, 4, 210, 127, 0, 0, 1, 107, 101, 121];
+
+        let hdr = OnionMessageHeader::new(
+            (raw.len() + OnionMessageHeader::hdr_size() - 1) as u16,
+            api_protocol::ONION_TUNNEL_BUILD,
+        );
+
+        IncomingEvent::try_from((raw.clone(), hdr)).unwrap_err();
+
+        let hdr = OnionMessageHeader::new(
+            (raw.len() + OnionMessageHeader::hdr_size() + 1) as u16,
+            api_protocol::ONION_TUNNEL_BUILD,
+        );
+
+        IncomingEvent::try_from((raw, hdr)).unwrap_err();
+    }
+
+    #[test]
+    fn unit_incoming_event_invalid_message_type() {
+        let raw = vec![0, 0, 4, 210, 127, 0, 0, 1, 107, 101, 121];
+        parse_event(raw, 55555).unwrap_err();
+    }
 }

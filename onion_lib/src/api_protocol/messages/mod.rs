@@ -26,7 +26,6 @@ impl OnionMessageHeader {
         let mut v = vec![];
         v.append(&mut self.size.to_be_bytes().to_vec());
         v.append(&mut self.msg_type.to_be_bytes().to_vec());
-        v.append(&mut vec![]);
         v
     }
 }
@@ -54,7 +53,7 @@ impl TryFrom<&[u8; Self::hdr_size()]> for OnionMessageHeader {
  * Onion Tunnel Build [reserved: u15, ip_version: u1, onion_port: u16, ip_addr: u32/u128, key: [u8]]
  * Direction: Incoming
  */
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OnionTunnelBuild {
     _reserved_v: u16,
     pub onion_port: u16,
@@ -85,7 +84,6 @@ impl OnionTunnelBuild {
             }
         }
         v.extend(&self.host_key);
-        v.append(&mut vec![]);
         v
     }
 }
@@ -158,7 +156,6 @@ impl OnionTunnelReady {
         let mut v = vec![];
         v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
         v.extend(&self.host_key);
-        v.append(&mut vec![]);
         v
     }
 }
@@ -195,10 +192,7 @@ impl OnionTunnelIncoming {
     }
 
     pub fn to_be_vec(&self) -> Vec<u8> {
-        let mut v = vec![];
-        v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
-        v.append(&mut vec![]);
-        v
+        self.tunnel_id.to_be_bytes().to_vec()
     }
 
     const fn packet_size() -> usize {
@@ -237,10 +231,7 @@ impl OnionTunnelDestroy {
     }
 
     pub fn to_be_vec(&self) -> Vec<u8> {
-        let mut v = vec![];
-        v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
-        v.append(&mut vec![]);
-        v
+        self.tunnel_id.to_be_bytes().to_vec()
     }
 
     const fn packet_size() -> usize {
@@ -283,7 +274,6 @@ impl OnionTunnelData {
         let mut v = vec![];
         v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
         v.extend(&self.data);
-        v.append(&mut vec![]);
         v
     }
 }
@@ -330,7 +320,6 @@ impl OnionError {
         v.append(&mut self.request_type.to_be_bytes().to_vec());
         v.append(&mut self._reserved.to_be_bytes().to_vec());
         v.append(&mut self.tunnel_id.to_be_bytes().to_vec());
-        v.append(&mut vec![]);
         v
     }
 
@@ -379,7 +368,6 @@ impl OnionCover {
         let mut v = vec![];
         v.append(&mut self.cover_size.to_be_bytes().to_vec());
         v.append(&mut self._reserved.to_be_bytes().to_vec());
-        v.append(&mut vec![]);
         v
     }
 
@@ -425,31 +413,46 @@ mod tests {
         let hdr2 = OnionMessageHeader::try_from(&hdr_raw).unwrap();
         assert_eq!(hdr, hdr2);
 
-        // Set message size smaller than the header
+        // OnionMessageHeader invalid: Set message size below header size
         hdr_raw[0] = 0;
         hdr_raw[1] = 2;
         OnionMessageHeader::try_from(&hdr_raw).unwrap_err();
 
         // OnionTunnelBuild
         let ip_addr = IpAddr::from_str("127.0.0.1").unwrap();
-        let build = OnionTunnelBuild::new(ip_addr, 1234, "key".as_bytes().to_vec());
-        let build2 = Box::<OnionTunnelBuild>::try_from(build.to_be_vec()).unwrap();
-        assert_eq!(Box::new(build), build2);
+        let build_v4 = OnionTunnelBuild::new(ip_addr, 1234, "key".as_bytes().to_vec());
+        let build2 = Box::<OnionTunnelBuild>::try_from(build_v4.to_be_vec()).unwrap();
+        assert_eq!(Box::new(build_v4.clone()), build2);
 
         let ip_addr = IpAddr::from_str("::1").unwrap();
-        let build = OnionTunnelBuild::new(ip_addr, 1234, "key".as_bytes().to_vec());
-        let build2 = Box::<OnionTunnelBuild>::try_from(build.to_be_vec()).unwrap();
-        assert_eq!(Box::new(build), build2);
+        let build_v6 = OnionTunnelBuild::new(ip_addr, 1234, "key".as_bytes().to_vec());
+        let build2 = Box::<OnionTunnelBuild>::try_from(build_v6.to_be_vec()).unwrap();
+        assert_eq!(Box::new(build_v6.clone()), build2);
+
+        // OnionTunnelBuild invalid
+        Box::<OnionTunnelBuild>::try_from(vec![0, 1, 2]).unwrap_err();
+        let mut build_v4_invalid = build_v4.to_be_vec();
+        build_v4_invalid.truncate(7);
+        let mut build_v6_invalid = build_v6.to_be_vec();
+        build_v6_invalid.truncate(19);
+        Box::<OnionTunnelBuild>::try_from(build_v4_invalid).unwrap_err();
+        Box::<OnionTunnelBuild>::try_from(build_v6_invalid).unwrap_err();
 
         // OnionTunnelReady
         let ready = OnionTunnelReady::new(1025, "key".as_bytes().to_vec());
         let ready2 = Box::<OnionTunnelReady>::try_from(ready.to_be_vec()).unwrap();
         assert_eq!(Box::new(ready), ready2);
 
+        // OnionTunnelReady invalid
+        Box::<OnionTunnelReady>::try_from(vec![0, 1, 2]).unwrap_err();
+
         // OnionTunnelIncoming
         let incoming = OnionTunnelIncoming::new(1025);
         let incoming2 = OnionTunnelIncoming::try_from(incoming.to_be_vec()).unwrap();
         assert_eq!(incoming, incoming2);
+
+        // OnionTunnelIncoming invalid
+        OnionTunnelIncoming::try_from(vec![0, 1, 2]).unwrap_err();
 
         // OnionTunnelDestroy
         let destroy = OnionTunnelDestroy::new(1025);
@@ -461,14 +464,23 @@ mod tests {
         let data2 = Box::<OnionTunnelData>::try_from(data.to_be_vec()).unwrap();
         assert_eq!(Box::new(data), data2);
 
+        // OnionTunnelData invalid
+        Box::<OnionTunnelData>::try_from(vec![0, 1, 2]).unwrap_err();
+
         // OnionError
         let error = OnionError::new(ONION_TUNNEL_BUILD, 0);
         let error2 = OnionError::try_from(error.to_be_vec()).unwrap();
         assert_eq!(error, error2);
 
+        // OnionError invalid
+        OnionError::try_from(vec![0, 1, 2, 3, 4, 5, 6, 7, 8]).unwrap_err();
+
         // OnionCover
         let cover = OnionCover::new(1025);
         let cover2 = OnionCover::try_from(cover.to_be_vec()).unwrap();
         assert_eq!(cover, cover2);
+
+        // OnionCover invalid
+        OnionCover::try_from(vec![0, 1, 2, 3, 4]).unwrap_err();
     }
 }
