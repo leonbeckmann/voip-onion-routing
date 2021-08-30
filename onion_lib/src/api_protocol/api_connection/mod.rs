@@ -101,6 +101,8 @@ impl Connection {
                 match write_rx.recv().await {
                     None => {
                         // sender side was closed by api_protocol
+                        // This is unreachable, because `self` owns the sender half of write_rx and therefore the channel will never be closed.
+                        #[cfg(not(tarpaulin_include))]
                         break;
                     }
                     Some(e) => {
@@ -145,12 +147,107 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use crate::api_protocol::api_connection::get_id;
+    use std::time::Duration;
+
+    use tokio::{io::AsyncWriteExt, time::timeout};
+
+    use crate::api_protocol::{
+        self,
+        api_connection::get_id,
+        event::OutgoingEvent,
+        messages::{OnionMessageHeader, OnionTunnelIncoming},
+    };
+
+    use super::Connection;
 
     #[test]
     fn unit_id_counter() {
         let v1 = get_id();
         let v2 = get_id();
         assert_ne!(v1, v2)
+    }
+
+    #[test]
+    fn unit_api_connection() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            let (client, server) = tokio::io::duplex(64);
+            let (tx_out, rx_out) = tokio::sync::mpsc::channel(16);
+            let (tx_in, mut rx_in) = tokio::sync::mpsc::channel(16);
+
+            let connection = Connection::new(tx_out.clone());
+            connection.start(client, tx_in, rx_out).await;
+
+            // In the following task 1 and 2 referes to the async tasks created in connection.start()
+
+            // Close API endpoint
+            drop(server);
+            // Check if the IncomingEvent sender closed to assert that task 2 exited
+            assert!(timeout(Duration::from_secs(1), rx_in.recv())
+                .await
+                .unwrap()
+                .is_none());
+            // Check if the OutgoingEvent receiver is NOT closed to assert the task 1 is still running
+            timeout(Duration::from_millis(50), tx_out.closed())
+                .await
+                .unwrap_err();
+            // Send any event to task 1
+            connection
+                .write_event(OutgoingEvent::TunnelIncoming(OnionTunnelIncoming::new(2)))
+                .await
+                .unwrap();
+            // The task 1 will forward the event to the closed API endpoint and exit due to this error
+            // Check if the OutgoingEvent receiver closed to assert that task 1 exited
+            timeout(Duration::from_secs(1), tx_out.closed())
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn unit_api_connection2() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            let (client, mut server) = tokio::io::duplex(64);
+            let (tx_out, rx_out) = tokio::sync::mpsc::channel(16);
+            let (tx_in, mut rx_in) = tokio::sync::mpsc::channel(16);
+
+            let connection = Connection::new(tx_out.clone());
+            connection.start(client, tx_in, rx_out).await;
+
+            // In the following task 1 and 2 referes to the async tasks created in connection.start()
+
+            // Assert boths tasks are running
+            timeout(Duration::from_millis(50), tx_out.closed())
+                .await
+                .unwrap_err();
+            timeout(Duration::from_millis(50), rx_in.recv())
+                .await
+                .unwrap_err();
+
+            // Close API receiver endpoint
+            rx_in.close();
+            // Send event to task 2
+            let incoming_event: Vec<u8> = vec![0, 0, 4, 210, 127, 0, 0, 1, 107, 101, 121];
+            let hdr = OnionMessageHeader::new(
+                (incoming_event.len() + OnionMessageHeader::hdr_size()) as u16,
+                api_protocol::ONION_TUNNEL_BUILD,
+            )
+            .to_be_vec();
+            server.write_all(&hdr).await.unwrap();
+            server.write_all(&incoming_event).await.unwrap();
+
+            // Task 2 fails to forward the incoming event to the API and exits
+            // Assert task 1 running, task 2 exited
+            timeout(Duration::from_millis(50), tx_out.closed())
+                .await
+                .unwrap_err();
+            assert!(timeout(Duration::from_secs(1), rx_in.recv())
+                .await
+                .unwrap()
+                .is_none());
+        });
     }
 }
