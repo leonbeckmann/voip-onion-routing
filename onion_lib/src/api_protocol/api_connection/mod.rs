@@ -25,6 +25,13 @@ async fn read_event(rx: &mut ReadHalf<TcpStream>) -> anyhow::Result<IncomingEven
     // parse buf the onion_msg_hdr
     let hdr = OnionMessageHeader::from(&buf);
 
+    // Substraction overflow possible in line below this check:
+    // hdr.size remote controlled, OnionMessageHeader::hdr_size() static
+    if (hdr.size as usize) < OnionMessageHeader::hdr_size() {
+        return Err(anyhow::Error::msg(
+            "Given packet size in OnionMessageHeader less than sizeof OnionMessageHeader",
+        ));
+    }
     // read remaining message into buf without the hdr
     let mut buf = vec![0u8; hdr.size as usize - OnionMessageHeader::hdr_size()];
     rx.read_exact(&mut buf).await?;
