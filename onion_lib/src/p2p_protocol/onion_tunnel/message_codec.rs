@@ -546,8 +546,11 @@ impl P2pCodec for InitiatorEndpoint {
 
         // write fragmented frames
         for (iv, data) in iv_data_chunks {
-            // Lazily evaluated else only create vec when needed
-            let iv = iv.unwrap_or_else(|| vec![0; IV_SIZE]);
+            let iv = iv.unwrap_or_else(|| {
+                let mut iv = vec![0; IV_SIZE];
+                openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
+                iv
+            });
             assert_eq!(iv.len(), IV_SIZE);
             frame.set_iv(iv.into());
             frame.set_data(data.into());
@@ -799,7 +802,6 @@ impl P2pCodec for TargetEndpoint {
                 );
 
                 // prepare frame
-                // TODO iv??
                 let mut iv = vec![0; IV_SIZE];
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                 let mut handshake = HandshakeData::new();
@@ -1027,7 +1029,6 @@ impl P2pCodec for IntermediateHopCodec {
                     assert!(index < self.forward_frame_ids.len());
                     frame.set_frame_id(*self.forward_frame_ids.get(index).unwrap());
                 }
-                // TODO check IV
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
                 (frame, self.next_hop)
@@ -1044,7 +1045,6 @@ impl P2pCodec for IntermediateHopCodec {
                 let index = rand::random::<usize>() % self.backward_frame_ids.len();
                 assert!(index < self.backward_frame_ids.len());
                 frame.set_frame_id(*self.backward_frame_ids.get(index).unwrap());
-                // TODO check IV
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());
                 (frame, self.prev_hop)
