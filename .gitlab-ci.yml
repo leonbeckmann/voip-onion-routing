@@ -44,7 +44,7 @@ rust-code-lint:
 
 rust-coverage:
   stage: build
-  image: rust:nightly
+  image: rustlang/rust:nightly
   <<: *caching_rust
   tags:
     - docker

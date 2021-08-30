@@ -144,7 +144,10 @@ impl OnionConfiguration {
             Some(address) => match address.to_socket_addrs() {
                 Ok(mut iter) => match iter.next() {
                     None => {
-                        return Err(ParsingError::from_str("Cannot parse onion's api_address")); // coverage-unreachable
+                        #[rustfmt::skip]
+                        return Err(
+                            ParsingError::from_str("Cannot parse onion's api_address")
+                        ); // coverage-unreachable
                     }
                     Some(addr) => addr,
                 },
@@ -167,7 +170,10 @@ impl OnionConfiguration {
             Some(address) => match address.to_socket_addrs() {
                 Ok(mut iter) => match iter.next() {
                     None => {
-                        return Err(ParsingError::from_str("Cannot parse rps's api_address")); // coverage-unreachable
+                        #[rustfmt::skip]
+                        return Err(
+                            ParsingError::from_str("Cannot parse rps's api_address")
+                        ); // coverage-unreachable
                     }
                     Some(addr) => addr,
                 },
