@@ -91,7 +91,7 @@ fn read_msg(stream: &mut TcpStream) -> (OnionMessageHeader, Vec<u8>) {
     stream.read_exact(&mut buf).unwrap();
 
     // parse buf the onion_msg_hdr
-    let hdr = OnionMessageHeader::from(&buf);
+    let hdr = OnionMessageHeader::try_from(&buf).unwrap();
 
     // read remaining message into buf without the hdr
     let mut buf = vec![0u8; hdr.size as usize - OnionMessageHeader::hdr_size()];
@@ -141,7 +141,7 @@ fn run_rps_api(
                     stream.read_exact(&mut buf).unwrap();
 
                     // parse buf the onion_msg_hdr
-                    let hdr = OnionMessageHeader::from(&buf);
+                    let hdr = OnionMessageHeader::try_from(&buf).unwrap();
 
                     if hdr.msg_type != RPS_QUERY {
                         continue;

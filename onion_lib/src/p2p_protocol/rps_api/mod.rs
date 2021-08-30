@@ -23,7 +23,7 @@ pub async fn rps_get_peer(rps_addr: SocketAddr) -> anyhow::Result<Peer> {
     stream.read_exact(&mut buf).await?;
 
     // parse buf the onion_msg_hdr
-    let hdr = OnionMessageHeader::from(&buf);
+    let hdr = OnionMessageHeader::try_from(&buf).unwrap();
 
     if hdr.msg_type != RPS_PEER {
         return Err(anyhow::Error::msg("Invalid RPS response"));

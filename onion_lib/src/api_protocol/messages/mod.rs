@@ -13,6 +13,8 @@ pub struct OnionMessageHeader {
 
 impl OnionMessageHeader {
     pub fn new(size: u16, msg_type: u16) -> Self {
+        // Messages smaller than the header are invalid
+        assert!(size as usize >= Self::hdr_size());
         Self { size, msg_type }
     }
 
@@ -29,11 +31,21 @@ impl OnionMessageHeader {
     }
 }
 
-impl From<&[u8; Self::hdr_size()]> for OnionMessageHeader {
-    fn from(raw: &[u8; Self::hdr_size()]) -> Self {
-        Self {
+impl TryFrom<&[u8; Self::hdr_size()]> for OnionMessageHeader {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: &[u8; Self::hdr_size()]) -> Result<Self, Self::Error> {
+        let hdr = Self {
             size: u16::from_be_bytes(raw[0..2].try_into().unwrap()),
             msg_type: u16::from_be_bytes(raw[2..4].try_into().unwrap()),
+        };
+        // Messages smaller than the header are invalid
+        if (hdr.size as usize) >= OnionMessageHeader::hdr_size() {
+            Ok(hdr)
+        } else {
+            Err(anyhow::Error::msg(
+                "Given packet size in OnionMessageHeader less than sizeof OnionMessageHeader",
+            ))
         }
     }
 }
@@ -409,9 +421,14 @@ mod tests {
     fn unit_test_only_messages() {
         // OnionMessageHeader
         let hdr = OnionMessageHeader::new(25, ONION_TUNNEL_DATA);
-        let hdr_raw: [u8; 4] = hdr.to_be_vec().try_into().unwrap();
-        let hdr2 = OnionMessageHeader::from(&hdr_raw);
+        let mut hdr_raw: [u8; 4] = hdr.to_be_vec().try_into().unwrap();
+        let hdr2 = OnionMessageHeader::try_from(&hdr_raw).unwrap();
         assert_eq!(hdr, hdr2);
+
+        // Set message size smaller than the header
+        hdr_raw[0] = 0;
+        hdr_raw[1] = 2;
+        OnionMessageHeader::try_from(&hdr_raw).unwrap_err();
 
         // OnionTunnelBuild
         let ip_addr = IpAddr::from_str("127.0.0.1").unwrap();

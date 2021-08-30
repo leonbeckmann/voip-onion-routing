@@ -26,15 +26,8 @@ where
     rx.read_exact(&mut buf).await?;
 
     // parse buf the onion_msg_hdr
-    let hdr = OnionMessageHeader::from(&buf);
+    let hdr = OnionMessageHeader::try_from(&buf)?;
 
-    // Substraction overflow possible in line below this check:
-    // hdr.size remote controlled, OnionMessageHeader::hdr_size() static
-    if (hdr.size as usize) < OnionMessageHeader::hdr_size() {
-        return Err(anyhow::Error::msg(
-            "Given packet size in OnionMessageHeader less than sizeof OnionMessageHeader",
-        ));
-    }
     // read remaining message into buf without the hdr
     let mut buf = vec![0u8; hdr.size as usize - OnionMessageHeader::hdr_size()];
     rx.read_exact(&mut buf).await?;
@@ -261,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn unit_api_connection_substraction_overflow() {
+    fn unit_api_connection_invalid_onion_header() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async {
@@ -286,11 +279,12 @@ mod tests {
             rx_in.close();
             // Send event to task 2
             let incoming_event: Vec<u8> = vec![0, 0, 4, 210, 127, 0, 0, 1, 107, 101, 121];
-            let hdr = OnionMessageHeader::new(
-                (OnionMessageHeader::hdr_size() - 1) as u16,
+            let mut hdr = OnionMessageHeader::new(
+                (OnionMessageHeader::hdr_size()) as u16,
                 api_protocol::ONION_TUNNEL_BUILD,
             )
             .to_be_vec();
+            hdr[1] = 2;
             server.write_all(&hdr).await.unwrap();
             server.write_all(&incoming_event).await.unwrap();
 
