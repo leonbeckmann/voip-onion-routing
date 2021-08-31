@@ -222,7 +222,6 @@ async fn handle_connection(
 }
 
 pub(crate) struct ApiInterface {
-    // TODO is there a way for a well-distributed key?
     pub connections: Arc<Mutex<HashMap<ConnectionId, Connection>>>,
 }
 

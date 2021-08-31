@@ -160,6 +160,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // FIXME
     fn unit_api_connection() {
         // TODO: move test setup into single function for all tests
         let runtime = tokio::runtime::Runtime::new().unwrap();

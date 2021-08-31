@@ -22,8 +22,7 @@ use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::sleep;
 
 // hard coded packet size should not be configurable and equal for all modules
-// TODO select correct
-pub(crate) const MAX_PACKET_SIZE: usize = 2048;
+const FRAME_SIZE: usize = 1024;
 const CLIENT_HELLO_FORWARD_ID: FrameId = 1;
 
 pub type TunnelId = u32;
@@ -333,12 +332,12 @@ impl P2pInterface {
         self.round_sync.run(self_ref.tunnel_manager.clone()).await;
         // Allow to receive more than expected to detect messages exceeding the fixed size.
         // Otherwise recv_from would silently discards exceeding bytes.
-        let mut buf = [0u8; MAX_PACKET_SIZE + 1];
+        let mut buf = [0u8; FRAME_SIZE + 1];
         let my_addr = format!("{}:{:?}", self.config.p2p_hostname, self.config.p2p_port);
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((size, addr)) => {
-                    if size <= MAX_PACKET_SIZE {
+                    if size == FRAME_SIZE {
                         log::debug!("Received UDP packet from {:?} at {}", addr, my_addr);
 
                         // parse tunnel frame
