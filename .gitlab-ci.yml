@@ -57,7 +57,7 @@ rust-coverage:
     - RUSTFLAGS='-Zinstrument-coverage --cfg coverage' LLVM_PROFILE_FILE='coverage-%p-%m.profraw' cargo test > /dev/null
     - '"$CI_PROJECT_DIR/.cargo/bin/grcov" . -s . --binary-path ./target/debug/ -t html --branch --ignore-not-existing --ignore ''onion_lib/src/p2p_protocol/messages/*'' --ignore ''onion_bin/*'' --ignore ''onion_examples/*'' --ignore ''onion_tests/*'' --ignore ''.cargo/*'' -o coverage/ --excl-line coverage-unreachable'
     - '"$CI_PROJECT_DIR/.cargo/bin/grcov" . -s . --binary-path ./target/debug/ -t cobertura --branch --ignore-not-existing --ignore ''onion_lib/src/p2p_protocol/messages/*'' --ignore ''onion_bin/*'' --ignore ''onion_examples/*'' --ignore ''onion_tests/*'' --ignore ''.cargo/*'' -o coverage/cobertura.xml --excl-line coverage-unreachable'
-    - 'echo "${"$(($(sed -En ''s/<coverage .* line-rate="([[:digit:]]*\.[[:digit:]]*)" .*>/\1/p'' coverage/cobertura.xml) * 100.0))":0:5}% coverage"'
+    - 'echo "print (\"{0:.2f}% coverage\".format($(sed -En ''s/<coverage .* line-rate="([[:digit:]]*\.?[[:digit:]]*)" .*>/\1/p'' coverage/cobertura.xml) * 100))" | python3'
   after_script:
     - mkdir -p public
     - mv coverage/ public/coverage/
