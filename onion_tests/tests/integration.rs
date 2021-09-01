@@ -4,7 +4,7 @@ extern crate onion_lib;
 use ini::Ini;
 use openssl::rsa::Rsa;
 use std::env;
-use std::fs::File;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread::sleep;
@@ -39,18 +39,10 @@ fn run_peer(
     config_file: PathBuf,
     key_file: &Path,
     priv_key_file: &Path,
-    pub_pem: Vec<u8>,
-    priv_pem: Vec<u8>,
+    cert_file: &Path,
+    pki_cert_file: &Path,
     round_time: Duration,
 ) {
-    // create rsa files
-    let mut rsa_pem = File::create(&key_file).unwrap();
-    rsa_pem.write_all(pub_pem.as_slice()).unwrap();
-    rsa_pem.sync_all().unwrap();
-    let mut rsa_priv_pem = File::create(&priv_key_file).unwrap();
-    rsa_priv_pem.write_all(priv_pem.as_slice()).unwrap();
-    rsa_priv_pem.sync_all().unwrap();
-
     // write to config file
     let mut config = Ini::new();
     config
@@ -64,7 +56,10 @@ fn run_peer(
         .set("api_address", onion_api_addr)
         .set("round_time", format!("{:?}", round_time.as_secs()))
         .set("private_hostkey", priv_key_file.to_str().unwrap())
-        .set("handshake_timeout", "1000");
+        .set("handshake_timeout", "1000")
+        .set("pki_root_cert", pki_cert_file.to_str().unwrap())
+        .set("hostkey_cert", cert_file.to_str().unwrap())
+        .set("blacklist_time", "10");
     config
         .with_section(Some("rps"))
         .set("api_address", rps_api_addr);
@@ -188,34 +183,87 @@ fn integration_test() {
     let dir = TempDir::new("onion-test").unwrap();
 
     let config_file_alice = dir.path().join("alice.config");
-    let key_file_alice = dir.path().join("alice.key");
-    let priv_key_file_alice = dir.path().join("alice_priv.key");
     let config_file_bob = dir.path().join("bob.config");
-    let key_file_bob = dir.path().join("bob.key");
-    let priv_key_file_bob = dir.path().join("bob_priv.key");
     let config_file_hop1 = dir.path().join("hop1.config");
-    let key_file_hop1 = dir.path().join("hop1.key");
-    let priv_key_file_hop1 = dir.path().join("hop1_priv.key");
     let config_file_hop2 = dir.path().join("hop2.config");
-    let key_file_hop2 = dir.path().join("hop2.key");
-    let priv_key_file_hop2 = dir.path().join("hop2_priv.key");
 
-    // create RSA keys
-    let alice_key = Rsa::generate(4096).unwrap();
-    let alice_pub_pem = alice_key.public_key_to_pem().unwrap();
-    let alice_priv_pem = alice_key.private_key_to_pem().unwrap();
+    let key_file_alice = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "alice.key.pub"
+    ));
 
-    let bob_key = Rsa::generate(4096).unwrap();
-    let bob_pub_pem = bob_key.public_key_to_pem().unwrap();
-    let bob_priv_pem = bob_key.private_key_to_pem().unwrap();
+    let priv_key_file_alice = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "alice.key"
+    ));
 
-    let hop1_key = Rsa::generate(4096).unwrap();
-    let hop1_pub_pem = hop1_key.public_key_to_pem().unwrap();
-    let hop1_priv_pem = hop1_key.private_key_to_pem().unwrap();
+    let cert_alice = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "alice.cert"
+    ));
 
-    let hop2_key = Rsa::generate(4096).unwrap();
-    let hop2_pub_pem = hop2_key.public_key_to_pem().unwrap();
-    let hop2_priv_pem = hop2_key.private_key_to_pem().unwrap();
+    let key_file_bob = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "bob.key.pub"
+    ));
+
+    let priv_key_file_bob = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "bob.key"
+    ));
+
+    let cert_bob = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "bob.cert"
+    ));
+
+    let key_file_hop1 = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "hop1.key.pub"
+    ));
+
+    let priv_key_file_hop1 = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "hop1.key"
+    ));
+
+    let cert_hop1 = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "hop1.cert"
+    ));
+
+    let key_file_hop2 = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "hop2.key.pub"
+    ));
+
+    let priv_key_file_hop2 = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "hop2.key"
+    ));
+
+    let cert_hop2 = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "hop2.cert"
+    ));
+
+    let cert_pki = PathBuf::from(format!(
+        "{}/resources/openssl/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        "pki.cert"
+    ));
 
     log::info!("TEST: Starting peer alice ..");
     let round_time = Duration::from_secs(3);
@@ -226,8 +274,8 @@ fn integration_test() {
         config_file_alice,
         &key_file_alice,
         &priv_key_file_alice,
-        alice_pub_pem,
-        alice_priv_pem,
+        &cert_alice,
+        &cert_pki,
         round_time,
     );
 
@@ -239,8 +287,8 @@ fn integration_test() {
         config_file_bob,
         &key_file_bob,
         &priv_key_file_bob,
-        bob_pub_pem,
-        bob_priv_pem,
+        &cert_bob,
+        &cert_pki,
         round_time,
     );
 
@@ -252,8 +300,8 @@ fn integration_test() {
         config_file_hop1,
         &key_file_hop1,
         &priv_key_file_hop1,
-        hop1_pub_pem,
-        hop1_priv_pem,
+        &cert_hop1,
+        &cert_pki,
         round_time,
     );
 
@@ -265,8 +313,8 @@ fn integration_test() {
         config_file_hop2,
         &key_file_hop2,
         &priv_key_file_hop2,
-        hop2_pub_pem,
-        hop2_priv_pem,
+        &cert_hop2,
+        &cert_pki,
         round_time,
     );
 
@@ -292,11 +340,23 @@ fn integration_test() {
         }
     };
 
-    // get keys from Alice and Bob
-    let _alice_host_key_der = alice_key.public_key_to_der().unwrap();
-    let bob_host_key_der = bob_key.public_key_to_der().unwrap();
-    let hop1_host_key_der = hop1_key.public_key_to_der().unwrap();
-    let hop2_host_key_der = hop2_key.public_key_to_der().unwrap();
+    // get keys from Alice and Bob and hops
+    let _alice_host_key_der = Rsa::public_key_from_pem(fs::read(key_file_alice).unwrap().as_ref())
+        .unwrap()
+        .public_key_to_der()
+        .unwrap();
+    let bob_host_key_der = Rsa::public_key_from_pem(fs::read(key_file_bob).unwrap().as_ref())
+        .unwrap()
+        .public_key_to_der()
+        .unwrap();
+    let hop1_host_key_der = Rsa::public_key_from_pem(fs::read(key_file_hop1).unwrap().as_ref())
+        .unwrap()
+        .public_key_to_der()
+        .unwrap();
+    let hop2_host_key_der = Rsa::public_key_from_pem(fs::read(key_file_hop2).unwrap().as_ref())
+        .unwrap()
+        .public_key_to_der()
+        .unwrap();
 
     // run rps api
     run_rps_api(

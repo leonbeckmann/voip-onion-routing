@@ -1,8 +1,10 @@
 extern crate ini;
 
+use crate::p2p_protocol::dtls_connections::DtlsConfig;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use ini::Ini;
 use openssl::rsa::Rsa;
+use openssl::x509::X509;
 use std::fmt::Formatter;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -21,6 +23,7 @@ pub struct OnionConfiguration {
     pub round_time: Duration,
     pub build_window: Duration,
     pub handshake_message_timeout: Duration,
+    pub dtls_config: Arc<DtlsConfig>,
     pub timeout: Duration,
 }
 
@@ -116,6 +119,58 @@ impl OnionConfiguration {
                     "Cannot parse private_hostkey from pem: {}",
                     e.to_string()
                 )))
+            }
+        };
+
+        // parse peer identity certificate
+        let peer_cert_pem = match onion_sec.get("hostkey_cert") {
+            None => {
+                return Err(ParsingError::from_str("Missing component: 'hostkey_cert'"));
+            }
+            Some(file) => match fs::read(file) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return Err(ParsingError::from_string(format!(
+                        "Cannot access hostkey_cert file: {}",
+                        e.to_string()
+                    )));
+                }
+            },
+        };
+
+        let peer_cert = match X509::from_pem(&peer_cert_pem) {
+            Ok(cert) => cert,
+            Err(e) => {
+                return Err(ParsingError::from_string(format!(
+                    "Cannot parse hostkey_cert to X509 certificate: {}",
+                    e.to_string()
+                )));
+            }
+        };
+
+        // parse pki root certificate
+        let pki_cert_pem = match onion_sec.get("pki_root_cert") {
+            None => {
+                return Err(ParsingError::from_str("Missing component: 'pki_root_cert'"));
+            }
+            Some(file) => match fs::read(file) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return Err(ParsingError::from_string(format!(
+                        "Cannot access pki_root_cert file: {}",
+                        e.to_string()
+                    )));
+                }
+            },
+        };
+
+        let pki_cert = match X509::from_pem(&pki_cert_pem) {
+            Ok(cert) => cert,
+            Err(e) => {
+                return Err(ParsingError::from_string(format!(
+                    "Cannot parse pki_root_cert to X509 certificate: {}",
+                    e.to_string()
+                )));
             }
         };
 
@@ -226,16 +281,38 @@ impl OnionConfiguration {
             },
         };
 
+        // blacklist_time (seconds)
+        let black_list_time = match onion_sec.get("blacklist_time") {
+            None => Duration::from_secs(3600), // default
+            Some(duration) => match duration.parse::<u64>() {
+                Ok(duration) => Duration::from_secs(duration),
+                Err(_) => {
+                    return Err(ParsingError::from_str(
+                        "Cannot parse 'blacklist_time' to u64",
+                    ))
+                }
+            },
+        };
+
         Ok(OnionConfiguration {
             p2p_port,
             p2p_hostname,
-            crypto_config: Arc::new(HandshakeCryptoConfig::new(host_key, private_host_key)),
+            crypto_config: Arc::new(HandshakeCryptoConfig::new(
+                host_key,
+                private_host_key.clone(),
+            )),
             hop_count,
             onion_api_address,
             rps_api_address,
             round_time,
             build_window,
             handshake_message_timeout,
+            dtls_config: Arc::new(DtlsConfig::new(
+                pki_cert,
+                peer_cert,
+                black_list_time,
+                private_host_key,
+            )),
             timeout,
         })
     }
@@ -277,7 +354,12 @@ mod tests {
     use super::ini::Ini;
     use super::ParsingError;
     use crate::config_parser::OnionConfiguration;
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use openssl::pkey::PKey;
     use openssl::rsa::Rsa;
+    use openssl::x509::{X509Builder, X509Name};
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
@@ -298,6 +380,10 @@ mod tests {
         round_time: Option<&str>,
         handshake_timeout: Option<&str>,
         timeout: Option<&str>,
+        build_window: Option<&str>,
+        pki_root_cert: Option<&str>,
+        hostkey_cert: Option<&str>,
+        blacklist_time: Option<&str>,
         file_path: P,
     ) {
         let mut config = Ini::new();
@@ -344,6 +430,24 @@ mod tests {
                     .with_section(Some("onion"))
                     .set("round_time", duration);
             }
+            if let Some(duration) = build_window {
+                config
+                    .with_section(Some("onion"))
+                    .set("build_window", duration);
+            }
+            if let Some(path) = pki_root_cert {
+                config
+                    .with_section(Some("onion"))
+                    .set("pki_root_cert", path);
+            }
+            if let Some(path) = hostkey_cert {
+                config.with_section(Some("onion")).set("hostkey_cert", path);
+            }
+            if let Some(duration) = blacklist_time {
+                config
+                    .with_section(Some("onion"))
+                    .set("blacklist_time", duration);
+            }
         }
         if rps {
             if let Some(api_addr) = rps_api_addr {
@@ -366,21 +470,25 @@ mod tests {
         // create paths for host-key and config files
         let host_key_file = dir.path().join("hostkey");
         let invalid_host_key_file = dir.path().join("hostkey-der");
-        let invalid_host_key_path = dir.path().join("not-available");
+        let invalid_path = dir.path().join("not-available");
         let host_key_priv_file = dir.path().join("hostkey_priv");
         let invalid_host_key_priv_file = dir.path().join("hostkey_priv-der");
         let empty_host_key_priv_file = dir.path().join("hostkey_priv-empty");
+        let cert_file = dir.path().join("cert-pem");
+        let invalid_cert_file = dir.path().join("cert-der");
+
         let valid_config = dir.path().join("valid.config");
-        let config_missing_port = dir.path().join("missing-port.config");
-        let config_invalid_port = dir.path().join("invalid-port.config");
-        let config_missing_hostname = dir.path().join("missing-hostname.config");
-        let config_missing_onion_section = dir.path().join("missing-onion-section.config");
-        let config_missing_rps_section = dir.path().join("missing-rps-section.config");
         let config_missing_hostkey = dir.path().join("missing-hostkey.config");
         let config_der_hostkey = dir.path().join("der-hostkey.config");
         let config_invalid_hostkey_path = dir.path().join("invalid_hostkey.config");
+        let config_missing_onion_section = dir.path().join("missing-onion-section.config");
+        let config_missing_rps_section = dir.path().join("missing-rps-section.config");
+        let config_missing_port = dir.path().join("missing-port.config");
+        let config_invalid_port = dir.path().join("invalid-port.config");
+        let config_missing_hostname = dir.path().join("missing-hostname.config");
         let config_too_high_hop_count = dir.path().join("too_high_hops.config");
         let config_too_low_hop_count = dir.path().join("too_low_hops.config");
+        let config_missing_hop_count = dir.path().join("missing_hop_count.config");
         let config_missing_onion_api_address = dir.path().join("missing_o_api_address.config");
         let config_missing_rps_api_address = dir.path().join("missing_r_api_address.config");
         let config_invalid_api_address = dir.path().join("invalid_api_address.config");
@@ -396,9 +504,20 @@ mod tests {
         let config_der_private_key = dir.path().join("der_private_key.config");
         let config_empty_private_key = dir.path().join("empty_private_key.config");
         let config_invalid_priv_key_path = dir.path().join("invalid_priv_key_path.config");
+        let config_missing_build_window = dir.path().join("missing_build_window.config");
+        let config_invalid_build_window = dir.path().join("invalid_build_window.config");
+        let config_missing_blacklist_time = dir.path().join("missing_blacklist_time.config");
+        let config_invalid_blacklist_time = dir.path().join("invalid_blacklist_time.config");
+        let config_missing_cert = dir.path().join("missing-cert.config");
+        let config_der_cert = dir.path().join("der-cert.config");
+        let config_invalid_cert_path = dir.path().join("invalid_cert.config");
+        let config_missing_pki_cert = dir.path().join("missing-pki-cert.config");
+        let config_der_pki_cert = dir.path().join("der-pki-cert.config");
+        let config_invalid_pki_cert_path = dir.path().join("invalid-pki-cert.config");
 
         // create RSA key
         let key = Rsa::generate(4096).unwrap();
+        let pkey = PKey::from_rsa(key.clone()).unwrap();
         let pub_pem = key.public_key_to_pem().unwrap();
         let pub_der = key.public_key_to_der().unwrap();
         let priv_pem = key.private_key_to_pem().unwrap();
@@ -419,12 +538,37 @@ mod tests {
         rsa_priv_der.write_all(priv_der.as_slice()).unwrap();
         rsa_priv_der.sync_all().unwrap();
 
+        // create certificate files
+        let mut cert = X509Builder::new().unwrap();
+        let mut name = X509Name::builder().unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, "test.com")
+            .unwrap();
+        let name = name.build();
+        cert.set_version(2).unwrap();
+        cert.set_subject_name(&name).unwrap();
+        cert.set_issuer_name(&name).unwrap();
+        cert.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        cert.set_not_after(&Asn1Time::days_from_now(365).unwrap())
+            .unwrap();
+        cert.set_pubkey(&pkey).unwrap();
+        cert.sign(&pkey, MessageDigest::sha256()).unwrap();
+        let cert = cert.build();
+        let cert_pem = cert.to_pem().unwrap();
+        let cert_der = cert.to_der().unwrap();
+        let mut cert_pem_file = File::create(&cert_file).unwrap();
+        let mut cert_der_file = File::create(&invalid_cert_file).unwrap();
+        cert_pem_file.write_all(cert_pem.as_slice()).unwrap();
+        cert_pem_file.sync_all().unwrap();
+        cert_der_file.write_all(cert_der.as_slice()).unwrap();
+        cert_der_file.sync_all().unwrap();
+
         // create config files
         create_config_file(
             true,
             true,
             Some("1234"),
-            Some("localhost"),
+            Some("127.0.0.1"),
             Some("2"),
             Some("127.0.0.1:1234"),
             Some("127.0.0.1:1235"),
@@ -433,90 +577,14 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &valid_config,
         );
 
         create_config_file(
-            false,
-            true,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("1"),
-            &config_missing_onion_section,
-        );
-
-        create_config_file(
-            true,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("1"),
-            &config_missing_rps_section,
-        );
-
-        create_config_file(
-            true,
-            true,
-            None,
-            Some("localhost"),
-            Some("2"),
-            Some("localhost:1234"),
-            Some("localhost:1235"),
-            Some(host_key_file.to_str().unwrap()),
-            Some(host_key_priv_file.to_str().unwrap()),
-            Some("100"),
-            Some("2000"),
-            Some("1"),
-            &config_missing_port,
-        );
-
-        create_config_file(
-            true,
-            true,
-            Some("2x"),
-            Some("localhost"),
-            Some("2"),
-            Some("localhost:1234"),
-            Some("localhost:1235"),
-            Some(host_key_file.to_str().unwrap()),
-            Some(host_key_priv_file.to_str().unwrap()),
-            Some("100"),
-            Some("2000"),
-            Some("1"),
-            &config_invalid_port,
-        );
-
-        create_config_file(
-            true,
-            true,
-            Some("1234"),
-            None,
-            Some("2"),
-            Some("localhost:1234"),
-            Some("localhost:1235"),
-            Some(host_key_file.to_str().unwrap()),
-            Some(host_key_priv_file.to_str().unwrap()),
-            Some("100"),
-            Some("2000"),
-            Some("1"),
-            &config_missing_hostname,
-        );
-
-        create_config_file(
             true,
             true,
             Some("1234"),
@@ -529,6 +597,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_missing_hostkey,
         );
 
@@ -545,6 +617,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_der_hostkey,
         );
 
@@ -556,27 +632,135 @@ mod tests {
             Some("2"),
             Some("localhost:1234"),
             Some("localhost:1235"),
-            Some(invalid_host_key_path.to_str().unwrap()),
+            Some(invalid_path.to_str().unwrap()),
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_invalid_hostkey_path,
+        );
+
+        create_config_file(
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some("localhost:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &config_missing_onion_section,
+        );
+
+        create_config_file(
+            true,
+            false,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            None,
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_missing_rps_section,
+        );
+
+        create_config_file(
+            true,
+            true,
+            None,
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_missing_port,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("2x"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_invalid_port,
         );
 
         create_config_file(
             true,
             true,
             Some("1234"),
-            Some("localhost"),
-            Some("2a"),
-            Some("localhost:1234"),
-            Some("localhost:1235"),
+            None,
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
             Some(host_key_file.to_str().unwrap()),
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_missing_hostname,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("256"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_too_high_hop_count,
         );
 
@@ -584,15 +768,19 @@ mod tests {
             true,
             true,
             Some("1234"),
-            Some("localhost"),
+            Some("127.0.0.1"),
             Some("1"),
-            Some("localhost:1234"),
-            Some("localhost:1235"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
             Some(host_key_file.to_str().unwrap()),
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_too_low_hop_count,
         );
 
@@ -600,15 +788,39 @@ mod tests {
             true,
             true,
             Some("1234"),
-            Some("localhost"),
-            Some("2"),
+            Some("127.0.0.1"),
             None,
-            Some("localhost:1235"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
             Some(host_key_file.to_str().unwrap()),
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_missing_hop_count,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            None,
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_missing_onion_api_address,
         );
 
@@ -616,15 +828,19 @@ mod tests {
             true,
             true,
             Some("1234"),
-            Some("localhost"),
+            Some("127.0.0.1"),
             Some("2"),
-            Some("localhost:1234"),
+            Some("127.0.0.1:1234"),
             None,
             Some(host_key_file.to_str().unwrap()),
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_missing_rps_api_address,
         );
 
@@ -632,15 +848,19 @@ mod tests {
             true,
             true,
             Some("1234"),
-            Some("localhost"),
+            Some("127.0.0.1"),
             Some("2"),
-            Some("127.0.0.1:123400"),
-            Some("localhost:1235"),
+            Some("127.0.0.1:12345678"),
+            Some("127.0.0.1:1235"),
             Some(host_key_file.to_str().unwrap()),
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_invalid_api_address,
         );
 
@@ -648,15 +868,19 @@ mod tests {
             true,
             true,
             Some("1234"),
-            Some("localhost"),
+            Some("127.0.0.1"),
             Some("2"),
-            Some("localhost:1234"),
-            Some("localhost:123400"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:12356789"),
             Some(host_key_file.to_str().unwrap()),
             Some(host_key_priv_file.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_invalid_rps_api_address,
         );
 
@@ -673,6 +897,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_api_address_v6,
         );
 
@@ -689,6 +917,10 @@ mod tests {
             None,
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_missing_round_time,
         );
 
@@ -705,6 +937,10 @@ mod tests {
             Some("100a"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_invalid_round_time,
         );
 
@@ -721,6 +957,10 @@ mod tests {
             Some("100"),
             None,
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_missing_handshake_timeout,
         );
 
@@ -737,6 +977,10 @@ mod tests {
             Some("100"),
             Some("2000a"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_invalid_handshake_timeout,
         );
 
@@ -753,6 +997,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             None,
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_missing_timeout,
         );
 
@@ -769,6 +1017,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1a"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_invalid_timeout,
         );
 
@@ -785,6 +1037,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_missing_private_key,
         );
 
@@ -801,6 +1057,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_der_private_key,
         );
 
@@ -817,6 +1077,10 @@ mod tests {
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_empty_private_key,
         );
 
@@ -829,17 +1093,221 @@ mod tests {
             Some("127.0.0.1:1234"),
             Some("127.0.0.1:1235"),
             Some(host_key_file.to_str().unwrap()),
-            Some(invalid_host_key_path.to_str().unwrap()),
+            Some(invalid_path.to_str().unwrap()),
             Some("100"),
             Some("2000"),
             Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
             &config_invalid_priv_key_path,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            None,
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_missing_build_window,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000a"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_invalid_build_window,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            None,
+            &config_missing_blacklist_time,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600a"),
+            &config_invalid_blacklist_time,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            None,
+            Some("3600"),
+            &config_missing_cert,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(invalid_cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_der_cert,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(cert_file.to_str().unwrap()),
+            Some(invalid_path.to_str().unwrap()),
+            Some("3600"),
+            &config_invalid_cert_path,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            None,
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_missing_pki_cert,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(invalid_cert_file.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_der_pki_cert,
+        );
+
+        create_config_file(
+            true,
+            true,
+            Some("1234"),
+            Some("127.0.0.1"),
+            Some("2"),
+            Some("127.0.0.1:1234"),
+            Some("127.0.0.1:1235"),
+            Some(host_key_file.to_str().unwrap()),
+            Some(host_key_priv_file.to_str().unwrap()),
+            Some("100"),
+            Some("2000"),
+            Some("1"),
+            Some("1000"),
+            Some(invalid_path.to_str().unwrap()),
+            Some(cert_file.to_str().unwrap()),
+            Some("3600"),
+            &config_invalid_pki_cert_path,
         );
 
         // parse configurations
         let config = OnionConfiguration::parse_from_file(valid_config).unwrap();
         assert_eq!(config.p2p_port, 1234);
-        assert_eq!(config.p2p_hostname, "localhost");
+        assert_eq!(config.p2p_hostname, "127.0.0.1");
         assert_eq!(config.hop_count, 2);
         assert_eq!(config.onion_api_address.port(), 1234);
         assert_eq!(config.rps_api_address.port(), 1235);
@@ -848,21 +1316,29 @@ mod tests {
             config.handshake_message_timeout,
             Duration::from_millis(2000)
         );
+        assert_eq!(config.timeout, Duration::from_secs(1));
+        assert_eq!(config.build_window, Duration::from_millis(1000));
 
+        assert!(OnionConfiguration::parse_from_file(config_missing_hostkey).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_der_hostkey).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_hostkey_path).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_onion_section).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_rps_section).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_port).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_port).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_hostname).is_err());
-        assert!(OnionConfiguration::parse_from_file(config_invalid_hostkey_path).is_err());
-        assert!(OnionConfiguration::parse_from_file(config_missing_hostkey).is_err());
-        assert!(OnionConfiguration::parse_from_file(config_der_hostkey).is_err());
         assert!(OnionConfiguration::parse_from_file(config_too_high_hop_count).is_err());
         assert!(OnionConfiguration::parse_from_file(config_too_low_hop_count).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_hop_count).is_ok());
         assert!(OnionConfiguration::parse_from_file(config_missing_onion_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_rps_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_api_address).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_rps_api_address).is_err());
+
+        let config = OnionConfiguration::parse_from_file(config_api_address_v6).unwrap();
+        assert_eq!(config.onion_api_address.port(), 1234);
+        assert!(config.onion_api_address.is_ipv6());
+
         assert!(OnionConfiguration::parse_from_file(config_missing_round_time).is_ok());
         assert!(OnionConfiguration::parse_from_file(config_invalid_round_time).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_handshake_timeout).is_ok());
@@ -870,12 +1346,19 @@ mod tests {
         assert!(OnionConfiguration::parse_from_file(config_missing_timeout).is_ok());
         assert!(OnionConfiguration::parse_from_file(config_invalid_timeout).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_private_key).is_err());
-        assert!(OnionConfiguration::parse_from_file(invalid_host_key_priv_file).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_der_private_key).is_err());
         assert!(OnionConfiguration::parse_from_file(config_empty_private_key).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_priv_key_path).is_err());
-        let config = OnionConfiguration::parse_from_file(config_api_address_v6).unwrap();
-        assert_eq!(config.onion_api_address.port(), 1234);
-        assert!(config.onion_api_address.is_ipv6());
+        assert!(OnionConfiguration::parse_from_file(config_missing_build_window).is_ok());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_build_window).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_blacklist_time).is_ok());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_blacklist_time).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_cert).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_der_cert).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_cert_path).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_pki_cert).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_der_pki_cert).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_pki_cert_path).is_err());
 
         dir.close().unwrap();
     }
