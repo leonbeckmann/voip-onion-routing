@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use crate::p2p_protocol::dtls_connections::DtlsSocketLayer;
 use crate::p2p_protocol::messages::p2p_messages::{
     ApplicationData, ApplicationData_oneof_message, ClientHello, Close, CoverTraffic, FrameData,
     FrameDataType, FrameDataType_oneof_message, HandshakeData, RoutingInformation, ServerHello,
@@ -12,7 +13,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::any::Any;
 use std::collections::HashSet;
-use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
 use super::crypto::AUTH_SIZE;
@@ -197,7 +197,7 @@ pub trait P2pCodec {
 
 #[derive(Debug, Clone)]
 pub(crate) struct InitiatorEndpoint {
-    socket: Arc<UdpSocket>,
+    socket: Arc<DtlsSocketLayer>,
     next_hop: SocketAddr,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
@@ -210,7 +210,7 @@ pub(crate) struct InitiatorEndpoint {
 
 impl InitiatorEndpoint {
     pub fn new(
-        socket: Arc<UdpSocket>,
+        socket: Arc<DtlsSocketLayer>,
         next_hop: SocketAddr,
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
         tunnel_id: TunnelId,
@@ -230,7 +230,7 @@ impl InitiatorEndpoint {
 }
 
 pub(crate) struct TargetEndpoint {
-    socket: Arc<UdpSocket>,
+    socket: Arc<DtlsSocketLayer>,
     prev_hop: SocketAddr,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
@@ -241,7 +241,7 @@ pub(crate) struct TargetEndpoint {
 
 impl TargetEndpoint {
     pub fn new(
-        socket: Arc<UdpSocket>,
+        socket: Arc<DtlsSocketLayer>,
         prev_hop: SocketAddr,
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
         tunnel_id: TunnelId,
@@ -269,7 +269,7 @@ impl TargetEndpoint {
 }
 
 pub(crate) struct IntermediateHopCodec {
-    socket: Arc<UdpSocket>,
+    socket: Arc<DtlsSocketLayer>,
     next_hop: SocketAddr,
     prev_hop: SocketAddr,
     tunnel_id: TunnelId,

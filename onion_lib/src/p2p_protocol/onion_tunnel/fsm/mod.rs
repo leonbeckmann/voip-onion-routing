@@ -1,5 +1,6 @@
 mod handshake_fsm;
 
+use crate::p2p_protocol::dtls_connections::DtlsSocketLayer;
 use crate::p2p_protocol::messages::p2p_messages::HandshakeData_oneof_message;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
@@ -19,7 +20,6 @@ use std::ops::{Add, Sub};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::timeout;
@@ -47,7 +47,7 @@ impl InitiatorStateMachine {
         hops: Vec<Peer>,
         tunnel_result_tx: oneshot::Sender<TunnelResult>,
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
-        socket: Arc<UdpSocket>,
+        socket: Arc<DtlsSocketLayer>,
         tunnel_id: TunnelId,
         listener_tx: Sender<IncomingEventMessage>,
         event_tx: Sender<FsmEvent>,
@@ -96,7 +96,7 @@ impl TargetStateMachine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
-        socket: Arc<UdpSocket>,
+        socket: Arc<DtlsSocketLayer>,
         source: SocketAddr,
         tunnel_id: TunnelId,
         listener_tx: Sender<IncomingEventMessage>,

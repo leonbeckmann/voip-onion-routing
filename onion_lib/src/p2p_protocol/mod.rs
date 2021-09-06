@@ -5,6 +5,7 @@ pub mod rps_api;
 
 use crate::api_protocol::ApiInterface;
 use crate::config_parser::OnionConfiguration;
+use crate::p2p_protocol::dtls_connections::DtlsSocketLayer;
 use crate::p2p_protocol::messages::p2p_messages::TunnelFrame;
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::fsm::{FsmEvent, ProtocolError};
@@ -18,7 +19,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::net::UdpSocket;
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::sleep;
 
@@ -295,7 +295,7 @@ impl RoundSynchronizer {
 pub(crate) struct P2pInterface {
     tunnel_manager: Arc<RwLock<TunnelManager>>,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
-    socket: Arc<UdpSocket>,
+    socket: Arc<DtlsSocketLayer>,
     config: OnionConfiguration,
     api_interface: Weak<ApiInterface>,
     round_sync: RoundSynchronizer,
@@ -316,7 +316,11 @@ impl P2pInterface {
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
             frame_id_manager: Arc::new(RwLock::new(FrameIdManager::new())),
             socket: Arc::new(
-                UdpSocket::bind(format!("{}:{:?}", config.p2p_hostname, config.p2p_port)).await?,
+                DtlsSocketLayer::new(
+                    format!("{}:{:?}", config.p2p_hostname, config.p2p_port),
+                    config.dtls_config.clone(),
+                )
+                .await,
             ),
             config,
             api_interface,

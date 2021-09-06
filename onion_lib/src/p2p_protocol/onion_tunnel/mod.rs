@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::sync::Weak;
 use std::{net::SocketAddr, sync::Arc};
 
-use tokio::net::UdpSocket;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     oneshot, Mutex, Notify, RwLock,
@@ -16,6 +15,7 @@ use crate::p2p_protocol::onion_tunnel::fsm::{
 };
 use crate::p2p_protocol::{ConnectionId, FrameId, P2pError};
 
+use super::dtls_connections::DtlsSocketLayer;
 use super::TunnelId;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
@@ -418,7 +418,7 @@ impl OnionTunnel {
     pub async fn new_initiator_tunnel(
         listener: Option<ConnectionId>,
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
-        socket: Arc<UdpSocket>,
+        socket: Arc<DtlsSocketLayer>,
         target: SocketAddr,
         target_host_key: Vec<u8>,
         tunnel_manager: Arc<RwLock<TunnelManager>>,
@@ -524,7 +524,7 @@ impl OnionTunnel {
     #[allow(clippy::too_many_arguments)]
     pub async fn new_target_tunnel(
         frame_id_manager: Arc<RwLock<FrameIdManager>>,
-        socket: Arc<UdpSocket>,
+        socket: Arc<DtlsSocketLayer>,
         source: SocketAddr,
         tunnel_manager: Arc<RwLock<TunnelManager>>,
         api_interface: Weak<ApiInterface>,
