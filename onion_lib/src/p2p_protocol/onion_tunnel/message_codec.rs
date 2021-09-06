@@ -1087,7 +1087,7 @@ mod tests {
         // data
         app_data.set_data(payload_chunk.into());
         let mut data = FrameDataType::new();
-        data.set_app_data(app_data.clone());
+        data.set_app_data(app_data);
         let data = serialize(data);
         match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::app_data(data) => assert!(data.has_data()),
@@ -1157,7 +1157,7 @@ mod tests {
         routing.set_challenge_response(response.into());
         handshake.set_routing(routing);
         let mut data = FrameDataType::new();
-        data.set_handshake_data(handshake.clone());
+        data.set_handshake_data(handshake);
         let data = serialize(data);
         match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::handshake_data(data) => assert!(data.has_routing()),
