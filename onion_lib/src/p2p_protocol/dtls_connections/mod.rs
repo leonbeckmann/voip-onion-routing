@@ -142,11 +142,11 @@ impl Read for UdpSocketWrapper {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self.incoming_message.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                log::debug!(
+                /*log::debug!(
                     "UdpSocketWrapper from {} to {}: incoming_message channel is disconnected",
                     self.socket.local_addr().unwrap(),
                     self.remote_addr
-                );
+                );*/
                 Err(ErrorKind::NotConnected.into())
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => Err(ErrorKind::WouldBlock.into()),
@@ -218,7 +218,7 @@ impl DtlsSocketLayer {
         socket: Arc<UdpSocket>,
         dtls_config: Arc<DtlsConfig>,
         remote_addr: SocketAddr,
-        forward_frame: Option<Vec<u8>>,
+        udp_socket_wrapper: UdpSocketWrapper,
     ) {
         // An acceptor can be cloned and reused in future connections. But because the remote_addr changes for each connection
         // the acceptor has to be recreated on each connection that we can use the openssl internal hostname verification.
@@ -257,29 +257,6 @@ impl DtlsSocketLayer {
 
         let ssl_acceptor = acceptor_builder.build();
 
-        let (raw_tx, raw_rx) = std::sync::mpsc::channel();
-        let udp_socket_wrapper = UdpSocketWrapper {
-            socket: socket.clone(),
-            remote_addr,
-            incoming_message: raw_rx,
-        };
-
-        // Forward the received UDP frame that triggered this connection creation to the channel
-        if let Some(frame) = forward_frame {
-            raw_tx.send(frame).unwrap();
-        }
-
-        let udp_channel = UdpChannel {
-            raw_incoming: raw_tx,
-            ssl_stream: None,
-        };
-
-        let mut connection_sockets = connection_sockets_mutex.lock().await;
-        // Insert forwarding channel into the connection mapping for incoming frames (first handshake and then payload)
-        connection_sockets.insert(remote_addr, udp_channel);
-        drop(connection_sockets);
-
-        // TODO: handle handshake error
         let mut ssl_stream = ssl_acceptor.accept(udp_socket_wrapper);
         let mut counter = 0;
         while let Err(openssl::ssl::HandshakeError::WouldBlock(s)) = ssl_stream {
@@ -292,18 +269,29 @@ impl DtlsSocketLayer {
             }
             ssl_stream = s.handshake();
         }
-        // TODO: handle handshake error
-        let ssl_stream = ssl_stream.unwrap();
-        log::trace!(
-            "Accepted DTLS channel from {} to {} successful",
-            &remote_addr,
-            socket.local_addr().unwrap(),
-        );
 
-        let mut connection_sockets = connection_sockets_mutex.lock().await;
-        // Safe unwrap after insert
-        let connection_socket = connection_sockets.get_mut(&remote_addr).unwrap();
-        connection_socket.ssl_stream = Some(ssl_stream);
+        match ssl_stream {
+            Ok(ssl_stream) => {
+                log::trace!(
+                    "Accepted DTLS channel from {} to {} successful",
+                    &remote_addr,
+                    socket.local_addr().unwrap(),
+                );
+
+                let mut connection_sockets = connection_sockets_mutex.lock().await;
+                // Safe unwrap after insert
+                let connection_socket = connection_sockets.get_mut(&remote_addr).unwrap();
+                connection_socket.ssl_stream = Some(ssl_stream);
+            }
+            Err(e) => {
+                log::info!(
+                    "DTLS: Accept connection failed, error during Handshake: {}",
+                    e
+                );
+                let mut connection_sockets = connection_sockets_mutex.lock().await;
+                assert!(connection_sockets.remove(&remote_addr).is_some());
+            }
+        }
     }
 
     async fn connect_channel(
@@ -311,6 +299,7 @@ impl DtlsSocketLayer {
         socket: Arc<UdpSocket>,
         dtls_config: Arc<DtlsConfig>,
         remote_addr: SocketAddr,
+        udp_socket_wrapper: UdpSocketWrapper,
     ) {
         log::trace!(
             "Connect DTLS channel from {} to {}...",
@@ -350,22 +339,6 @@ impl DtlsSocketLayer {
 
         let connector = connector_builder.build();
 
-        let (raw_tx, raw_rx) = std::sync::mpsc::channel();
-        let udp_socket_wrapper = UdpSocketWrapper {
-            socket: socket.clone(),
-            remote_addr,
-            incoming_message: raw_rx,
-        };
-
-        let udp_channel = UdpChannel {
-            raw_incoming: raw_tx,
-            ssl_stream: None,
-        };
-
-        let mut connection_sockets = connection_sockets_mutex.lock().await;
-        connection_sockets.insert(remote_addr, udp_channel);
-        drop(connection_sockets);
-
         // TODO: move into seperate task for responsiveness
         let mut ssl_stream = connector.connect(
             // format!("{}::{}", address.ip(), address.port()).as_str(),
@@ -383,19 +356,30 @@ impl DtlsSocketLayer {
             }
             ssl_stream = s.handshake();
         }
-        // TODO: handle handshake error
-        let ssl_stream = ssl_stream.unwrap();
 
-        let mut connection_sockets = connection_sockets_mutex.lock().await;
-        // Safe unwrap after insert
-        let udp_channel = connection_sockets.get_mut(&remote_addr).unwrap();
-        udp_channel.ssl_stream = Some(ssl_stream);
-
-        log::trace!(
-            "Connected DTLS channel from {} to {} successful",
-            socket.local_addr().unwrap(),
-            remote_addr
-        );
+        match ssl_stream {
+            Ok(ssl_stream) => {
+                log::trace!(
+                    "DTLS: Connected channel from {} to {} successful",
+                    socket.local_addr().unwrap(),
+                    &remote_addr
+                );
+                let mut connection_sockets = connection_sockets_mutex.lock().await;
+                // Safe unwrap after insert
+                let udp_channel = connection_sockets.get_mut(&remote_addr).unwrap();
+                udp_channel.ssl_stream = Some(ssl_stream);
+            }
+            Err(e) => {
+                log::info!(
+                    "DTLS: Connect connection from {} to {} failed, error during Handshake: {}",
+                    socket.local_addr().unwrap(),
+                    &remote_addr,
+                    e
+                );
+                let mut connection_sockets = connection_sockets_mutex.lock().await;
+                assert!(connection_sockets.remove(&remote_addr).is_some());
+            }
+        }
     }
 
     /// This is async to enforce running inside a tokio runtime. This is required due to tokio::spawn
@@ -405,10 +389,11 @@ impl DtlsSocketLayer {
     ) -> DtlsSocketLayer {
         let socket = Arc::new(UdpSocket::bind(address.clone()).await.unwrap());
         let connection_sockets = Arc::new(Mutex::new(HashMap::new()));
+        let blocklist = Arc::new(RwLock::new(Blocklist::new(dtls_config.black_list_time)));
+
         let socket_clone = socket.clone();
         let connection_sockets_clone = connection_sockets.clone();
         let dtls_config_clone = dtls_config.clone();
-        let blocklist = Arc::new(RwLock::new(Blocklist::new(dtls_config.black_list_time)));
         let blocklist_clone = blocklist.clone();
 
         let incoming_forwarding_worker = tokio::spawn(async {
@@ -424,7 +409,6 @@ impl DtlsSocketLayer {
         let socket_clone = socket.clone();
         let connection_sockets_clone = connection_sockets.clone();
         let dtls_config_clone = dtls_config.clone();
-        let blocklist = Arc::new(RwLock::new(Blocklist::new(dtls_config.black_list_time)));
         let blocklist_clone = blocklist.clone();
 
         let (outgoing_channel_tx, outgoing_channel_rx) = tokio::sync::mpsc::channel(1024);
@@ -501,6 +485,27 @@ impl DtlsSocketLayer {
                             &sender,
                             &size
                         );
+
+                        // The UdpChannel must be created and inserted into connection_sockets before unlocking that no
+                        // other concurrent incoming or outgoing frame can trigger a UdpChannel creation for the same peer
+
+                        let (raw_tx, raw_rx) = std::sync::mpsc::channel();
+                        let udp_socket_wrapper = UdpSocketWrapper {
+                            socket: socket.clone(),
+                            remote_addr: sender,
+                            incoming_message: raw_rx,
+                        };
+
+                        // Forward the received UDP frame that triggered this connection creation to the UdpSocketWrapper
+                        raw_tx.send(buf[..size].to_vec()).unwrap();
+
+                        let udp_channel = UdpChannel {
+                            raw_incoming: raw_tx,
+                            ssl_stream: None,
+                        };
+
+                        // Insert forwarding channel into the connection mapping for incoming frames (first handshake and then payload)
+                        connection_sockets.insert(sender, udp_channel);
                         drop(connection_sockets);
 
                         // Connection establishment must be executed concurrently to the task, that is forwarding incoming frames
@@ -508,14 +513,13 @@ impl DtlsSocketLayer {
                         let connection_sockets_mutex = connection_sockets_mutex.clone();
                         let socket = socket.clone();
                         let dtls_config = dtls_config.clone();
-                        let buf = buf[..size].to_vec();
                         tokio::spawn(async move {
                             DtlsSocketLayer::accept_channel(
                                 connection_sockets_mutex,
                                 socket,
                                 dtls_config,
                                 sender,
-                                Some(buf),
+                                udp_socket_wrapper,
                             )
                             .await;
                         });
@@ -560,7 +564,11 @@ impl DtlsSocketLayer {
                     // TODO: Consider to use write_all instead of write
                     let res = s.write(&frame);
                     if res.is_err() {
-                        // Remove erronous DTLS channel
+                        log::trace!(
+                            "Remove erronous DTLS channel at {} to {}",
+                            socket.local_addr().unwrap(),
+                            &remote_addr
+                        );
                         connection_sockets.remove(&remote_addr);
                         // Try to enque frame again. Must ignore full queue otherwise a deadlock
                         // can occur when another task inserts between recv() and send()
@@ -573,7 +581,24 @@ impl DtlsSocketLayer {
                 }
             } else {
                 // Channel does not exist
-                // drop the lock early because it is not required anymore
+
+                // The UdpChannel must be created and inserted into connection_sockets before unlocking that no
+                // other concurrent incoming or outgoing frame can trigger a UdpChannel creation for the same peer
+
+                let (raw_tx, raw_rx) = std::sync::mpsc::channel();
+                let udp_socket_wrapper = UdpSocketWrapper {
+                    socket: socket.clone(),
+                    remote_addr,
+                    incoming_message: raw_rx,
+                };
+
+                let udp_channel = UdpChannel {
+                    raw_incoming: raw_tx,
+                    ssl_stream: None,
+                };
+
+                // Insert forwarding channel into the connection mapping for incoming frames (first handshake and then payload)
+                connection_sockets.insert(remote_addr, udp_channel);
                 drop(connection_sockets);
 
                 // Try to enque frame again. Must ignore full queue otherwise a deadlock
@@ -585,10 +610,11 @@ impl DtlsSocketLayer {
                 let connection_sockets_mutex = connection_sockets_mutex.clone();
                 tokio::spawn(async move {
                     DtlsSocketLayer::connect_channel(
-                        connection_sockets_mutex.clone(),
+                        connection_sockets_mutex,
                         socket,
                         dtls_config,
                         remote_addr,
+                        udp_socket_wrapper,
                     )
                     .await;
                 });
@@ -844,9 +870,6 @@ mod tests {
 
     #[test]
     fn unit_dtls_loopback() {
-        std::env::set_var("RUST_LOG", "trace");
-        env_logger::init();
-
         let addr = "127.0.0.1:8005";
 
         let (cert_pki, pki_name, pkey_pki) = pki_instance();
