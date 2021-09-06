@@ -210,15 +210,6 @@ pub struct DtlsSocketLayer {
 }
 
 impl DtlsSocketLayer {
-    /*fn verify(
-        valid: bool,
-        cert: &mut X509StoreContextRef,
-        dtls_config: Arc<DtlsConfig>,
-        remote_addr: SocketAddr,
-    ) -> bool {
-        valid
-    }*/
-
     async fn accept_channel(
         connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
         socket: Arc<UdpSocket>,
@@ -253,12 +244,6 @@ impl DtlsSocketLayer {
             .verify_param_mut()
             .set_host(hostname.as_str())
             .unwrap();
-
-        /*let dtls_config_clone = dtls_config.clone();
-        acceptor_builder.set_verify_callback(SslVerifyMode::PEER, move |x, y| {
-            let dtls_config_clone_clone = dtls_config_clone.clone();
-            DtlsSocketLayer::verify(x, y, dtls_config_clone_clone, remote_addr)
-        });*/
 
         acceptor_builder
             .set_private_key(&PKey::from_rsa(dtls_config.private_host_key.clone()).unwrap())
@@ -357,11 +342,6 @@ impl DtlsSocketLayer {
             .set_host(hostname.as_str())
             .unwrap();
         connector_builder.set_verify(SslVerifyMode::PEER);
-        /*let dtls_config_clone = dtls_config.clone();
-        connector_builder.set_verify_callback(SslVerifyMode::PEER, move |x, y| {
-            let dtls_config_clone_clone = dtls_config_clone.clone();
-            DtlsSocketLayer::verify(x, y, dtls_config_clone_clone, remote_addr)
-        });*/
 
         connector_builder
             .set_private_key(&PKey::from_rsa(dtls_config.private_host_key.clone()).unwrap())
