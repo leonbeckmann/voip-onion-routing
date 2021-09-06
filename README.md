@@ -138,5 +138,5 @@ Finally, create the certificate and sign it by the PKI server:
 
 ```openssl x509 -req -in peer.csr -CA pki.cert -CAkey pki.key -CAcreateserial -out peer.cert -days 365 -sha512```
 
-You can find certificates and keys for PKI, Alice (127.0.0.1::2001), Bob (127.0.0.1::3001), Hop1 (127.0.0.1::4001) and 
-Hop2 (127.0.0.1::5001) in ./onion_tests/resources/. 
+You can find certificates and keys for PKI (password: 1234), Alice (127.0.0.1::2001), Bob (127.0.0.1::3001), Hop1 (127.0.0.1::4001) and 
+Hop2 (127.0.0.1::5001) in ./onion_tests/resources/.

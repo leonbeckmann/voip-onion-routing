@@ -245,8 +245,7 @@ impl DtlsSocketLayer {
         acceptor_builder.set_cert_store(cert_store);
 
         // Enable server-side certificate verification
-        // TODO: use SslVerifyMode::PEER
-        acceptor_builder.set_verify(SslVerifyMode::NONE);
+        acceptor_builder.set_verify(SslVerifyMode::PEER);
         // Setting hostname enables hostname verification
         let hostname = sha256(format!("{}::{}", remote_addr.ip(), remote_addr.port()).as_bytes())
             .encode_hex::<String>();
@@ -357,8 +356,7 @@ impl DtlsSocketLayer {
             .verify_param_mut()
             .set_host(hostname.as_str())
             .unwrap();
-        // TODO: use SslVerifyMode::PEER
-        connector_builder.set_verify(SslVerifyMode::NONE);
+        connector_builder.set_verify(SslVerifyMode::PEER);
         /*let dtls_config_clone = dtls_config.clone();
         connector_builder.set_verify_callback(SslVerifyMode::PEER, move |x, y| {
             let dtls_config_clone_clone = dtls_config_clone.clone();
