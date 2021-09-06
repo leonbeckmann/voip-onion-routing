@@ -1,4 +1,5 @@
 use hex::ToHex;
+use ignore_result::Ignore;
 // TODO: check all used unwrap()
 use openssl::pkey::{PKey, Private, Public};
 use openssl::rsa::Rsa;
@@ -205,7 +206,9 @@ pub struct DtlsSocketLayer {
     dtls_config: Arc<DtlsConfig>,
     blocklist: Arc<RwLock<Blocklist>>,
     connection_sockets: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
-    forwarding_worker: JoinHandle<()>,
+    incoming_forwarding_worker: JoinHandle<()>,
+    outgoing_forwarding_worker: JoinHandle<()>,
+    outgoing_channel: Sender<(SocketAddr, Vec<u8>)>,
     loopback_channel: (Sender<Vec<u8>>, Mutex<Receiver<Vec<u8>>>),
 }
 
@@ -214,18 +217,12 @@ impl DtlsSocketLayer {
         connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
         socket: Arc<UdpSocket>,
         dtls_config: Arc<DtlsConfig>,
-        blocklist: Arc<RwLock<Blocklist>>,
         remote_addr: SocketAddr,
         forward_frame: Option<Vec<u8>>,
     ) {
         // An acceptor can be cloned and reused in future connections. But because the remote_addr changes for each connection
         // the acceptor has to be recreated on each connection that we can use the openssl internal hostname verification.
         log::trace!("Creating new acceptor");
-
-        if blocklist.read().await.is_blocked(&remote_addr) {
-            log::warn!("DTLS: Blocked peer tried to connect");
-            return;
-        }
 
         let mut acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::dtls()).unwrap();
 
@@ -313,7 +310,6 @@ impl DtlsSocketLayer {
         connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
         socket: Arc<UdpSocket>,
         dtls_config: Arc<DtlsConfig>,
-        blocklist: Arc<RwLock<Blocklist>>,
         remote_addr: SocketAddr,
     ) {
         log::trace!(
@@ -321,11 +317,6 @@ impl DtlsSocketLayer {
             socket.local_addr().unwrap(),
             remote_addr
         );
-
-        if blocklist.read().await.is_blocked(&remote_addr) {
-            log::warn!("DTLS: Blocked peer tried to connect");
-            return;
-        }
 
         let mut connector_builder = SslConnector::builder(SslMethod::dtls()).unwrap();
 
@@ -420,9 +411,30 @@ impl DtlsSocketLayer {
         let blocklist = Arc::new(RwLock::new(Blocklist::new(dtls_config.black_list_time)));
         let blocklist_clone = blocklist.clone();
 
-        let forwarding_worker = tokio::spawn(async {
+        let incoming_forwarding_worker = tokio::spawn(async {
             DtlsSocketLayer::forward_incoming_frames(
                 socket_clone,
+                connection_sockets_clone,
+                dtls_config_clone,
+                blocklist_clone,
+            )
+            .await
+        });
+
+        let socket_clone = socket.clone();
+        let connection_sockets_clone = connection_sockets.clone();
+        let dtls_config_clone = dtls_config.clone();
+        let blocklist = Arc::new(RwLock::new(Blocklist::new(dtls_config.black_list_time)));
+        let blocklist_clone = blocklist.clone();
+
+        let (outgoing_channel_tx, outgoing_channel_rx) = tokio::sync::mpsc::channel(1024);
+        let outgoing_channel_tx_clone = outgoing_channel_tx.clone();
+
+        let outgoing_forwarding_worker = tokio::spawn(async {
+            DtlsSocketLayer::forward_outgoing_frames(
+                socket_clone,
+                outgoing_channel_tx_clone,
+                outgoing_channel_rx,
                 connection_sockets_clone,
                 dtls_config_clone,
                 blocklist_clone,
@@ -436,7 +448,9 @@ impl DtlsSocketLayer {
             dtls_config,
             blocklist,
             connection_sockets,
-            forwarding_worker,
+            incoming_forwarding_worker,
+            outgoing_forwarding_worker,
+            outgoing_channel: outgoing_channel_tx,
             loopback_channel: (loopback_channel.0, Mutex::new(loopback_channel.1)),
         }
     }
@@ -449,10 +463,10 @@ impl DtlsSocketLayer {
         socket: Arc<UdpSocket>,
         connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
         dtls_config: Arc<DtlsConfig>,
-        block_list: Arc<RwLock<Blocklist>>,
+        blocklist: Arc<RwLock<Blocklist>>,
     ) {
         log::trace!(
-            "Started socket forwarding worker at {}",
+            "Started incoming socket forwarding worker at {}",
             socket.local_addr().unwrap()
         );
         // Use a large buffer, that every udp frame can be received completely
@@ -460,6 +474,11 @@ impl DtlsSocketLayer {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((size, sender)) => {
+                    if blocklist.read().await.is_blocked(&sender) {
+                        log::warn!("DTLS: Dropping frame from blocked peer {}", &sender);
+                        continue;
+                    }
+
                     // Forward packet to the appropriate DTLS UDP wrapper
                     let mut connection_sockets = connection_sockets_mutex.lock().await;
                     if let Some(connection_socket) = connection_sockets.get_mut(&sender) {
@@ -489,14 +508,12 @@ impl DtlsSocketLayer {
                         let connection_sockets_mutex = connection_sockets_mutex.clone();
                         let socket = socket.clone();
                         let dtls_config = dtls_config.clone();
-                        let block_list = block_list.clone();
                         let buf = buf[..size].to_vec();
                         tokio::spawn(async move {
                             DtlsSocketLayer::accept_channel(
                                 connection_sockets_mutex,
                                 socket,
                                 dtls_config,
-                                block_list,
                                 sender,
                                 Some(buf),
                             )
@@ -506,13 +523,85 @@ impl DtlsSocketLayer {
                 }
                 Err(e) => {
                     // TODO: handle errors: disconnect, close, eof, timeout, ...
+                    // Unreachable because we hold a reference to the UDP socket
                     log::trace!("DTLS: Failed to read from UDP socket: {:?}", e);
                     break;
                 }
             }
         }
         log::info!(
-            "Stopped socket forwarding worker at {}",
+            "Stopped incoming socket forwarding worker at {}",
+            socket.local_addr().unwrap()
+        );
+    }
+
+    async fn forward_outgoing_frames(
+        socket: Arc<UdpSocket>,
+        frame_channel_tx: Sender<(SocketAddr, Vec<u8>)>,
+        mut frame_channel_rx: Receiver<(SocketAddr, Vec<u8>)>,
+        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
+        dtls_config: Arc<DtlsConfig>,
+        blocklist: Arc<RwLock<Blocklist>>,
+    ) {
+        log::trace!(
+            "Started outgoing socket forwarding worker at {}",
+            socket.local_addr().unwrap()
+        );
+
+        while let Some((remote_addr, frame)) = frame_channel_rx.recv().await {
+            if blocklist.read().await.is_blocked(&remote_addr) {
+                log::warn!("DTLS: Not sending frame to blocked peer {}", &remote_addr);
+                continue;
+            }
+
+            let mut connection_sockets = connection_sockets_mutex.lock().await;
+            if let Some(udp_channel) = connection_sockets.get_mut(&remote_addr) {
+                if let Some(s) = &mut udp_channel.ssl_stream {
+                    // TODO: Consider to use write_all instead of write
+                    let res = s.write(&frame);
+                    if res.is_err() {
+                        // Remove erronous DTLS channel
+                        connection_sockets.remove(&remote_addr);
+                        // Try to enque frame again. Must ignore full queue otherwise a deadlock
+                        // can occur when another task inserts between recv() and send()
+                        frame_channel_tx.try_send((remote_addr, frame)).ignore();
+                    }
+                } else {
+                    // Channel is currently connecting to peer in another task. Try to enque frame again.
+                    // Must ignore full queue otherwise a deadlock can occur when another task inserts between recv() and send()
+                    frame_channel_tx.try_send((remote_addr, frame)).ignore();
+                }
+            } else {
+                // Channel does not exist
+                // drop the lock early because it is not required anymore
+                drop(connection_sockets);
+
+                // Try to enque frame again. Must ignore full queue otherwise a deadlock
+                // can occur when another task inserts between recv() and send()
+                frame_channel_tx.try_send((remote_addr, frame)).ignore();
+
+                let dtls_config = dtls_config.clone();
+                let socket = socket.clone();
+                let connection_sockets_mutex = connection_sockets_mutex.clone();
+                tokio::spawn(async move {
+                    DtlsSocketLayer::connect_channel(
+                        connection_sockets_mutex.clone(),
+                        socket,
+                        dtls_config,
+                        remote_addr,
+                    )
+                    .await;
+                });
+            }
+        }
+        // Closed
+        log::trace!(
+            "DTLS: Outgoing socket forwarding channel closed at {}",
+            socket.local_addr().unwrap()
+        );
+
+        log::info!(
+            "DTLS: Stopped outgoing socket forwarding worker at {}",
             socket.local_addr().unwrap()
         );
     }
@@ -590,67 +679,19 @@ impl DtlsSocketLayer {
             return Ok(buf.len());
         }
 
-        // Use a loop for retry instead of a recursive function because recursive async functions must meet special requirements.
-        let mut connection_sockets = self.connection_sockets.lock().await;
-        if let Some(udp_channel) = connection_sockets.get_mut(&addr) {
-            if let Some(s) = &mut udp_channel.ssl_stream {
-                // TODO: Consider to use write_all instead of write
-                let res = s.write(buf);
-                if res.is_err() {
-                    // Remove erronous DTLS channel
-                    connection_sockets.remove(&addr);
-                    // No return to reconnect to peer
-                } else {
-                    return res;
-                }
-            } else {
-                // Currently connecting to peer
-                loop {
-                    drop(connection_sockets);
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    connection_sockets = self.connection_sockets.lock().await;
-                    if let Some(udp_channel) = connection_sockets.get_mut(&addr) {
-                        if let Some(s) = &mut udp_channel.ssl_stream {
-                            return s.write(buf);
-                        }
-                    } else {
-                        // UdpChannel has been destroyed again
-                        return Err(ErrorKind::AddrNotAvailable.into());
-                    }
-                }
-            }
-        }
-        drop(connection_sockets);
+        self.outgoing_channel
+            .send((addr, buf.to_vec()))
+            .await
+            .unwrap();
 
-        let buf = buf.to_owned();
-        let dtls_config = self.dtls_config.clone();
-        let blocklist = self.blocklist.clone();
-        let socket = self.socket.clone();
-        let connection_sockets = self.connection_sockets.clone();
-        tokio::spawn(async move {
-            DtlsSocketLayer::connect_channel(
-                connection_sockets.clone(),
-                socket,
-                dtls_config,
-                blocklist,
-                addr,
-            )
-            .await;
-            let mut connection_sockets = connection_sockets.lock().await;
-            // Safe unwrap after insert
-            let udp_channel = connection_sockets.get_mut(&addr).unwrap();
-            return udp_channel.ssl_stream.as_mut().unwrap().write(&buf);
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        Ok(0)
+        Ok(buf.len())
     }
 }
 
 impl Drop for DtlsSocketLayer {
     fn drop(&mut self) {
-        self.forwarding_worker.abort();
+        self.incoming_forwarding_worker.abort();
+        self.outgoing_forwarding_worker.abort();
     }
 }
 
