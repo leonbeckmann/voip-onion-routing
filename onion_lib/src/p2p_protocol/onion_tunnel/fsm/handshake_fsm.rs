@@ -167,22 +167,19 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // prepare secret server hello data
         let mut encrypted_data = EncryptedServerHelloData::new();
         encrypted_data.set_signature(signature.into());
-        encrypted_data.set_forward_frame_ids(self.frame_id_manager.write().await.new_frame_ids(
-            self.tunnel_id,
-            Direction::Forward,
-            10,
-        ));
-        encrypted_data.set_backward_frame_ids(self.frame_id_manager.write().await.new_frame_ids(
-            self.tunnel_id,
-            Direction::Backward,
-            10,
-        ));
+        encrypted_data.set_forward_frame_id(
+            self.frame_id_manager
+                .write()
+                .await
+                .new_frame_id(self.tunnel_id, Direction::Forward),
+        );
         encrypted_data.set_backward_frame_id(
             self.frame_id_manager
                 .write()
                 .await
                 .new_frame_id(self.tunnel_id, Direction::Backward),
         );
+        encrypted_data.set_challenge(self.crypto_context.get_challenge().to_owned().into());
         let mut raw_enc_data = vec![AUTH_PLACEHOLDER; AUTH_SIZE];
         raw_enc_data.append(&mut encrypted_data.write_to_bytes().unwrap());
 
@@ -197,7 +194,6 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // create server hello and give it to message_codec
         let mut server_hello = ServerHello::new();
         server_hello.set_ecdh_public_key(receiver_pub_der.into());
-        server_hello.set_challenge(self.crypto_context.get_challenge().to_owned().into());
         server_hello.set_iv(iv.into());
         server_hello.set_encrypted_data(enc_data.into());
 
@@ -241,15 +237,14 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             Ok(data) => {
                 // valida frame ids
                 FrameIdManager::verify_frame_id(data.backward_frame_id)?;
-                FrameIdManager::verify_frame_ids(&data.forward_frame_ids, 10)?;
-                FrameIdManager::verify_frame_ids(&data.backward_frame_ids, 10)?;
+                FrameIdManager::verify_frame_id(data.forward_frame_id)?;
                 // frame ids valid and available
                 if self.next_hop.is_none() {
-                    // frame ids for target, store one identifier for tunnel updates, unwrap is safe
-                    self.frame_id_manager.write().await.add_tunnel_reference(
-                        self.tunnel_id,
-                        *data.forward_frame_ids.first().unwrap(),
-                    );
+                    // frame ids for target, store the identifier for tunnel updates
+                    self.frame_id_manager
+                        .write()
+                        .await
+                        .add_tunnel_reference(self.tunnel_id, data.forward_frame_id);
                 }
                 data
             }
@@ -266,8 +261,8 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         let hop_public_key = Rsa::public_key_from_der(&self.current_hop.as_ref().unwrap().1)
             .map_err(|_| ProtocolError::HandshakeECDHFailure)?;
 
-        // get the challenge from the server_hello
-        let challenge = data.challenge.to_vec();
+        // get the challenge from the encrypted_server_hello
+        let challenge = enc_server_hello_data.challenge.to_vec();
 
         // verify the signature
         if !self.crypto_context.initiator_verify(
@@ -287,10 +282,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
         // update codec
         let mut codec = self.message_codec.lock().await;
         codec
-            .process_forward_frame_ids(enc_server_hello_data.forward_frame_ids)
+            .process_forward_frame_id(enc_server_hello_data.forward_frame_id)
             .await?;
         codec.set_backward_frame_id(enc_server_hello_data.backward_frame_id);
-        codec.set_backward_frame_ids(enc_server_hello_data.backward_frame_ids);
         codec.add_crypto_context(cc);
 
         // create routing information and give it to message_codec
@@ -337,9 +331,7 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
             routing
         );
 
-        FrameIdManager::verify_frame_ids(&routing.backward_frame_ids, 10)?;
         let mut codec_guard = self.message_codec.lock().await;
-        codec_guard.set_backward_frame_ids(routing.backward_frame_ids);
         let target_endpoint = match (*codec_guard).as_any().downcast_mut::<TargetEndpoint>() {
             None => {
                 log::error!(

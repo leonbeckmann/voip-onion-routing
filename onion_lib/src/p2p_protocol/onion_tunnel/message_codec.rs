@@ -1,9 +1,9 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use crate::p2p_protocol::messages::p2p_messages::{
-    ApplicationData, ApplicationData_oneof_message, ClientHello, Close, CoverTraffic,
-    ForwardFrameIds, FrameData, FrameDataType_oneof_message, HandshakeData, RoutingInformation,
-    ServerHello, TunnelFrame,
+    ApplicationData, ApplicationData_oneof_message, ClientHello, Close, CoverTraffic, FrameData,
+    FrameDataType, FrameDataType_oneof_message, HandshakeData, RoutingInformation, ServerHello,
+    TunnelFrame,
 };
 use crate::p2p_protocol::onion_tunnel::crypto::{CryptoContext, AUTH_PLACEHOLDER, IV_SIZE};
 use crate::p2p_protocol::onion_tunnel::fsm::ProtocolError;
@@ -28,7 +28,7 @@ pub enum ProcessedData {
 }
 
 pub enum DataType {
-    ForwardFrameIds(Vec<FrameId>),
+    ForwardFrameId(FrameId),
     Close,
     AppData(Vec<u8>),
     Cover(Vec<u8>, bool),
@@ -40,40 +40,20 @@ pub enum DataType {
 const FRAME_SIZE: usize = 1024;
 const FRAME_DATA_SIZE: usize = 998;
 const SERIALIZED_FRAME_DATA_SIZE: usize = 982;
-const FRAME_DATA_CONTENT_SIZE_APP: usize = 972;
-const FRAME_DATA_CONTENT_SIZE_OTHER: usize = 974;
-const PAYLOAD_CHUNK_SIZE: usize = 964;
-const COVER_CHUNK_SIZE: usize = 959;
+const FRAME_DATA_CONTENT_SIZE: usize = 974;
+const PAYLOAD_CHUNK_SIZE: usize = 963;
+const COVER_CHUNK_SIZE: usize = 958;
 
-fn serialize(message: FrameDataType_oneof_message) -> Vec<u8> {
+fn serialize(message: FrameDataType) -> Vec<u8> {
     let mut buf = vec![AUTH_PLACEHOLDER; AUTH_SIZE];
     let mut frame_data = FrameData::new();
-    let (mut data, content_size) = match message {
-        FrameDataType_oneof_message::handshake_data(data) => {
-            frame_data.set_app_data(false);
-            (
-                data.write_to_bytes().unwrap(),
-                FRAME_DATA_CONTENT_SIZE_OTHER,
-            )
-        }
-        FrameDataType_oneof_message::app_data(data) => {
-            frame_data.set_app_data(true);
-            (data.write_to_bytes().unwrap(), FRAME_DATA_CONTENT_SIZE_APP)
-        }
-        FrameDataType_oneof_message::forward_frame_ids(data) => {
-            frame_data.set_app_data(false);
-            (
-                data.write_to_bytes().unwrap(),
-                FRAME_DATA_CONTENT_SIZE_OTHER,
-            )
-        }
-    };
-    assert!(data.len() <= content_size);
+    let mut data = message.write_to_bytes().unwrap();
+    assert!(data.len() <= FRAME_DATA_CONTENT_SIZE);
     frame_data.set_data_size(data.len() as u32);
-    let padding_size = content_size - data.len();
+    let padding_size = FRAME_DATA_CONTENT_SIZE - data.len();
     let mut padding: Vec<_> = (0..padding_size).map(|_| rand::random::<u8>()).collect();
     data.append(&mut padding);
-    assert_eq!(data.len(), content_size);
+    assert_eq!(data.len(), FRAME_DATA_CONTENT_SIZE);
     frame_data.set_data(data.into());
     let mut frame_data_serialized = frame_data.write_to_bytes().unwrap();
     assert_eq!(frame_data_serialized.len(), SERIALIZED_FRAME_DATA_SIZE);
@@ -82,11 +62,7 @@ fn serialize(message: FrameDataType_oneof_message) -> Vec<u8> {
     buf
 }
 
-fn deserialize(
-    raw: &[u8],
-    frame_ids_expected: bool,
-    tunnel_id: TunnelId,
-) -> Result<FrameDataType_oneof_message, ProtocolError> {
+fn deserialize(raw: &[u8], tunnel_id: TunnelId) -> Result<FrameDataType, ProtocolError> {
     if raw.len() != FRAME_DATA_SIZE {
         log::warn!(
             "Tunnel={:?}: Received packet with invalid frame data size. Disconnect",
@@ -105,36 +81,12 @@ fn deserialize(
     };
     let raw_content = frame_data.data;
     let (data, _padding) = raw_content.split_at((frame_data.data_size) as usize);
-    if frame_data.app_data {
-        Ok(FrameDataType_oneof_message::app_data(
-            match ApplicationData::parse_from_bytes(data) {
-                Ok(data) => data,
-                Err(_) => {
-                    log::warn!("Tunnel={:?}: Cannot parse application data", tunnel_id);
-                    return Err(ProtocolError::ProtobufError);
-                }
-            },
-        ))
-    } else if frame_ids_expected {
-        Ok(FrameDataType_oneof_message::forward_frame_ids(
-            match ForwardFrameIds::parse_from_bytes(data) {
-                Ok(data) => data,
-                Err(_) => {
-                    log::warn!("Tunnel={:?}: Cannot parse forward_frame_ids", tunnel_id);
-                    return Err(ProtocolError::ProtobufError);
-                }
-            },
-        ))
-    } else {
-        Ok(FrameDataType_oneof_message::handshake_data(
-            match HandshakeData::parse_from_bytes(data) {
-                Ok(data) => data,
-                Err(_) => {
-                    log::warn!("Tunnel={:?}: Cannot parse handshake data", tunnel_id);
-                    return Err(ProtocolError::ProtobufError);
-                }
-            },
-        ))
+    match FrameDataType::parse_from_bytes(data) {
+        Ok(data) => Ok(data),
+        Err(_) => {
+            log::warn!("Tunnel={:?}: Cannot parse frame data type", tunnel_id);
+            Err(ProtocolError::ProtobufError)
+        }
     }
 }
 
@@ -219,22 +171,15 @@ pub trait P2pCodec {
     fn as_any(&mut self) -> &mut dyn Any;
 
     /*
-     *  Set the secret frame_ids for forwarding packets
+     *  Set the frame_id for forwarding packets
      */
-    async fn process_forward_frame_ids(&mut self, _ids: Vec<FrameId>) -> Result<(), ProtocolError>;
+    async fn process_forward_frame_id(&mut self, _id: FrameId) -> Result<(), ProtocolError>;
 
     /*
      *  Set the frame_id for backward packets
      */
     fn set_backward_frame_id(&mut self, _id: FrameId) {
         log::warn!("Setting backward frame_id not supported for this codec");
-    }
-
-    /*
-     *  Set the secret frame_ids for backward packets
-     */
-    fn set_backward_frame_ids(&mut self, _secret_ids: Vec<FrameId>) {
-        log::warn!("Setting backward frame_ids not supported for this codec");
     }
 
     /*
@@ -256,10 +201,9 @@ pub(crate) struct InitiatorEndpoint {
     next_hop: SocketAddr,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
-    forward_frame_ids: Vec<FrameId>,     // used for send to next hop
-    next_hop_backward_frame_id: FrameId, // unencrypted for client_hello
-    next_hop_backward_frame_ids: Vec<FrameId>, // encrypted secret via routing infos
-    next_hop_backward_frame_ids_old: Vec<FrameId>, // used for storing last, otherwise would be overwritten too early
+    forward_frame_id: FrameId, // used for send to next hop
+    next_hop_backward_frame_id: FrameId,
+    next_hop_backward_frame_id_old: FrameId, // cache for storing last, otherwise would be overwritten too early
     crypto_contexts: Vec<CryptoContext>,
     seq_nr_context: SequenceNumberContext,
 }
@@ -276,10 +220,9 @@ impl InitiatorEndpoint {
             next_hop,
             frame_id_manager,
             tunnel_id,
-            forward_frame_ids: vec![],
+            forward_frame_id: CLIENT_HELLO_FORWARD_ID,
             next_hop_backward_frame_id: 0,
-            next_hop_backward_frame_ids: vec![],
-            next_hop_backward_frame_ids_old: vec![],
+            next_hop_backward_frame_id_old: 0,
             crypto_contexts: vec![],
             seq_nr_context: SequenceNumberContext::new(),
         }
@@ -291,7 +234,7 @@ pub(crate) struct TargetEndpoint {
     prev_hop: SocketAddr,
     frame_id_manager: Arc<RwLock<FrameIdManager>>,
     tunnel_id: TunnelId,
-    backward_frame_ids: Vec<FrameId>,
+    backward_frame_id: FrameId,
     crypto_context: Option<CryptoContext>,
     seq_nr_context: SequenceNumberContext,
 }
@@ -308,7 +251,7 @@ impl TargetEndpoint {
             prev_hop,
             frame_id_manager,
             tunnel_id,
-            backward_frame_ids: vec![],
+            backward_frame_id: 0,
             crypto_context: None,
             seq_nr_context: SequenceNumberContext::new(),
         }
@@ -330,8 +273,8 @@ pub(crate) struct IntermediateHopCodec {
     next_hop: SocketAddr,
     prev_hop: SocketAddr,
     tunnel_id: TunnelId,
-    forward_frame_ids: Vec<FrameId>,
-    backward_frame_ids: Vec<FrameId>,
+    forward_frame_id: FrameId,
+    backward_frame_id: FrameId,
     crypto_context: CryptoContext,
     server_hello_forwarded: bool,
 }
@@ -344,8 +287,8 @@ impl IntermediateHopCodec {
             next_hop,
             prev_hop: target.prev_hop,
             tunnel_id: target.tunnel_id,
-            forward_frame_ids: vec![],
-            backward_frame_ids: target.backward_frame_ids.drain(..).collect(),
+            forward_frame_id: CLIENT_HELLO_FORWARD_ID,
+            backward_frame_id: target.backward_frame_id,
             crypto_context: target.crypto_context.take().unwrap(),
             server_hello_forwarded: false,
         }
@@ -356,21 +299,13 @@ impl IntermediateHopCodec {
 impl P2pCodec for InitiatorEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
-        if self.forward_frame_ids.is_empty() {
-            // no forward_frame_ids available yet, use CLIENT_HELlO_FORWARD_ID
-            frame.set_frame_id(CLIENT_HELLO_FORWARD_ID);
-        } else {
-            // choose a random
-            let index = rand::random::<usize>() % self.forward_frame_ids.len();
-            assert!(index < self.forward_frame_ids.len());
-            frame.set_frame_id(*self.forward_frame_ids.get(index).unwrap());
-        }
+        frame.set_frame_id(self.forward_frame_id);
 
         let iv_data_chunks = match data {
-            DataType::ForwardFrameIds(ids) => {
-                let mut data = ForwardFrameIds::new();
-                data.set_forward_frame_ids(ids);
-                let mut data = serialize(FrameDataType_oneof_message::forward_frame_ids(data));
+            DataType::ForwardFrameId(id) => {
+                let mut data = FrameDataType::new();
+                data.set_forward_frame_id(id);
+                let mut data = serialize(data);
 
                 // Unencrypted frameID transfer is not allowed
                 assert!(!self.crypto_contexts.is_empty());
@@ -391,7 +326,9 @@ impl P2pCodec for InitiatorEndpoint {
                 let mut app_data = ApplicationData::new();
                 app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                 app_data.set_close(Close::new());
-                let mut raw_data = serialize(FrameDataType_oneof_message::app_data(app_data));
+                let mut data = FrameDataType::new();
+                data.set_app_data(app_data);
+                let mut raw_data = serialize(data);
 
                 // Unencrypted close is not allowed
                 assert!(!self.crypto_contexts.is_empty());
@@ -413,7 +350,9 @@ impl P2pCodec for InitiatorEndpoint {
                     let mut app_data = ApplicationData::new();
                     app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                     app_data.set_data(Bytes::copy_from_slice(data_chunk));
-                    let mut raw_data = serialize(FrameDataType_oneof_message::app_data(app_data));
+                    let mut data = FrameDataType::new();
+                    data.set_app_data(app_data);
+                    let mut raw_data = serialize(data);
 
                     // Unencrypted data transfer is not allowed
                     assert!(!self.crypto_contexts.is_empty());
@@ -448,7 +387,9 @@ impl P2pCodec for InitiatorEndpoint {
                     cover_packet.set_mirrored(false);
                     app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                     app_data.set_cover_traffic(cover_packet);
-                    let mut raw_data = serialize(FrameDataType_oneof_message::app_data(app_data));
+                    let mut data = FrameDataType::new();
+                    data.set_app_data(app_data);
+                    let mut raw_data = serialize(data);
 
                     // Unencrypted data transfer is not allowed
                     assert!(!self.crypto_contexts.is_empty());
@@ -494,7 +435,9 @@ impl P2pCodec for InitiatorEndpoint {
                 // prepare frame
                 let mut handshake = HandshakeData::new();
                 handshake.set_client_hello(client_hello);
-                let mut data = serialize(FrameDataType_oneof_message::handshake_data(handshake));
+                let mut data = FrameDataType::new();
+                data.set_handshake_data(handshake);
+                let mut data = serialize(data);
 
                 // encrypt via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
@@ -506,7 +449,7 @@ impl P2pCodec for InitiatorEndpoint {
                 assert_eq!(data.len(), FRAME_DATA_SIZE);
                 vec![(iv, data)]
             }
-            DataType::RoutingInformation(mut data) => {
+            DataType::RoutingInformation(data) => {
                 log::debug!(
                     "Tunnel={:?}: Send RoutingInformation={:?} to next hop {:?}",
                     self.tunnel_id,
@@ -514,13 +457,11 @@ impl P2pCodec for InitiatorEndpoint {
                     self.next_hop
                 );
 
-                // use the stored next_hop_backward_frame_ids to tell the next hop how he can address the previous one
-                let bf_ids = self.next_hop_backward_frame_ids_old.drain(..).collect();
-                data.set_backward_frame_ids(bf_ids);
-
                 let mut handshake = HandshakeData::new();
                 handshake.set_routing(data);
-                let mut data = serialize(FrameDataType_oneof_message::handshake_data(handshake));
+                let mut data = FrameDataType::new();
+                data.set_handshake_data(handshake);
+                let mut data = serialize(data);
 
                 // Unencrypted routing transfer is not allowed
                 assert!(!self.crypto_contexts.is_empty());
@@ -593,44 +534,53 @@ impl P2pCodec for InitiatorEndpoint {
         }
 
         // deserialize data
-        match deserialize(dec_data.as_ref(), false, self.tunnel_id)? {
-            FrameDataType_oneof_message::handshake_data(data) => {
-                log::trace!(
-                    "Tunnel={:?}: Initiator receives handshake data",
-                    self.tunnel_id
-                );
-                Ok(ProcessedData::HandshakeData(data))
-            }
-            FrameDataType_oneof_message::app_data(message) => {
-                log::trace!(
-                    "Tunnel={:?}: Initiator receives application data with sequence_number={:?}",
-                    self.tunnel_id,
-                    message.sequence_number
-                );
-                if let Err(e) = self
-                    .seq_nr_context
-                    .verify_incoming_seq_nr(message.sequence_number)
-                {
-                    return Err(e);
+        let msg = deserialize(dec_data.as_ref(), self.tunnel_id)?;
+        if let Some(msg) = msg.message {
+            match msg {
+                FrameDataType_oneof_message::handshake_data(data) => {
+                    log::trace!(
+                        "Tunnel={:?}: Initiator receives handshake data",
+                        self.tunnel_id
+                    );
+                    Ok(ProcessedData::HandshakeData(data))
                 }
-                return match message.message {
-                    None => Err(ProtocolError::EmptyMessage),
-                    Some(data) => match data {
-                        ApplicationData_oneof_message::data(data) => {
-                            Ok(ProcessedData::IncomingData(data.to_vec()))
-                        }
-                        ApplicationData_oneof_message::cover_traffic(cover) => Ok(
-                            ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
-                        ),
-                        ApplicationData_oneof_message::close(_) => {
-                            // initiator received close, deconstruct tunnel
-                            log::trace!("Tunnel={:?}: Initiator receives close", self.tunnel_id);
-                            Ok(ProcessedData::ReceivedClose)
-                        }
-                    },
-                };
+                FrameDataType_oneof_message::app_data(message) => {
+                    log::trace!(
+                        "Tunnel={:?}: Initiator receives application data with sequence_number={:?}",
+                        self.tunnel_id,
+                        message.sequence_number
+                    );
+                    if let Err(e) = self
+                        .seq_nr_context
+                        .verify_incoming_seq_nr(message.sequence_number)
+                    {
+                        return Err(e);
+                    }
+                    return match message.message {
+                        None => Err(ProtocolError::EmptyMessage),
+                        Some(data) => match data {
+                            ApplicationData_oneof_message::data(data) => {
+                                Ok(ProcessedData::IncomingData(data.to_vec()))
+                            }
+                            ApplicationData_oneof_message::cover_traffic(cover) => Ok(
+                                ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
+                            ),
+                            ApplicationData_oneof_message::close(_) => {
+                                // initiator received close, deconstruct tunnel
+                                log::trace!(
+                                    "Tunnel={:?}: Initiator receives close",
+                                    self.tunnel_id
+                                );
+                                Ok(ProcessedData::ReceivedClose)
+                            }
+                        },
+                    };
+                }
+                _ => Err(ProtocolError::UnexpectedMessageType),
             }
-            _ => Err(ProtocolError::UnexpectedMessageType),
+        } else {
+            // empty
+            Err(ProtocolError::UnexpectedMessageType)
         }
     }
 
@@ -646,22 +596,22 @@ impl P2pCodec for InitiatorEndpoint {
         self
     }
 
-    async fn process_forward_frame_ids(&mut self, ids: Vec<FrameId>) -> Result<(), ProtocolError> {
-        if self.forward_frame_ids.is_empty() {
+    async fn process_forward_frame_id(&mut self, id: FrameId) -> Result<(), ProtocolError> {
+        if self.forward_frame_id == CLIENT_HELLO_FORWARD_ID {
             log::trace!(
-                "Tunnel={:?}: Set secret forward frame ids = {:?}",
+                "Tunnel={:?}: Set forward_frame_id = {:?}",
                 self.tunnel_id,
-                ids
+                id
             );
-            self.forward_frame_ids = ids;
+            self.forward_frame_id = id;
             Ok(())
         } else {
             log::trace!(
-                "Tunnel={:?}: Initiator send forward_frame_ids={:?} to hop via magic number",
+                "Tunnel={:?}: Initiator send forward_frame_id={:?} to hop",
                 self.tunnel_id,
-                ids
+                id
             );
-            self.write(DataType::ForwardFrameIds(ids)).await
+            self.write(DataType::ForwardFrameId(id)).await
         }
     }
 
@@ -671,17 +621,8 @@ impl P2pCodec for InitiatorEndpoint {
             self.tunnel_id,
             id
         );
+        self.next_hop_backward_frame_id_old = self.next_hop_backward_frame_id;
         self.next_hop_backward_frame_id = id;
-    }
-
-    fn set_backward_frame_ids(&mut self, secret_ids: Vec<FrameId>) {
-        log::trace!(
-            "Tunnel={:?}: Initiator set_next_hop_bw_frame_ids={:?}",
-            self.tunnel_id,
-            secret_ids
-        );
-        self.next_hop_backward_frame_ids_old = self.next_hop_backward_frame_ids.drain(..).collect();
-        self.next_hop_backward_frame_ids = secret_ids;
     }
 
     fn add_crypto_context(&mut self, cc: CryptoContext) {
@@ -698,12 +639,10 @@ impl P2pCodec for TargetEndpoint {
     async fn write(&mut self, data: DataType) -> Result<(), ProtocolError> {
         let mut frame = TunnelFrame::new();
 
-        if self.backward_frame_ids.is_empty() {
-            return Err(ProtocolError::EmptyFrameIds);
+        if self.backward_frame_id == 0 {
+            return Err(ProtocolError::EmptyFrameId);
         } else {
-            let index = rand::random::<usize>() % self.backward_frame_ids.len();
-            assert!(index < self.backward_frame_ids.len());
-            frame.set_frame_id(*self.backward_frame_ids.get(index).unwrap());
+            frame.set_frame_id(self.backward_frame_id);
         }
 
         let iv_data_bytes = match data {
@@ -712,7 +651,9 @@ impl P2pCodec for TargetEndpoint {
                 let mut app_data = ApplicationData::new();
                 app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                 app_data.set_close(Close::new());
-                let raw_data = serialize(FrameDataType_oneof_message::app_data(app_data));
+                let mut data = FrameDataType::new();
+                data.set_app_data(app_data);
+                let raw_data = serialize(data);
 
                 // // Unencrypted close transfer is not allowed
                 assert!(self.crypto_context.is_some());
@@ -739,7 +680,9 @@ impl P2pCodec for TargetEndpoint {
                     let mut app_data = ApplicationData::new();
                     app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                     app_data.set_data(Bytes::copy_from_slice(data_chunk));
-                    let raw_data = serialize(FrameDataType_oneof_message::app_data(app_data));
+                    let mut data = FrameDataType::new();
+                    data.set_app_data(app_data);
+                    let raw_data = serialize(data);
 
                     // Unencrypted data transfer is not allowed
                     assert!(self.crypto_context.is_some());
@@ -771,7 +714,9 @@ impl P2pCodec for TargetEndpoint {
                     cover_packet.set_mirrored(true);
                     app_data.set_sequence_number(self.seq_nr_context.get_next_seq_nr());
                     app_data.set_cover_traffic(cover_packet);
-                    let raw_data = serialize(FrameDataType_oneof_message::app_data(app_data));
+                    let mut data = FrameDataType::new();
+                    data.set_app_data(app_data);
+                    let raw_data = serialize(data);
 
                     // Unencrypted cover transfer is not allowed
                     assert!(self.crypto_context.is_some());
@@ -806,7 +751,9 @@ impl P2pCodec for TargetEndpoint {
                 openssl::rand::rand_bytes(&mut iv).expect("Failed to generated random IV");
                 let mut handshake = HandshakeData::new();
                 handshake.set_server_hello(server_hello);
-                let raw_data = serialize(FrameDataType_oneof_message::handshake_data(handshake));
+                let mut data = FrameDataType::new();
+                data.set_handshake_data(handshake);
+                let raw_data = serialize(data);
                 assert_eq!(raw_data.len(), FRAME_DATA_SIZE);
                 vec![(iv, raw_data)]
             }
@@ -858,43 +805,49 @@ impl P2pCodec for TargetEndpoint {
             data = data_;
         }
 
-        match deserialize(data.as_ref(), false, self.tunnel_id)? {
-            FrameDataType_oneof_message::handshake_data(data) => {
-                log::trace!(
-                    "Tunnel={:?}: Target receives handshake data",
-                    self.tunnel_id
-                );
-                Ok(ProcessedData::HandshakeData(data))
-            }
-            FrameDataType_oneof_message::app_data(message) => {
-                log::trace!(
-                    "Tunnel={:?}: Target receives application data with sequence_number={:?}",
-                    self.tunnel_id,
-                    message.sequence_number
-                );
-                if let Err(e) = self
-                    .seq_nr_context
-                    .verify_incoming_seq_nr(message.sequence_number)
-                {
-                    return Err(e);
+        let msg = deserialize(data.as_ref(), self.tunnel_id)?;
+        if let Some(msg) = msg.message {
+            match msg {
+                FrameDataType_oneof_message::handshake_data(data) => {
+                    log::trace!(
+                        "Tunnel={:?}: Target receives handshake data",
+                        self.tunnel_id
+                    );
+                    Ok(ProcessedData::HandshakeData(data))
                 }
-                return match message.message {
-                    None => Err(ProtocolError::EmptyMessage),
-                    Some(data) => match data {
-                        ApplicationData_oneof_message::data(data) => {
-                            Ok(ProcessedData::IncomingData(data.to_vec()))
-                        }
-                        ApplicationData_oneof_message::cover_traffic(cover) => Ok(
-                            ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
-                        ),
-                        ApplicationData_oneof_message::close(_) => {
-                            log::trace!("Tunnel={:?}: Target receives close", self.tunnel_id);
-                            Ok(ProcessedData::ReceivedClose)
-                        }
-                    },
-                };
+                FrameDataType_oneof_message::app_data(message) => {
+                    log::trace!(
+                        "Tunnel={:?}: Target receives application data with sequence_number={:?}",
+                        self.tunnel_id,
+                        message.sequence_number
+                    );
+                    if let Err(e) = self
+                        .seq_nr_context
+                        .verify_incoming_seq_nr(message.sequence_number)
+                    {
+                        return Err(e);
+                    }
+                    return match message.message {
+                        None => Err(ProtocolError::EmptyMessage),
+                        Some(data) => match data {
+                            ApplicationData_oneof_message::data(data) => {
+                                Ok(ProcessedData::IncomingData(data.to_vec()))
+                            }
+                            ApplicationData_oneof_message::cover_traffic(cover) => Ok(
+                                ProcessedData::IncomingCover(cover.data.to_vec(), cover.mirrored),
+                            ),
+                            ApplicationData_oneof_message::close(_) => {
+                                log::trace!("Tunnel={:?}: Target receives close", self.tunnel_id);
+                                Ok(ProcessedData::ReceivedClose)
+                            }
+                        },
+                    };
+                }
+                _ => Err(ProtocolError::UnexpectedMessageType),
             }
-            _ => Err(ProtocolError::UnexpectedMessageType),
+        } else {
+            // empty
+            Err(ProtocolError::UnexpectedMessageType)
         }
     }
 
@@ -910,29 +863,18 @@ impl P2pCodec for TargetEndpoint {
         self
     }
 
-    async fn process_forward_frame_ids(&mut self, _ids: Vec<FrameId>) -> Result<(), ProtocolError> {
-        log::warn!("Setting forward frame_ids not supported for this codec");
+    async fn process_forward_frame_id(&mut self, _id: FrameId) -> Result<(), ProtocolError> {
+        log::warn!("Setting forward frame_id not supported for this codec");
         Err(ProtocolError::UnsupportedAction)
     }
 
-    fn set_backward_frame_id(&mut self, id: FrameId) {
-        if self.backward_frame_ids.is_empty() {
-            log::trace!(
-                "Tunnel={:?}: Target set backward_frame_id={:?}",
-                self.tunnel_id,
-                id
-            );
-            self.backward_frame_ids.push(id);
-        }
-    }
-
-    fn set_backward_frame_ids(&mut self, secret_ids: Vec<FrameId>) {
+    fn set_backward_frame_id(&mut self, secret_id: FrameId) {
         log::trace!(
-            "Tunnel={:?}: Set secret backward frame ids={:?}",
+            "Tunnel={:?}: Set backward frame id={:?}",
             self.tunnel_id,
-            secret_ids
+            secret_id
         );
-        self.backward_frame_ids = secret_ids;
+        self.backward_frame_id = secret_id;
     }
 
     fn add_crypto_context(&mut self, cc: CryptoContext) {
@@ -985,54 +927,45 @@ impl P2pCodec for IntermediateHopCodec {
                 // decrypt using iv and key
                 // An intermediate hop is the final decrypting hop in two cases:
                 // 1. server_hello was not forwarded so far: Then we will forward an unencrypted client_hello message
-                // 2. forward_frame_ids is empty: After server_hello is received by the server, the server sends us the forward_frame_ids
+                // 2. forward_frame_id is zero: After server_hello is received by the server, the server sends us the forward_frame_id
                 let (iv, decrypted_data) = self.crypto_context.decrypt(
                     &iv,
                     &data,
-                    !self.server_hello_forwarded || self.forward_frame_ids.is_empty(),
+                    !self.server_hello_forwarded
+                        || self.forward_frame_id == CLIENT_HELLO_FORWARD_ID,
                 )?;
 
-                if self.server_hello_forwarded && self.forward_frame_ids.is_empty() {
-                    // expect frame ids
-                    return match deserialize(&decrypted_data, true, self.tunnel_id) {
-                        Ok(data) => match data {
-                            FrameDataType_oneof_message::forward_frame_ids(ids) => {
-                                log::trace!(
-                                    "Tunnel={:?}: New secret forwards ids: {:?}",
-                                    self.tunnel_id,
-                                    ids.forward_frame_ids,
-                                );
-                                FrameIdManager::verify_frame_ids(ids.get_forward_frame_ids(), 10)?;
-                                self.forward_frame_ids = ids.forward_frame_ids;
-                                Ok(ProcessedData::TransferredToNextHop)
-                            }
-                            _ => {
-                                log::warn!(
-                                    "Tunnel={:?}: Cannot parse to forward_frame_ids",
-                                    self.tunnel_id,
-                                );
-                                Err(ProtocolError::ProtobufError)
-                            }
+                if self.server_hello_forwarded && self.forward_frame_id == CLIENT_HELLO_FORWARD_ID {
+                    // expect frame id
+                    return match deserialize(&decrypted_data, self.tunnel_id) {
+                        Ok(data) => match data.message {
+                            None => Err(ProtocolError::EmptyFrameId),
+                            Some(data) => match data {
+                                FrameDataType_oneof_message::forward_frame_id(id) => {
+                                    log::trace!(
+                                        "Tunnel={:?}: New secret forwards id: {:?}",
+                                        self.tunnel_id,
+                                        id
+                                    );
+                                    FrameIdManager::verify_frame_id(id)?;
+                                    self.forward_frame_id = id;
+                                    Ok(ProcessedData::TransferredToNextHop)
+                                }
+                                _ => {
+                                    log::warn!(
+                                        "Tunnel={:?}: Cannot parse to forward_frame_id",
+                                        self.tunnel_id,
+                                    );
+                                    Err(ProtocolError::ProtobufError)
+                                }
+                            },
                         },
-                        Err(_) => {
-                            log::warn!(
-                                "Tunnel={:?}: Forward frame ids not available, cannot forward packet",
-                                self.tunnel_id,
-                            );
-                            Err(ProtocolError::EmptyFrameIds)
-                        }
+                        Err(_) => Err(ProtocolError::EmptyFrameId),
                     };
                 }
 
                 // check if we should forward a client hello
-                if !self.server_hello_forwarded {
-                    frame.set_frame_id(CLIENT_HELLO_FORWARD_ID);
-                } else {
-                    // choose random forward id
-                    let index = rand::random::<usize>() % self.forward_frame_ids.len();
-                    assert!(index < self.forward_frame_ids.len());
-                    frame.set_frame_id(*self.forward_frame_ids.get(index).unwrap());
-                }
+                frame.set_frame_id(self.forward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(decrypted_data.into());
                 (frame, self.next_hop)
@@ -1045,10 +978,7 @@ impl P2pCodec for IntermediateHopCodec {
                     self.crypto_context
                         .encrypt(Some(&iv), &data, !self.server_hello_forwarded)?;
                 self.server_hello_forwarded = true; // never set to false again
-                                                    // choose random backward id
-                let index = rand::random::<usize>() % self.backward_frame_ids.len();
-                assert!(index < self.backward_frame_ids.len());
-                frame.set_frame_id(*self.backward_frame_ids.get(index).unwrap());
+                frame.set_frame_id(self.backward_frame_id);
                 frame.set_iv(iv.into());
                 frame.set_data(encrypted_data.into());
                 (frame, self.prev_hop)
@@ -1077,8 +1007,8 @@ impl P2pCodec for IntermediateHopCodec {
         self
     }
 
-    async fn process_forward_frame_ids(&mut self, _ids: Vec<FrameId>) -> Result<(), ProtocolError> {
-        log::warn!("Setting forward frame_ids not supported for this codec");
+    async fn process_forward_frame_id(&mut self, _id: FrameId) -> Result<(), ProtocolError> {
+        log::warn!("Setting forward frame_id not supported for this codec");
         Err(ProtocolError::UnsupportedAction)
     }
 }
@@ -1086,7 +1016,7 @@ impl P2pCodec for IntermediateHopCodec {
 #[cfg(test)]
 mod tests {
     use crate::p2p_protocol::messages::p2p_messages::{
-        ApplicationData, ClientHello, Close, CoverTraffic, EncryptedServerHelloData,
+        ApplicationData, ClientHello, Close, CoverTraffic, EncryptedServerHelloData, FrameDataType,
         FrameDataType_oneof_message, HandshakeData, RoutingInformation, ServerHello, TunnelFrame,
     };
     use crate::p2p_protocol::onion_tunnel::crypto::{
@@ -1117,8 +1047,10 @@ mod tests {
 
         // close
         app_data.set_close(Close::new());
-        let data = serialize(FrameDataType_oneof_message::app_data(app_data.clone()));
-        match deserialize(&data, false, 1).unwrap() {
+        let mut data = FrameDataType::new();
+        data.set_app_data(app_data.clone());
+        let data = serialize(data);
+        match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::app_data(data) => assert!(data.has_close()),
             _ => panic!("Expected ApplicationData"),
         };
@@ -1129,8 +1061,10 @@ mod tests {
         cover.set_data(cover_chunk.clone().into());
         cover.set_mirrored(true);
         app_data.set_cover_traffic(cover);
-        let data = serialize(FrameDataType_oneof_message::app_data(app_data.clone()));
-        match deserialize(&data, false, 1).unwrap() {
+        let mut data = FrameDataType::new();
+        data.set_app_data(app_data.clone());
+        let data = serialize(data);
+        match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::app_data(data) => assert!(data.has_cover_traffic()),
             _ => panic!("Expected ApplicationData"),
         };
@@ -1141,8 +1075,10 @@ mod tests {
         cover.set_data(cover_chunk.into());
         cover.set_mirrored(false);
         app_data.set_cover_traffic(cover);
-        let data = serialize(FrameDataType_oneof_message::app_data(app_data.clone()));
-        match deserialize(&data, false, 1).unwrap() {
+        let mut data = FrameDataType::new();
+        data.set_app_data(app_data.clone());
+        let data = serialize(data);
+        match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::app_data(data) => assert!(data.has_cover_traffic()),
             _ => panic!("Expected ApplicationData"),
         };
@@ -1150,8 +1086,10 @@ mod tests {
 
         // data
         app_data.set_data(payload_chunk.into());
-        let data = serialize(FrameDataType_oneof_message::app_data(app_data));
-        match deserialize(&data, false, 1).unwrap() {
+        let mut data = FrameDataType::new();
+        data.set_app_data(app_data.clone());
+        let data = serialize(data);
+        match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::app_data(data) => assert!(data.has_data()),
             _ => panic!("Expected ApplicationData"),
         };
@@ -1176,10 +1114,10 @@ mod tests {
         client_hello.set_backward_frame_id(0xffffffff);
         client_hello.set_ecdh_public_key(cc1.get_public_key().into());
         handshake.set_client_hello(client_hello);
-        let data = serialize(FrameDataType_oneof_message::handshake_data(
-            handshake.clone(),
-        ));
-        match deserialize(&data, false, 1).unwrap() {
+        let mut data = FrameDataType::new();
+        data.set_handshake_data(handshake.clone());
+        let data = serialize(data);
+        match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::handshake_data(data) => assert!(data.has_client_hello()),
             _ => panic!("Expected ClientHello"),
         };
@@ -1191,19 +1129,18 @@ mod tests {
         let mut encrypted_data = EncryptedServerHelloData::new();
         encrypted_data.set_signature(signature.into());
         encrypted_data.set_backward_frame_id(0xffffffff);
-        encrypted_data.set_backward_frame_ids(vec![0xffffffff; 10]);
-        encrypted_data.set_forward_frame_ids(vec![0xffffffff; 10]);
+        encrypted_data.set_forward_frame_id(0xffffffff);
+        encrypted_data.set_challenge(cc2.get_challenge().to_owned().into());
         let raw_enc_data = encrypted_data.write_to_bytes().unwrap();
         let (iv, enc_data) = cc_b.encrypt(None, &raw_enc_data, false).unwrap();
         server_hello.set_ecdh_public_key(cc2.get_public_key().into());
-        server_hello.set_challenge(cc2.get_challenge().to_owned().into());
         server_hello.set_iv(iv.into());
         server_hello.set_encrypted_data(enc_data.into());
         handshake.set_server_hello(server_hello);
-        let data = serialize(FrameDataType_oneof_message::handshake_data(
-            handshake.clone(),
-        ));
-        match deserialize(&data, false, 1).unwrap() {
+        let mut data = FrameDataType::new();
+        data.set_handshake_data(handshake.clone());
+        let data = serialize(data);
+        match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::handshake_data(data) => assert!(data.has_server_hello()),
             _ => panic!("Expected ServerHello"),
         };
@@ -1214,14 +1151,15 @@ mod tests {
         routing.set_cover_only(true);
         routing.set_tunnel_update_reference(0xffffffff);
         routing.set_is_endpoint(true);
-        routing.set_backward_frame_ids(vec![0xffffffff; 10]);
         routing.set_next_hop_addr(vec![0; 16].into());
         routing.set_next_hop_port(0xffff_u32);
         let response = cc1.sign(cc2.get_challenge());
         routing.set_challenge_response(response.into());
         handshake.set_routing(routing);
-        let data = serialize(FrameDataType_oneof_message::handshake_data(handshake));
-        match deserialize(&data, false, 1).unwrap() {
+        let mut data = FrameDataType::new();
+        data.set_handshake_data(handshake.clone());
+        let data = serialize(data);
+        match deserialize(&data, 1).unwrap().message.unwrap() {
             FrameDataType_oneof_message::handshake_data(data) => assert!(data.has_routing()),
             _ => panic!("Expected RoutingInformation"),
         };

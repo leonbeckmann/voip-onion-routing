@@ -1,20 +1,18 @@
 syntax = "proto3";
 
-// P2P Onion Tunnel frame
 message TunnelFrame {
   // an identifier for identifying the corresponding tunnel of this frame
   fixed32 frame_id = 1;
-
   // random, unpredictable iv used for encryption
   bytes iv = 2;
-
   // auth_tag | FrameData as bytes (encrypted)
   bytes data = 3;
 }
 
 message FrameData {
+  // size of data, used to split data and padding
   fixed32 data_size = 1;
-  bool app_data = 2;
+  // data (FrameDataType), appended by padding
   bytes data = 3;
 }
 
@@ -22,74 +20,85 @@ message FrameDataType {
   oneof message {
     HandshakeData handshake_data = 1;
     ApplicationData app_data = 2;
-    ForwardFrameIds forward_frame_ids = 3;
+    // forward frame id for telling intermediate hop how to address next hop
+    uint32 forward_frame_id = 3;
   }
 }
 
-message ForwardFrameIds {
-  repeated uint32 forward_frame_ids = 1;
-}
-
 message HandshakeData {
-  // establish secure channel
   oneof message {
+    // Client Hello is the first handshake message
     ClientHello client_hello = 1;
+    // Server Hello is the second handshake message
     ServerHello server_hello = 2;
+    // Routing Information is the third handshake message
     RoutingInformation routing = 3;
   }
 }
 
 message ClientHello {
-  // frameId used for communicating with the source
+  // public frame id used for communicating with the caller
   uint32 backward_frame_id = 1;
+  // public ECDHE parameter
   bytes ecdh_public_key = 2;
 }
 
 message ServerHello {
   // public ECDHE parameter
   bytes ecdh_public_key = 1;
-  // challenge for client authentication
-  bytes challenge = 2;
   // iv for encrypted data
-  bytes iv = 3;
+  bytes iv = 2;
   // encrypted data
-  bytes encrypted_data = 4;
+  bytes encrypted_data = 3;
 }
 
 message EncryptedServerHelloData {
+  // signature to authenticate handshake values
   bytes signature = 1;
+  // challenge for caller authentication
+  bytes challenge = 2;
   // used for hops to tell next hop how to address prev hop
-  uint32 backward_frame_id = 2;
-  repeated uint32 backward_frame_ids = 3;
-  repeated uint32 forward_frame_ids = 4;
+  uint32 backward_frame_id = 3;
+  // secret forward frame id
+  uint32 forward_frame_id = 5;
 }
 
 message RoutingInformation {
+  // signal peer if it is the endpoint
   bool is_endpoint = 1;
+  // next hop's address, set if peer is not the endpoint
   bytes next_hop_addr = 2;
   uint32 next_hop_port = 3;
-
+  // response, which can be used for caller authentication in future work
   oneof optional_challenge_response {
     bytes challenge_response = 4;
   }
-
-  repeated uint32 backward_frame_ids = 5;
+  // tunnel_update_reference signals if the new tunnel is a rebuilt
   uint32 tunnel_update_reference = 6;
+  // signal if this tunnel is only used for cover traffic
   bool cover_only = 7;
 }
 
 message ApplicationData {
+  // sequence number for replay protection
   fixed32 sequence_number = 1;
+  // application payload
   oneof message {
+    // data payload
     bytes data = 2;
+    // cover payload
     CoverTraffic cover_traffic = 3;
+    // close
     Close close = 4;
   }
 }
 
 message CoverTraffic {
+  // cover traffic
   bytes data = 1;
+  // cover traffic must be mirrored by the receiver once
   bool mirrored = 2;
 }
 
 message Close {}
+

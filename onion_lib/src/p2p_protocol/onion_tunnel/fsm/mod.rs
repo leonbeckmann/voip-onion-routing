@@ -566,13 +566,12 @@ impl FiniteStateMachine for InitiatorStateMachine {
         };
         let cover_only = self.cover_only;
 
-        // create bw frame ids for the initiator codec
-        let bf_ids =
-            frame_id_manager
-                .write()
-                .await
-                .new_frame_ids(tunnel_id, Direction::Backward, 10);
-        codec.lock().await.set_backward_frame_ids(bf_ids);
+        // create bw frame id for the initiator codec
+        let bf_id = frame_id_manager
+            .write()
+            .await
+            .new_frame_id(tunnel_id, Direction::Backward);
+        codec.lock().await.set_backward_frame_id(bf_id);
 
         // create a channel used by the main FSM to communicate with the handshake fsm
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
@@ -936,9 +935,9 @@ pub enum ProtocolError {
     ExpiredSequenceNumber,
     #[error("Cannot sample random peers from RPS module")]
     RpsFailure,
-    #[error("Provided Frame IDS are empty")]
-    EmptyFrameIds,
-    #[error("Unsupported acction")]
+    #[error("Provided Frame ID not available")]
+    EmptyFrameId,
+    #[error("Unsupported action")]
     UnsupportedAction,
     #[error("Received an invalid frame ID within the handshake")]
     InvalidFrameId,

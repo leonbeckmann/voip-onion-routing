@@ -399,7 +399,7 @@ impl P2pInterface {
                                 let tunnel_manager = self.tunnel_manager.read().await;
                                 match tunnel_manager.get_tunnel(&tunnel_id) {
                                     None => {
-                                        // should never happen, means outdated frame_ids
+                                        // should never happen, means outdated frame_id
                                         log::warn!(
                                             "Received frame for not available tunnel with id {:?} at {}",
                                             tunnel_id, my_addr
