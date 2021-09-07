@@ -1,16 +1,19 @@
 use crate::api_protocol::messages::OnionMessageHeader;
+use crate::p2p_protocol::dtls_connections::Blocklist;
 use crate::p2p_protocol::onion_tunnel::Peer;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::RwLock;
 
 pub const RPS_QUERY: u16 = 540;
 pub const RPS_PEER: u16 = 541;
 pub const ONION_PORT: u16 = 560;
 
-pub async fn rps_get_peer(rps_addr: SocketAddr) -> anyhow::Result<Peer> {
+async fn rps_get_peer(rps_addr: SocketAddr) -> anyhow::Result<Peer> {
     // connect to rps module
     let mut stream = TcpStream::connect(rps_addr).await?;
 
@@ -44,6 +47,19 @@ pub async fn rps_get_peer(rps_addr: SocketAddr) -> anyhow::Result<Peer> {
             "RPS response does not contain an onion port",
         ))
     }
+}
+
+pub async fn rps_get_peer_filtered(
+    rps_addr: SocketAddr,
+    blocklist: Arc<RwLock<Blocklist>>,
+) -> anyhow::Result<Peer> {
+    for _ in 0..10 {
+        let (socket_addr, host_key) = rps_get_peer(rps_addr).await?;
+        if !blocklist.read().await.is_blocked(&socket_addr) {
+            return Ok((socket_addr, host_key));
+        }
+    }
+    Err(anyhow::Error::msg("RPS did not find non-blocked peer"))
 }
 
 #[derive(Debug, PartialEq)]

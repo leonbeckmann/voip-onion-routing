@@ -25,7 +25,7 @@ pub struct DtlsConfig {
     pki_root_cert: X509,
     local_peer_identity_cert: X509,
     private_host_key: Rsa<Private>,
-    black_list_time: Duration,
+    pub black_list_time: Duration,
 }
 
 impl DtlsConfig {
@@ -74,7 +74,7 @@ impl DtlsConfig {
 }
 
 #[derive(Debug)]
-struct Blocklist {
+pub struct Blocklist {
     block_duration: Duration,
     list: HashMap<SocketAddr, SystemTime>,
     unblock_queue: BTreeMap<SystemTime, Vec<SocketAddr>>,
@@ -402,10 +402,10 @@ impl DtlsSocketLayer {
     pub async fn new<A: ToSocketAddrs + Clone>(
         address: A,
         dtls_config: Arc<DtlsConfig>,
+        blocklist: Arc<RwLock<Blocklist>>,
     ) -> DtlsSocketLayer {
         let socket = Arc::new(UdpSocket::bind(address.clone()).await.unwrap());
         let connection_sockets = Arc::new(Mutex::new(HashMap::new()));
-        let blocklist = Arc::new(RwLock::new(Blocklist::new(dtls_config.black_list_time)));
 
         let socket_clone = socket.clone();
         let connection_sockets_clone = connection_sockets.clone();
@@ -806,7 +806,9 @@ mod tests {
         },
     };
     use rand::RngCore;
-    use tokio::time::timeout;
+    use tokio::{sync::RwLock, time::timeout};
+
+    use crate::p2p_protocol::dtls_connections::Blocklist;
 
     use super::{DtlsConfig, DtlsSocketLayer};
 
@@ -893,8 +895,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on(async {
-            let socket_1 = DtlsSocketLayer::new(addr_1, config_1).await;
-            let socket_2 = DtlsSocketLayer::new(addr_2, config_2).await;
+            let blocklist = Arc::new(RwLock::new(Blocklist::new(Duration::from_secs(60))));
+            let socket_1 = DtlsSocketLayer::new(addr_1, config_1, blocklist.clone()).await;
+            let socket_2 = DtlsSocketLayer::new(addr_2, config_2, blocklist).await;
 
             tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -950,7 +953,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on(async {
-            let socket = DtlsSocketLayer::new(addr, config).await;
+            let blocklist = Arc::new(RwLock::new(Blocklist::new(Duration::from_secs(60))));
+            let socket = DtlsSocketLayer::new(addr, config, blocklist).await;
 
             tokio::time::sleep(Duration::from_secs(1)).await;
 

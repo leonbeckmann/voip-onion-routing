@@ -15,12 +15,12 @@ use crate::p2p_protocol::onion_tunnel::fsm::{
 };
 use crate::p2p_protocol::{ConnectionId, FrameId, P2pError};
 
-use super::dtls_connections::DtlsSocketLayer;
+use super::dtls_connections::{Blocklist, DtlsSocketLayer};
 use super::TunnelId;
 use crate::p2p_protocol::onion_tunnel::crypto::HandshakeCryptoConfig;
 use crate::p2p_protocol::onion_tunnel::frame_id_manager::FrameIdManager;
 use crate::p2p_protocol::onion_tunnel::tunnel_manager::TunnelManager;
-use crate::p2p_protocol::rps_api::rps_get_peer;
+use crate::p2p_protocol::rps_api::rps_get_peer_filtered;
 use std::time::Duration;
 
 pub mod crypto;
@@ -431,12 +431,13 @@ impl OnionTunnel {
         timeout: Duration,
         tunnel_update_ref: Option<FrameId>,
         update_information: Option<UpdateInformation>,
+        blocklist: Arc<RwLock<Blocklist>>,
     ) -> Result<TunnelId, ProtocolError> {
         // select intermediate hops via rps module and hop count
         // TODO robustness isAlive checks during tunnel establishment, maybe add some more backup peers
         let mut hops: Vec<Peer> = vec![];
         for i in 0..hop_count {
-            let peer = match rps_get_peer(rps_api_address).await {
+            let peer = match rps_get_peer_filtered(rps_api_address, blocklist.clone()).await {
                 Ok(peer) => {
                     log::debug!(
                         "{:?}. intermediate peer: (addr={:?}, identity={:?})",

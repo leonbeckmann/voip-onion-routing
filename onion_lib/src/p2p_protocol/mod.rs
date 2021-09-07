@@ -22,6 +22,8 @@ use thiserror::Error;
 use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 use tokio::time::sleep;
 
+use self::dtls_connections::Blocklist;
+
 // hard coded packet size should not be configurable and equal for all modules
 const FRAME_SIZE: usize = 1024;
 const CLIENT_HELLO_FORWARD_ID: FrameId = 1;
@@ -55,6 +57,7 @@ struct RoundSynchronizer {
     tunnel_registration_counter: Arc<Mutex<u8>>,
     round_cover_tunnel: Arc<Mutex<Option<TunnelId>>>,
     local_addr: String,
+    blocklist: Arc<RwLock<Blocklist>>,
 }
 
 impl RoundSynchronizer {
@@ -63,6 +66,7 @@ impl RoundSynchronizer {
         build_window: Duration,
         host: &str,
         port: u16,
+        blocklist: Arc<RwLock<Blocklist>>,
     ) -> RoundSynchronizer {
         RoundSynchronizer {
             update_notify: Arc::new((
@@ -81,6 +85,7 @@ impl RoundSynchronizer {
             tunnel_registration_counter: Arc::new(Mutex::new(0)),
             round_cover_tunnel: Arc::new(Mutex::new(None)),
             local_addr: format!("{}:{:?}", host, port),
+            blocklist,
         }
     }
 
@@ -219,6 +224,7 @@ impl RoundSynchronizer {
         let notify = self.cover_notify.clone();
         let registration_counter = self.tunnel_registration_counter.clone();
         let addr = self.local_addr.clone();
+        let blocklist = self.blocklist.clone();
         tokio::spawn(async move {
             loop {
                 // wait for round change
@@ -246,7 +252,12 @@ impl RoundSynchronizer {
                     addr
                 );
                 if required {
-                    match rps_api::rps_get_peer(p2p_interface.config.rps_api_address).await {
+                    match rps_api::rps_get_peer_filtered(
+                        p2p_interface.config.rps_api_address,
+                        blocklist.clone(),
+                    )
+                    .await
+                    {
                         Ok((target, key)) => {
                             log::debug!("Build cover tunnel at {}", addr);
                             if let Err(e) =
@@ -299,6 +310,7 @@ pub(crate) struct P2pInterface {
     config: OnionConfiguration,
     api_interface: Weak<ApiInterface>,
     round_sync: RoundSynchronizer,
+    blocklist: Arc<RwLock<Blocklist>>,
 }
 
 impl P2pInterface {
@@ -306,11 +318,15 @@ impl P2pInterface {
         config: OnionConfiguration,
         api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<Self> {
+        let blocklist = Arc::new(RwLock::new(Blocklist::new(
+            config.dtls_config.black_list_time,
+        )));
         let round_sync = RoundSynchronizer::new(
             config.round_time,
             config.build_window,
             &config.p2p_hostname,
             config.p2p_port,
+            blocklist.clone(),
         );
         Ok(Self {
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
@@ -319,12 +335,14 @@ impl P2pInterface {
                 DtlsSocketLayer::new(
                     format!("{}:{:?}", config.p2p_hostname, config.p2p_port),
                     config.dtls_config.clone(),
+                    blocklist.clone(),
                 )
                 .await,
             ),
             config,
             api_interface,
             round_sync,
+            blocklist,
         })
     }
 
@@ -588,6 +606,7 @@ impl P2pInterface {
             self.config.timeout,
             None,
             update_info,
+            self.blocklist.clone(),
         )
         .await
         {
@@ -703,6 +722,7 @@ impl P2pInterface {
             self.config.timeout,
             Some(frame_id),
             Some(update_info),
+            self.blocklist.clone(),
         )
         .await
         {
