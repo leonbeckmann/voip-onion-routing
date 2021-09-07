@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
@@ -147,7 +147,7 @@ impl Read for UdpSocketWrapper {
                     self.socket.local_addr().unwrap(),
                     self.remote_addr
                 );*/
-                Err(ErrorKind::NotConnected.into())
+                Err(ErrorKind::ConnectionReset.into())
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => Err(ErrorKind::WouldBlock.into()),
             Ok(data) => {
@@ -208,7 +208,7 @@ pub struct DtlsSocketLayer {
     connection_sockets: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
     incoming_forwarding_worker: JoinHandle<()>,
     outgoing_forwarding_worker: JoinHandle<()>,
-    outgoing_channel: Sender<(SocketAddr, Vec<u8>)>,
+    outgoing_channel: Sender<(Instant, SocketAddr, Vec<u8>)>,
     loopback_channel: (Sender<Vec<u8>>, Mutex<Receiver<Vec<u8>>>),
 }
 
@@ -257,9 +257,14 @@ impl DtlsSocketLayer {
 
         let ssl_acceptor = acceptor_builder.build();
 
+        let start_time = Instant::now();
         let mut ssl_stream = ssl_acceptor.accept(udp_socket_wrapper);
         let mut counter = 0;
         while let Err(openssl::ssl::HandshakeError::WouldBlock(s)) = ssl_stream {
+            if Instant::now() - start_time > Duration::from_secs(10) {
+                ssl_stream = Err(openssl::ssl::HandshakeError::Failure(s));
+                break;
+            }
             // Make this blocking task asynchronous by yielding
             tokio::task::yield_now().await;
             // For low latency first do busy waiting and then reduce cpu usage by sleeping
@@ -272,7 +277,7 @@ impl DtlsSocketLayer {
 
         match ssl_stream {
             Ok(ssl_stream) => {
-                log::trace!(
+                log::info!(
                     "Accepted DTLS channel from {} to {} successful",
                     &remote_addr,
                     socket.local_addr().unwrap(),
@@ -285,7 +290,9 @@ impl DtlsSocketLayer {
             }
             Err(e) => {
                 log::info!(
-                    "DTLS: Accept connection failed, error during Handshake: {}",
+                    "DTLS: Accept connection from {} to {} failed, error during Handshake: {}",
+                    &remote_addr,
+                    socket.local_addr().unwrap(),
                     e
                 );
                 let mut connection_sockets = connection_sockets_mutex.lock().await;
@@ -294,13 +301,16 @@ impl DtlsSocketLayer {
         }
     }
 
+    /// There is a race condition when two peers try to connect with each other at the same time. Then both
+    /// peers are connector, but none is in acceptor mode. In that case, the handshake fails with "unexpected message".
+    /// This function returns true if it is likely that the connection failed due to this race condition.
     async fn connect_channel(
         connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
         socket: Arc<UdpSocket>,
         dtls_config: Arc<DtlsConfig>,
         remote_addr: SocketAddr,
         udp_socket_wrapper: UdpSocketWrapper,
-    ) {
+    ) -> bool {
         log::trace!(
             "Connect DTLS channel from {} to {}...",
             socket.local_addr().unwrap(),
@@ -339,14 +349,14 @@ impl DtlsSocketLayer {
 
         let connector = connector_builder.build();
 
-        // TODO: move into seperate task for responsiveness
-        let mut ssl_stream = connector.connect(
-            // format!("{}::{}", address.ip(), address.port()).as_str(),
-            hostname.as_str(),
-            udp_socket_wrapper,
-        );
+        let mut ssl_stream = connector.connect(hostname.as_str(), udp_socket_wrapper);
+        let start_time = Instant::now();
         let mut counter = 0;
         while let Err(openssl::ssl::HandshakeError::WouldBlock(s)) = ssl_stream {
+            if Instant::now() - start_time > Duration::from_secs(10) {
+                ssl_stream = Err(openssl::ssl::HandshakeError::Failure(s));
+                break;
+            }
             // Make this blocking task asynchronous by yielding
             tokio::task::yield_now().await;
             // For low latency first do busy waiting and then reduce cpu usage by sleeping
@@ -357,9 +367,9 @@ impl DtlsSocketLayer {
             ssl_stream = s.handshake();
         }
 
-        match ssl_stream {
+        let unexpected_message_error = match ssl_stream {
             Ok(ssl_stream) => {
-                log::trace!(
+                log::info!(
                     "DTLS: Connected channel from {} to {} successful",
                     socket.local_addr().unwrap(),
                     &remote_addr
@@ -368,18 +378,22 @@ impl DtlsSocketLayer {
                 // Safe unwrap after insert
                 let udp_channel = connection_sockets.get_mut(&remote_addr).unwrap();
                 udp_channel.ssl_stream = Some(ssl_stream);
+                false
             }
             Err(e) => {
                 log::info!(
                     "DTLS: Connect connection from {} to {} failed, error during Handshake: {}",
                     socket.local_addr().unwrap(),
                     &remote_addr,
-                    e
+                    &e
                 );
                 let mut connection_sockets = connection_sockets_mutex.lock().await;
                 assert!(connection_sockets.remove(&remote_addr).is_some());
+                e.to_string().contains("unexpected message")
             }
-        }
+        };
+
+        unexpected_message_error
     }
 
     /// This is async to enforce running inside a tokio runtime. This is required due to tokio::spawn
@@ -541,8 +555,8 @@ impl DtlsSocketLayer {
 
     async fn forward_outgoing_frames(
         socket: Arc<UdpSocket>,
-        frame_channel_tx: Sender<(SocketAddr, Vec<u8>)>,
-        mut frame_channel_rx: Receiver<(SocketAddr, Vec<u8>)>,
+        frame_channel_tx: Sender<(Instant, SocketAddr, Vec<u8>)>,
+        mut frame_channel_rx: Receiver<(Instant, SocketAddr, Vec<u8>)>,
         connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
         dtls_config: Arc<DtlsConfig>,
         blocklist: Arc<RwLock<Blocklist>>,
@@ -552,7 +566,18 @@ impl DtlsSocketLayer {
             socket.local_addr().unwrap()
         );
 
-        while let Some((remote_addr, frame)) = frame_channel_rx.recv().await {
+        let no_connect = Arc::new(Mutex::new(HashMap::new()));
+
+        while let Some((creation, remote_addr, frame)) = frame_channel_rx.recv().await {
+            // Drop undeliverable frames after a timeout
+            if Instant::now() - creation > Duration::from_secs(10) {
+                log::warn!(
+                    "DTLS: Frame forwarding timeout at {} to {}",
+                    socket.local_addr().unwrap(),
+                    &remote_addr
+                );
+                continue;
+            }
             if blocklist.read().await.is_blocked(&remote_addr) {
                 log::warn!("DTLS: Not sending frame to blocked peer {}", &remote_addr);
                 continue;
@@ -565,22 +590,43 @@ impl DtlsSocketLayer {
                     let res = s.write(&frame);
                     if res.is_err() {
                         log::trace!(
-                            "Remove erronous DTLS channel at {} to {}",
+                            "Remove erronous DTLS channel at {} to {}, error: {}",
                             socket.local_addr().unwrap(),
-                            &remote_addr
+                            &remote_addr,
+                            res.unwrap_err()
                         );
                         connection_sockets.remove(&remote_addr);
                         // Try to enque frame again. Must ignore full queue otherwise a deadlock
                         // can occur when another task inserts between recv() and send()
-                        frame_channel_tx.try_send((remote_addr, frame)).ignore();
+                        frame_channel_tx
+                            .try_send((creation, remote_addr, frame))
+                            .ignore();
                     }
                 } else {
                     // Channel is currently connecting to peer in another task. Try to enque frame again.
                     // Must ignore full queue otherwise a deadlock can occur when another task inserts between recv() and send()
-                    frame_channel_tx.try_send((remote_addr, frame)).ignore();
+                    frame_channel_tx
+                        .try_send((creation, remote_addr, frame))
+                        .ignore();
                 }
             } else {
                 // Channel does not exist
+
+                // Try to enque frame again. Must ignore full queue otherwise a deadlock
+                // can occur when another task inserts between recv() and send()
+                frame_channel_tx
+                    .try_send((creation, remote_addr, frame))
+                    .ignore();
+
+                let mut no_connect_ = no_connect.lock().await;
+                if let Some(blocked_until) = no_connect_.get(&remote_addr) {
+                    if blocked_until < &Instant::now() {
+                        no_connect_.remove(&remote_addr);
+                    } else {
+                        continue;
+                    }
+                }
+                drop(no_connect_);
 
                 // The UdpChannel must be created and inserted into connection_sockets before unlocking that no
                 // other concurrent incoming or outgoing frame can trigger a UdpChannel creation for the same peer
@@ -601,22 +647,34 @@ impl DtlsSocketLayer {
                 connection_sockets.insert(remote_addr, udp_channel);
                 drop(connection_sockets);
 
-                // Try to enque frame again. Must ignore full queue otherwise a deadlock
-                // can occur when another task inserts between recv() and send()
-                frame_channel_tx.try_send((remote_addr, frame)).ignore();
-
                 let dtls_config = dtls_config.clone();
                 let socket = socket.clone();
                 let connection_sockets_mutex = connection_sockets_mutex.clone();
+                let no_connect = no_connect.clone();
                 tokio::spawn(async move {
-                    DtlsSocketLayer::connect_channel(
+                    let unexpected_message = DtlsSocketLayer::connect_channel(
                         connection_sockets_mutex,
-                        socket,
+                        socket.clone(),
                         dtls_config,
                         remote_addr,
                         udp_socket_wrapper,
                     )
                     .await;
+                    // Mitigate the race condition by delaying the next connection attempt.
+                    // The peer with lower SocketAddr waits 100ms, the one with higher waits 2s.
+                    if unexpected_message {
+                        if socket.local_addr().unwrap() < remote_addr {
+                            no_connect
+                                .lock()
+                                .await
+                                .insert(remote_addr, Instant::now() + Duration::from_millis(100));
+                        } else {
+                            no_connect
+                                .lock()
+                                .await
+                                .insert(remote_addr, Instant::now() + Duration::from_secs(2));
+                        }
+                    }
                 });
             }
         }
@@ -635,6 +693,7 @@ impl DtlsSocketLayer {
     pub async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
         let mut counter = 0;
         loop {
+            // Receive non-blocking from loopback channel
             if let Ok(val) =
                 timeout(Duration::ZERO, self.loopback_channel.1.lock().await.recv()).await
             {
@@ -648,6 +707,7 @@ impl DtlsSocketLayer {
                 buf.split_at_mut(val.len()).0.copy_from_slice(&val);
                 return Ok((val.len(), self.socket.local_addr().unwrap()));
             }
+
             let mut connection_sockets = self.connection_sockets.lock().await;
             for (address, udp_channel) in connection_sockets.iter_mut() {
                 if let Some(udp_channel) = udp_channel.ssl_stream.as_mut() {
@@ -693,7 +753,7 @@ impl DtlsSocketLayer {
         // lookup and use first result
         let addr = tokio::net::lookup_host(addr)
             .await
-            .map_err::<Error, _>(|_| ErrorKind::InvalidInput.into())?
+            .map_err(|_| Error::from(ErrorKind::InvalidInput))?
             .next()
             .ok_or_else(|| Error::from(ErrorKind::NotFound))?;
 
@@ -706,7 +766,7 @@ impl DtlsSocketLayer {
         }
 
         self.outgoing_channel
-            .send((addr, buf.to_vec()))
+            .send((Instant::now(), addr, buf.to_vec()))
             .await
             .unwrap();
 
