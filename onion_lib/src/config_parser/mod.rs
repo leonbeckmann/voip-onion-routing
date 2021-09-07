@@ -282,14 +282,14 @@ impl OnionConfiguration {
             },
         };
 
-        // blacklist_time (seconds)
-        let black_list_time = match onion_sec.get("blacklist_time") {
+        // blocklist_time (seconds)
+        let blocklist_time = match onion_sec.get("blocklist_time") {
             None => Duration::from_secs(3600), // default
             Some(duration) => match duration.parse::<u64>() {
                 Ok(duration) => Duration::from_secs(duration),
                 Err(_) => {
                     return Err(ParsingError::from_str(
-                        "Cannot parse 'blacklist_time' to u64",
+                        "Cannot parse 'blocklist_time' to u64",
                     ))
                 }
             },
@@ -311,7 +311,7 @@ impl OnionConfiguration {
             dtls_config: Arc::new(DtlsConfig::new(
                 pki_cert,
                 peer_cert,
-                black_list_time,
+                blocklist_time,
                 private_host_key,
             )),
             timeout,
@@ -384,7 +384,7 @@ mod tests {
         build_window: Option<&str>,
         pki_root_cert: Option<&str>,
         hostkey_cert: Option<&str>,
-        blacklist_time: Option<&str>,
+        blocklist_time: Option<&str>,
         file_path: P,
     ) {
         let mut config = Ini::new();
@@ -444,10 +444,10 @@ mod tests {
             if let Some(path) = hostkey_cert {
                 config.with_section(Some("onion")).set("hostkey_cert", path);
             }
-            if let Some(duration) = blacklist_time {
+            if let Some(duration) = blocklist_time {
                 config
                     .with_section(Some("onion"))
-                    .set("blacklist_time", duration);
+                    .set("blocklist_time", duration);
             }
         }
         if rps {
@@ -507,8 +507,8 @@ mod tests {
         let config_invalid_priv_key_path = dir.path().join("invalid_priv_key_path.config");
         let config_missing_build_window = dir.path().join("missing_build_window.config");
         let config_invalid_build_window = dir.path().join("invalid_build_window.config");
-        let config_missing_blacklist_time = dir.path().join("missing_blacklist_time.config");
-        let config_invalid_blacklist_time = dir.path().join("invalid_blacklist_time.config");
+        let config_missing_blocklist_time = dir.path().join("missing_blocklist_time.config");
+        let config_invalid_blocklist_time = dir.path().join("invalid_blocklist_time.config");
         let config_missing_cert = dir.path().join("missing-cert.config");
         let config_der_cert = dir.path().join("der-cert.config");
         let config_invalid_cert_path = dir.path().join("invalid_cert.config");
@@ -1162,7 +1162,7 @@ mod tests {
             Some(cert_file.to_str().unwrap()),
             Some(cert_file.to_str().unwrap()),
             None,
-            &config_missing_blacklist_time,
+            &config_missing_blocklist_time,
         );
 
         create_config_file(
@@ -1182,7 +1182,7 @@ mod tests {
             Some(cert_file.to_str().unwrap()),
             Some(cert_file.to_str().unwrap()),
             Some("3600a"),
-            &config_invalid_blacklist_time,
+            &config_invalid_blocklist_time,
         );
 
         create_config_file(
@@ -1352,8 +1352,8 @@ mod tests {
         assert!(OnionConfiguration::parse_from_file(config_invalid_priv_key_path).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_build_window).is_ok());
         assert!(OnionConfiguration::parse_from_file(config_invalid_build_window).is_err());
-        assert!(OnionConfiguration::parse_from_file(config_missing_blacklist_time).is_ok());
-        assert!(OnionConfiguration::parse_from_file(config_invalid_blacklist_time).is_err());
+        assert!(OnionConfiguration::parse_from_file(config_missing_blocklist_time).is_ok());
+        assert!(OnionConfiguration::parse_from_file(config_invalid_blocklist_time).is_err());
         assert!(OnionConfiguration::parse_from_file(config_missing_cert).is_err());
         assert!(OnionConfiguration::parse_from_file(config_der_cert).is_err());
         assert!(OnionConfiguration::parse_from_file(config_invalid_cert_path).is_err());

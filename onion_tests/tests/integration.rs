@@ -59,7 +59,7 @@ fn run_peer(
         .set("handshake_timeout", "1000")
         .set("pki_root_cert", pki_cert_file.to_str().unwrap())
         .set("hostkey_cert", cert_file.to_str().unwrap())
-        .set("blacklist_time", "10");
+        .set("blocklist_time", "10");
     config
         .with_section(Some("rps"))
         .set("api_address", rps_api_addr);

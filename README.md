@@ -54,7 +54,7 @@ The module requires a Windows INI configuration file for configuring the Onion m
 | private_hostkey   | onion   | str                                   | Path to peer's private hostkey in PEM format |
 | pki_root_cert     | onion   | str                                   | Path to the PKI's root certificate in PEM format |
 | hostkey_cert      | onion   | str                                   | Path to the certificate for hostkey, signed by PKI |
-| blacklist_time    | onion   | u64                                   | Seconds until peer is removed from the blacklist  (default=3600s)|
+| blocklist_time    | onion   | u64                                   | Seconds until peer is removed from the blocklist  (default=3600s)|
 | api_address       | rps     | hostname:port, ipv4:port, [ipv6]:port | Peer's API address for RPS layer |
 
 This could look like the following:
@@ -75,7 +75,7 @@ handshake_timeout = 1000
 timeout = 20s
 pki_root_cert = /etc/pki.cert
 hostkey_cert = /etc/peer1.cert
-blacklist_time = 3600
+blocklist_time = 3600
 
 [rps]
 api_address = localhost:2002

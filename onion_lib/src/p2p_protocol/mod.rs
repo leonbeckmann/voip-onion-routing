@@ -319,7 +319,7 @@ impl P2pInterface {
         api_interface: Weak<ApiInterface>,
     ) -> anyhow::Result<Self> {
         let blocklist = Arc::new(RwLock::new(Blocklist::new(
-            config.dtls_config.black_list_time,
+            config.dtls_config.blocklist_time,
         )));
         let round_sync = RoundSynchronizer::new(
             config.round_time,

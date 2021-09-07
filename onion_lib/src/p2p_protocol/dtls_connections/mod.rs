@@ -25,14 +25,14 @@ pub struct DtlsConfig {
     pki_root_cert: X509,
     local_peer_identity_cert: X509,
     private_host_key: Rsa<Private>,
-    pub black_list_time: Duration,
+    pub blocklist_time: Duration,
 }
 
 impl DtlsConfig {
     pub fn new(
         pki_root_cert: X509,
         local_peer_identity_cert: X509,
-        black_list_time: Duration,
+        blocklist_time: Duration,
         private_host_key: Rsa<Private>,
     ) -> Self {
         assert_eq!(
@@ -63,7 +63,7 @@ impl DtlsConfig {
             pki_root_cert,
             local_peer_identity_cert,
             private_host_key,
-            black_list_time,
+            blocklist_time,
         }
     }
 
