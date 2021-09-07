@@ -261,6 +261,7 @@ impl DtlsSocketLayer {
         let mut ssl_stream = ssl_acceptor.accept(udp_socket_wrapper);
         let mut counter = 0;
         while let Err(openssl::ssl::HandshakeError::WouldBlock(s)) = ssl_stream {
+            // TODO: configurable timeout
             if Instant::now() - start_time > Duration::from_secs(10) {
                 ssl_stream = Err(openssl::ssl::HandshakeError::Failure(s));
                 break;
@@ -353,6 +354,7 @@ impl DtlsSocketLayer {
         let start_time = Instant::now();
         let mut counter = 0;
         while let Err(openssl::ssl::HandshakeError::WouldBlock(s)) = ssl_stream {
+            // TODO: configurable timeout
             if Instant::now() - start_time > Duration::from_secs(10) {
                 ssl_stream = Err(openssl::ssl::HandshakeError::Failure(s));
                 break;
@@ -570,6 +572,7 @@ impl DtlsSocketLayer {
 
         while let Some((creation, remote_addr, frame)) = frame_channel_rx.recv().await {
             // Drop undeliverable frames after a timeout
+            // TODO: configurable timeout
             if Instant::now() - creation > Duration::from_secs(10) {
                 log::warn!(
                     "DTLS: Frame forwarding timeout at {} to {}",
@@ -661,7 +664,7 @@ impl DtlsSocketLayer {
                     )
                     .await;
                     // Mitigate the race condition by delaying the next connection attempt.
-                    // The peer with lower SocketAddr waits 100ms, the one with higher waits 2s.
+                    // The peer with lower SocketAddr waits 100ms, the one with higher waits 1s.
                     if unexpected_message {
                         if socket.local_addr().unwrap() < remote_addr {
                             no_connect
@@ -672,7 +675,7 @@ impl DtlsSocketLayer {
                             no_connect
                                 .lock()
                                 .await
-                                .insert(remote_addr, Instant::now() + Duration::from_secs(2));
+                                .insert(remote_addr, Instant::now() + Duration::from_secs(1));
                         }
                     }
                 });
@@ -751,22 +754,27 @@ impl DtlsSocketLayer {
     // TODO: make this non blocking in case a remote is not responding, that the caller worker is not blocked
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> std::io::Result<usize> {
         // lookup and use first result
-        let addr = tokio::net::lookup_host(addr)
+        let remote_addr = tokio::net::lookup_host(addr)
             .await
             .map_err(|_| Error::from(ErrorKind::InvalidInput))?
             .next()
             .ok_or_else(|| Error::from(ErrorKind::NotFound))?;
 
-        if addr == self.socket.local_addr().unwrap() {
-            log::trace!("DTLS: Sending to loopback channel on {}", &addr);
+        if remote_addr == self.socket.local_addr().unwrap() {
+            log::trace!("DTLS: Sending to loopback channel on {}", &remote_addr);
             // Safe unwrap, because sender and receiver are stored at the same location
             // and therefore receiver cannot be closed as long as the sender is available.
             self.loopback_channel.0.send(buf.to_vec()).await.unwrap();
             return Ok(buf.len());
         }
 
+        if self.blocklist.read().await.is_blocked(&remote_addr) {
+            log::warn!("DTLS: Not sending frame to blocked peer {}", &remote_addr);
+            return Err(Error::from(ErrorKind::ConnectionRefused));
+        }
+
         self.outgoing_channel
-            .send((Instant::now(), addr, buf.to_vec()))
+            .send((Instant::now(), remote_addr, buf.to_vec()))
             .await
             .unwrap();
 
