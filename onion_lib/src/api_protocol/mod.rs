@@ -15,13 +15,20 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
-pub(crate) const ONION_TUNNEL_BUILD: u16 = 560; // incoming for tunnel build in next round
-pub(crate) const ONION_TUNNEL_READY: u16 = 561; // outgoing response on build with new tunnel
-pub(crate) const ONION_TUNNEL_INCOMING: u16 = 562; // outgoing to all api connection listeners
-pub(crate) const ONION_TUNNEL_DESTROY: u16 = 563; // incoming Destroy a tunnel for this api connection, destroy if no listeners available anymore
-pub(crate) const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tunnel
-pub(crate) const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
-pub(crate) const ONION_COVER: u16 = 566; // send cover traffic to random peer
+/// incoming for tunnel build in next round
+pub(crate) const ONION_TUNNEL_BUILD: u16 = 560;
+/// outgoing response on build with new tunnel
+pub(crate) const ONION_TUNNEL_READY: u16 = 561;
+/// outgoing to all api connection listeners
+pub(crate) const ONION_TUNNEL_INCOMING: u16 = 562;
+/// incoming Destroy a tunnel for this api connection, destroy if no listeners available anymore
+pub(crate) const ONION_TUNNEL_DESTROY: u16 = 563;
+/// incoming/outgoing send/recv data via a tunnel
+pub(crate) const ONION_TUNNEL_DATA: u16 = 564;
+/// send cover traffic to random peer
+pub(crate) const ONION_ERROR: u16 = 565;
+/// send cover traffic to random peer
+pub(crate) const ONION_COVER: u16 = 566;
 
 type ConnectionId = u64;
 

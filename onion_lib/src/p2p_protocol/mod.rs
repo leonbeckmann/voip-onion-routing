@@ -14,6 +14,7 @@ use crate::p2p_protocol::onion_tunnel::{
     OnionTunnel, TunnelResult, TunnelStatus, TunnelType, UpdateInformation,
 };
 use protobuf::Message;
+use rand::Rng;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
@@ -572,7 +573,8 @@ impl P2pInterface {
                             id,
                             redirected_tunnel_id
                         );
-                        let data = (0..cover_size).map(|_| rand::random::<u8>()).collect();
+                        let mut data = vec![0; cover_size.into()];
+                        rand::thread_rng().fill(&mut data[..]);
                         tunnel.send_cover(data).await
                     }
                     None => Err(P2pError::CoverFailure),
