@@ -1,7 +1,7 @@
 use hex::ToHex;
 use ignore_result::Ignore;
 // TODO: check all used unwrap()
-use openssl::pkey::{PKey, Private, Public};
+use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::sha::sha256;
 use openssl::ssl::{
@@ -66,11 +66,6 @@ impl DtlsConfig {
             blocklist_time,
         }
     }
-
-    pub fn rsa_cert_by_identity(&self, _id: &SocketAddr) -> Rsa<Public> {
-        // TODO
-        todo!();
-    }
 }
 
 #[derive(Debug)]
@@ -121,7 +116,8 @@ impl Blocklist {
         let now = std::time::SystemTime::now();
         self.list.insert(peer, now);
         if let Some(entry) = self.unblock_queue.get_mut(&now) {
-            entry.push(peer);
+            // Due to the accurancy of the clock, it is not possible to reproduce this branch reliably
+            entry.push(peer); // coverage-unreachable
         } else {
             self.unblock_queue.insert(now, vec![peer]);
         }
@@ -453,10 +449,6 @@ impl DtlsSocketLayer {
             outgoing_channel: outgoing_channel_tx,
             loopback_channel: (loopback_channel.0, Mutex::new(loopback_channel.1)),
         }
-    }
-
-    pub async fn block_peer(&mut self, peer: SocketAddr) {
-        self.blocklist.write().await.block(peer);
     }
 
     async fn forward_incoming_frames(
@@ -791,7 +783,7 @@ impl Drop for DtlsSocketLayer {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
+    use std::{collections::BTreeSet, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
     use hex::ToHex;
     use openssl::{
@@ -877,6 +869,19 @@ mod tests {
         let cert_pki = cert.build();
 
         (cert_pki, pki_name, pkey_pki)
+    }
+
+    async fn dtls_socket_layer(addr: &str) -> (Arc<RwLock<Blocklist>>, DtlsSocketLayer) {
+        let blocklist = Arc::new(RwLock::new(Blocklist::new(Duration::from_millis(100))));
+
+        let (cert_pki, pki_name, pkey_pki) = pki_instance();
+
+        let config = peer_instance(addr, cert_pki, &pki_name, &pkey_pki);
+
+        (
+            blocklist.clone(),
+            DtlsSocketLayer::new(addr, config, blocklist).await,
+        )
     }
 
     #[test]
@@ -978,6 +983,140 @@ mod tests {
             timeout(Duration::from_millis(500), socket.recv_from(&mut buf_in))
                 .await
                 .unwrap_err();
+        });
+    }
+
+    #[test]
+    fn unit_blocklist_single_block() {
+        let block_duration = Duration::from_millis(100);
+        let mut blocklist = Blocklist::new(block_duration);
+
+        let addr: SocketAddr = "127.0.0.1:10000".parse().unwrap();
+        assert!(!blocklist.is_blocked(&addr));
+        blocklist.block(addr);
+        assert!(blocklist.is_blocked(&addr));
+
+        std::thread::sleep(block_duration);
+
+        assert!(!blocklist.is_blocked(&addr));
+    }
+
+    #[test]
+    fn unit_blocklist_multi_blocks() {
+        let block_duration = Duration::from_millis(100);
+        let mut blocklist = Blocklist::new(block_duration);
+
+        let addr_1: SocketAddr = "127.0.0.1:10000".parse().unwrap();
+        let addr_2: SocketAddr = "127.0.0.1:10001".parse().unwrap();
+
+        assert!(!blocklist.is_blocked(&addr_1));
+        assert!(!blocklist.is_blocked(&addr_2));
+
+        blocklist.block(addr_1);
+
+        assert!(blocklist.is_blocked(&addr_1));
+        assert!(!blocklist.is_blocked(&addr_2));
+
+        std::thread::sleep(block_duration);
+
+        assert!(!blocklist.is_blocked(&addr_1));
+        assert!(!blocklist.is_blocked(&addr_2));
+
+        blocklist.block(addr_2);
+
+        assert!(!blocklist.is_blocked(&addr_1));
+        assert!(blocklist.is_blocked(&addr_2));
+
+        std::thread::sleep(block_duration);
+
+        assert!(!blocklist.is_blocked(&addr_1));
+        assert!(!blocklist.is_blocked(&addr_2));
+
+        blocklist.block(addr_1);
+
+        assert!(blocklist.is_blocked(&addr_1));
+        assert!(!blocklist.is_blocked(&addr_2));
+
+        blocklist.block(addr_1);
+        blocklist.block(addr_2);
+
+        assert!(blocklist.is_blocked(&addr_1));
+        assert!(blocklist.is_blocked(&addr_2));
+    }
+
+    #[test]
+    #[should_panic]
+    fn unit_dtls_config_invalid() {
+        let addr = "127.0.0.1:10000";
+
+        let (cert_pki, _, pkey_pki) = pki_instance();
+        let mut name = X509Name::builder().unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, "another_pki_name")
+            .unwrap();
+        let pki_name = name.build();
+
+        // The PKI name differs from the issuer of the certificate
+        let peer = peer_instance(addr, cert_pki.clone(), &pki_name, &pkey_pki);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Peer issuer is invalid
+            DtlsConfig::new(
+                cert_pki,
+                peer.local_peer_identity_cert.clone(),
+                Duration::from_millis(100),
+                peer.private_host_key.clone(),
+            );
+        });
+    }
+
+    #[test]
+    fn unit_dtls_format() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (_, socket) = dtls_socket_layer("127.0.0.1:10000").await;
+            let blocklist = Blocklist::new(Duration::from_millis(100));
+            // Use assert to prohibit compiler from removing this code
+            assert_ne!(format!("{:?} {:?}", socket, blocklist), "");
+        });
+    }
+
+    #[test]
+    fn unit_dtls_socket_layer_connect_timeout() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (_, socket_1) = dtls_socket_layer("127.0.0.1:10001").await;
+            let (blocklist_2, socket_2) = dtls_socket_layer("127.0.0.1:10002").await;
+
+            // Connect to invalid address
+            socket_1
+                .send_to(&[0, 8, 3], "127.0.0.1:2454")
+                .await
+                .unwrap();
+
+            // Receive from blocked peer
+            blocklist_2
+                .write()
+                .await
+                .block("127.0.0.1:10001".parse().unwrap());
+            socket_1
+                .send_to(&[0, 8, 3], "127.0.0.1:10002")
+                .await
+                .unwrap();
+
+            // Send to blocked peer
+            blocklist_2
+                .write()
+                .await
+                .block("127.0.0.1:10001".parse().unwrap());
+            assert_eq!(
+                socket_2
+                    .send_to(&[0, 8, 3], "127.0.0.1:10001")
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::ConnectionRefused
+            );
         });
     }
 }
