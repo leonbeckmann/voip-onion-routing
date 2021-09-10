@@ -405,8 +405,9 @@ impl P2pInterface {
                                         None => {
                                             // no tunnel available for the given frame
                                             log::warn!(
-                                                "Received unexpected frame id at {}, drop the frame", my_addr
+                                                "Received unexpected frame id at {}, drop the frame and blocking peer", my_addr
                                             );
+                                            self.blocklist.write().await.block(addr);
                                             continue;
                                         }
                                         Some((tunnel_id, d)) => {
@@ -443,18 +444,20 @@ impl P2pInterface {
                             }
                             Err(_) => {
                                 log::warn!(
-                                    "Cannot parse UDP packet from {:?} at {:?} to tunnel frame.",
+                                    "Cannot parse UDP packet from {:?} at {:?} to tunnel frame. Blocking peer.",
                                     addr,
                                     my_addr
                                 );
+                                self.blocklist.write().await.block(addr);
                             }
                         };
                     } else {
                         log::warn!(
-                            "Dropping received UDP packet from {:?} at {:?} because of packet size",
+                            "Dropping and blocking peer because of received UDP packet from {:?} at {:?} because of packet size",
                             addr,
                             my_addr
                         );
+                        self.blocklist.write().await.block(addr);
                     }
                 }
                 Err(e) => {
