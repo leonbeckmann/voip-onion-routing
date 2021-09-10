@@ -354,9 +354,9 @@ impl<PT: PeerType> HandshakeStateMachine<PT> {
                 _challenge_response,
             )) = routing.optional_challenge_response
             {
-                // TODO: uncomment
+                // TODO Future work: Authenticate initiator identity by transfering and verifying with PKI the initiator_public_rsa_key
                 /*if !self.crypto_context.verify(
-                    signer_key,
+                    initiator_public_rsa_key,
                     &challenge_response,
                     self.crypto_context.get_challenge(),
                 ) {

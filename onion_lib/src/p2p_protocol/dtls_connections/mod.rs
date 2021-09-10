@@ -1,6 +1,5 @@
 use hex::ToHex;
 use ignore_result::Ignore;
-// TODO: check all used unwrap()
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
 use openssl::sha::sha256;
@@ -26,6 +25,8 @@ pub struct DtlsConfig {
     local_peer_identity_cert: X509,
     private_host_key: Rsa<Private>,
     pub blocklist_time: Duration,
+    connect_timeout: Duration,
+    send_message_timeout: Duration,
 }
 
 impl DtlsConfig {
@@ -34,6 +35,8 @@ impl DtlsConfig {
         local_peer_identity_cert: X509,
         blocklist_time: Duration,
         private_host_key: Rsa<Private>,
+        connect_timeout: Duration,
+        send_message_timeout: Duration,
     ) -> Self {
         assert_eq!(
             pki_root_cert.issued(&local_peer_identity_cert),
@@ -64,6 +67,8 @@ impl DtlsConfig {
             local_peer_identity_cert,
             private_host_key,
             blocklist_time,
+            connect_timeout,
+            send_message_timeout,
         }
     }
 }
@@ -244,7 +249,7 @@ impl DtlsSocketLayer {
         acceptor_builder
             .set_certificate(&dtls_config.local_peer_identity_cert)
             .unwrap();
-        // TODO: Support multi layer certificate chains
+        // TODO PKI future work: Support multi layer certificate chains
         acceptor_builder
             .add_extra_chain_cert(dtls_config.pki_root_cert.clone())
             .unwrap();
@@ -257,8 +262,7 @@ impl DtlsSocketLayer {
         let mut ssl_stream = ssl_acceptor.accept(udp_socket_wrapper);
         let mut counter = 0;
         while let Err(openssl::ssl::HandshakeError::WouldBlock(s)) = ssl_stream {
-            // TODO: configurable timeout
-            if Instant::now() - start_time > Duration::from_secs(10) {
+            if Instant::now() - start_time > dtls_config.connect_timeout {
                 ssl_stream = Err(openssl::ssl::HandshakeError::Failure(s));
                 break;
             }
@@ -336,7 +340,7 @@ impl DtlsSocketLayer {
         connector_builder
             .set_certificate(&dtls_config.local_peer_identity_cert)
             .unwrap();
-        // TODO: Support multi layer certificate chains
+        // TODO PKI future work: Support multi layer certificate chains
         connector_builder
             .add_extra_chain_cert(dtls_config.pki_root_cert.clone())
             .unwrap();
@@ -350,8 +354,7 @@ impl DtlsSocketLayer {
         let start_time = Instant::now();
         let mut counter = 0;
         while let Err(openssl::ssl::HandshakeError::WouldBlock(s)) = ssl_stream {
-            // TODO: configurable timeout
-            if Instant::now() - start_time > Duration::from_secs(10) {
+            if Instant::now() - start_time > dtls_config.connect_timeout {
                 ssl_stream = Err(openssl::ssl::HandshakeError::Failure(s));
                 break;
             }
@@ -534,18 +537,18 @@ impl DtlsSocketLayer {
                     }
                 }
                 Err(e) => {
-                    // TODO: handle errors: disconnect, close, eof, timeout, ...
-                    // Unreachable because we hold a reference to the UDP socket
-                    log::trace!("DTLS: Failed to read from UDP socket: {:?}", e);
-                    break;
+                    // This is unreachable because we hold a reference to the UDP socket and therefore the socket cannot be closed
+                    // without aborting the task running this function
+                    log::trace!("DTLS: Failed to read from UDP socket: {:?}", e); // coverage-unreachable
+                    break; // coverage-unreachable
                 }
             }
         }
-        log::info!(
-            "Stopped incoming socket forwarding worker at {}",
-            socket.local_addr().unwrap()
-        );
-    }
+        log::info!( // coverage-unreachable
+            "Stopped incoming socket forwarding worker at {}", // coverage-unreachable
+            socket.local_addr().unwrap() // coverage-unreachable
+        ); // coverage-unreachable
+    } // coverage-unreachable
 
     async fn forward_outgoing_frames(
         socket: Arc<UdpSocket>,
@@ -564,8 +567,7 @@ impl DtlsSocketLayer {
 
         while let Some((creation, remote_addr, frame)) = frame_channel_rx.recv().await {
             // Drop undeliverable frames after a timeout
-            // TODO: configurable timeout
-            if Instant::now() - creation > Duration::from_secs(10) {
+            if Instant::now() - creation > dtls_config.send_message_timeout {
                 log::warn!(
                     "DTLS: Frame forwarding timeout at {} to {}",
                     socket.local_addr().unwrap(),
@@ -581,7 +583,6 @@ impl DtlsSocketLayer {
             let mut connection_sockets = connection_sockets_mutex.lock().await;
             if let Some(udp_channel) = connection_sockets.get_mut(&remote_addr) {
                 if let Some(s) = &mut udp_channel.ssl_stream {
-                    // TODO: Consider to use write_all instead of write
                     let res = s.write(&frame);
                     if res.is_err() {
                         log::trace!(
@@ -673,17 +674,19 @@ impl DtlsSocketLayer {
                 });
             }
         }
-        // Closed
-        log::trace!(
-            "DTLS: Outgoing socket forwarding channel closed at {}",
-            socket.local_addr().unwrap()
-        );
 
-        log::info!(
-            "DTLS: Stopped outgoing socket forwarding worker at {}",
-            socket.local_addr().unwrap()
-        );
-    }
+        // This is unreachable because the Sender end of the channel must be dropped to be closed,
+        // but before the Sender is dropped the task running this function is canceled.
+        log::trace!( // coverage-unreachable
+            "DTLS: Outgoing socket forwarding channel closed at {}", // coverage-unreachable
+            socket.local_addr().unwrap() // coverage-unreachable
+        ); // coverage-unreachable
+
+        log::info!( // coverage-unreachable
+            "DTLS: Stopped outgoing socket forwarding worker at {}", // coverage-unreachable
+            socket.local_addr().unwrap() // coverage-unreachable
+        ); // coverage-unreachable
+    } // coverage-unreachable
 
     pub async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
         let mut counter = 0;
@@ -743,7 +746,6 @@ impl DtlsSocketLayer {
         }
     }
 
-    // TODO: make this non blocking in case a remote is not responding, that the caller worker is not blocked
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> std::io::Result<usize> {
         // lookup and use first result
         let remote_addr = tokio::net::lookup_host(addr)
@@ -838,6 +840,8 @@ mod tests {
             cert,
             Duration::from_secs(60 * 60 * 24 * 365),
             key_local,
+            Duration::from_secs(10),
+            Duration::from_secs(10),
         );
         Arc::new(config)
     }
@@ -1066,6 +1070,8 @@ mod tests {
                 peer.local_peer_identity_cert.clone(),
                 Duration::from_millis(100),
                 peer.private_host_key.clone(),
+                Duration::from_secs(10),
+                Duration::from_secs(10),
             );
         });
     }
