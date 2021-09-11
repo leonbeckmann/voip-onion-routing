@@ -544,9 +544,10 @@ impl DtlsSocketLayer {
                 }
             }
         }
-        log::info!( // coverage-unreachable
+        log::info!(
+            // coverage-unreachable
             "Stopped incoming socket forwarding worker at {}", // coverage-unreachable
-            socket.local_addr().unwrap() // coverage-unreachable
+            socket.local_addr().unwrap()                       // coverage-unreachable
         ); // coverage-unreachable
     } // coverage-unreachable
 
@@ -677,14 +678,16 @@ impl DtlsSocketLayer {
 
         // This is unreachable because the Sender end of the channel must be dropped to be closed,
         // but before the Sender is dropped the task running this function is canceled.
-        log::trace!( // coverage-unreachable
+        log::trace!(
+            // coverage-unreachable
             "DTLS: Outgoing socket forwarding channel closed at {}", // coverage-unreachable
-            socket.local_addr().unwrap() // coverage-unreachable
+            socket.local_addr().unwrap()                             // coverage-unreachable
         ); // coverage-unreachable
 
-        log::info!( // coverage-unreachable
+        log::info!(
+            // coverage-unreachable
             "DTLS: Stopped outgoing socket forwarding worker at {}", // coverage-unreachable
-            socket.local_addr().unwrap() // coverage-unreachable
+            socket.local_addr().unwrap()                             // coverage-unreachable
         ); // coverage-unreachable
     } // coverage-unreachable
 

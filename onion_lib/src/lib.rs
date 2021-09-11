@@ -231,10 +231,10 @@ mod tests {
             let peer1 = run_valid_peer(&dir, "2020", "3020");
             tokio::time::sleep(Duration::from_millis(100)).await;
             let peer2 = run_valid_peer(&dir, "2020", "3021");
-        // Pin that it can be passed by reference to timeout and is usable afterwards.
+            // Pin that it can be passed by reference to timeout and is usable afterwards.
             // This prevents the abortion of the future which would unbind the port.
-        pin_mut!(peer1);
-        pin_mut!(peer2);
+            pin_mut!(peer1);
+            pin_mut!(peer2);
 
             // This should timeout because it's valid
             tokio::time::timeout(std::time::Duration::from_secs(1), &mut peer1)
@@ -244,7 +244,8 @@ mod tests {
             // The port bind panics and therefore a JoinError is expected
             tokio::time::timeout(std::time::Duration::from_secs(1), &mut peer2)
                 .await
-                .unwrap().unwrap_err();
+                .unwrap()
+                .unwrap_err();
         });
     }
 
@@ -257,10 +258,10 @@ mod tests {
             let peer1 = run_valid_peer(&dir, "2030", "3030");
             tokio::time::sleep(Duration::from_millis(100)).await;
             let peer2 = run_valid_peer(&dir, "2031", "3030");
-        // Pin that it can be passed by reference to timeout and is usable afterwards.
+            // Pin that it can be passed by reference to timeout and is usable afterwards.
             // This prevents the abortion of the future which would unbind the port.
-        pin_mut!(peer1);
-        pin_mut!(peer2);
+            pin_mut!(peer1);
+            pin_mut!(peer2);
 
             // This should timeout because it's valid
             tokio::time::timeout(std::time::Duration::from_secs(1), &mut peer1)
@@ -270,7 +271,8 @@ mod tests {
             // The port bind panics and therefore a JoinError is expected
             tokio::time::timeout(std::time::Duration::from_secs(1), &mut peer2)
                 .await
-                .unwrap().unwrap();
+                .unwrap()
+                .unwrap();
         });
     }
 }

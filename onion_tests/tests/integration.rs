@@ -29,7 +29,7 @@ const ONION_TUNNEL_DATA: u16 = 564; // incoming/outgoing send/recv data via a tu
 const ONION_ERROR: u16 = 565; // by onion module on error to earlier request
 const ONION_COVER: u16 = 566; // send cover traffic to random peer
 
-const PAYLOAD_CHUNK_SIZE: usize = 964;
+const PAYLOAD_CHUNK_SIZE: usize = 963;
 
 #[allow(clippy::too_many_arguments)]
 fn run_peer(
