@@ -20,6 +20,12 @@ fn init() {
         .unwrap();
 }
 
+/**
+ * Run an onion peer within an asynchronous tokio environment.
+ *
+ * This parses the configuration file via the config_parser, creates the API and P2P interfaces,
+ * and runs the listen methods on both interfaces.
+ */
 pub fn run_peer<P: AsRef<Path> + Debug>(config_file: P) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(run_peer_async(config_file))

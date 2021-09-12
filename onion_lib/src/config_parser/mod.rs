@@ -28,6 +28,9 @@ pub struct OnionConfiguration {
 }
 
 impl OnionConfiguration {
+    /**
+     * Parse the config file to an OnionConfiguration
+     */
     pub fn parse_from_file<P: AsRef<Path>>(path: P) -> Result<OnionConfiguration, ParsingError> {
         // parse config file
         let config = match Ini::load_from_file(path) {

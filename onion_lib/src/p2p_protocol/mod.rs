@@ -90,6 +90,10 @@ impl RoundSynchronizer {
         }
     }
 
+    /**
+     * This function sets the state of a notifier mechanism to 'Processing', activates the worker
+     * and waits for a result. Used for the tunnel_update and cover_tunnel tasks
+     */
     async fn process_tunnels(notify: Arc<(Mutex<NotifyState>, Notify, Notify)>) {
         let (lock, notifier_a, notifier_b) = &*notify;
         let mut status = lock.lock().await;
@@ -106,6 +110,14 @@ impl RoundSynchronizer {
         drop(status);
     }
 
+    /**
+     * Run the round synchronizer
+     *
+     * This iteratively sleeps until the registration window is over, then starts asynchronously
+     * another task, that is responsible for checking if a tunnel should be updated, new tunnel
+     * requests are available or cover tunnels should be built, sleeps then until the build window
+     * at the end of the round is over and triggers then a round cleanup in another task.
+     */
     async fn run(&self, tunnel_manager: Arc<RwLock<TunnelManager>>) {
         let update_notify = self.update_notify.clone();
         let new_notify = self.new_notify.clone();
@@ -178,6 +190,9 @@ impl RoundSynchronizer {
         });
     }
 
+    /**
+     * Check is a tunnel should be updated and trigger rebuild if so
+     */
     async fn run_update_task(&self, p2p_interface: Arc<P2pInterface>) {
         let notify = self.update_notify.clone();
         let registration_counter = self.tunnel_registration_counter.clone();
@@ -221,6 +236,9 @@ impl RoundSynchronizer {
         });
     }
 
+    /**
+     * Check is a cover tunnel should be built and trigger creation if so
+     */
     async fn run_cover_task(&self, p2p_interface: Arc<P2pInterface>) {
         let notify = self.cover_notify.clone();
         let registration_counter = self.tunnel_registration_counter.clone();
@@ -276,6 +294,11 @@ impl RoundSynchronizer {
         });
     }
 
+    /**
+     * Wait method for new tunnel requests, used by the build_tunnel method.
+     *
+     * Returns OK if new_tunnel is permitted, ModuleEngaged error else
+     */
     async fn wait(&self) -> Result<(), P2pError> {
         // create new waiter
         let notify = Arc::new((Mutex::new(NotifyState::Processing), Notify::new()));
@@ -347,6 +370,10 @@ impl P2pInterface {
         })
     }
 
+    /**
+     * Start the P2P interface by running the round synchronizer and listening for incoming frames
+     * on the DTLS socket layer
+     */
     pub(crate) async fn listen(&self, self_ref: Arc<P2pInterface>) -> Result<(), P2pError> {
         // run the tunnel update task
         self.round_sync.run_update_task(self_ref.clone()).await;
@@ -487,7 +514,7 @@ impl P2pInterface {
     /**
      *  Build a new onion tunnel (initiator) triggered from the api protocol
      *
-     *  Return the tunnel_id and the target peer public key (DER)
+     *  Return the tunnel_id and the target peer public key (DER) on success
      */
     pub(crate) async fn build_tunnel(
         &self,
@@ -502,8 +529,9 @@ impl P2pInterface {
             .await
     }
 
-    /*
-     *  Unsubscribe connection from specific tunnel
+    /**
+     *  Unsubscribe connection from specific tunnel. If there are no more connection available
+     *  for this tunnel, downgrade the tunnel to a cover-only tunnel.
      */
     pub(crate) async fn destroy_tunnel_ref(
         &self,
@@ -533,7 +561,7 @@ impl P2pInterface {
         Ok(())
     }
 
-    /*
+    /**
      *  Send data via specific tunnel
      */
     pub(crate) async fn send_data(
@@ -560,8 +588,9 @@ impl P2pInterface {
         }
     }
 
-    /// Send cover traffic via new random tunnel
-    /// API protocol
+    /**
+     * Send cover traffic from API protocol to
+     */
     pub(crate) async fn send_cover_traffic(&self, cover_size: u16) -> Result<(), P2pError> {
         match *self.round_sync.round_cover_tunnel.lock().await {
             None => Err(P2pError::CoverFailure),
@@ -586,6 +615,9 @@ impl P2pInterface {
         }
     }
 
+    /**
+     * Build a new tunnel (caller or cover)
+     */
     async fn inner_build_tunnel(
         &self,
         listener: Option<ConnectionId>,
@@ -651,6 +683,9 @@ impl P2pInterface {
         }
     }
 
+    /**
+     * Try to update the tunnel with the given tunnel ID
+     */
     async fn update_tunnel(&self, tunnel_id: TunnelId) {
         log::debug!("Tunnel={:?}: Start updating", tunnel_id);
         // get tunnel update reference

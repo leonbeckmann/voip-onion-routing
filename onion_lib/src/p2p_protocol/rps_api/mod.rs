@@ -13,6 +13,9 @@ pub const RPS_QUERY: u16 = 540;
 pub const RPS_PEER: u16 = 541;
 pub const ONION_PORT: u16 = 560;
 
+/**
+ * Sample one peer via the RPS module
+ */
 async fn rps_get_peer(rps_addr: SocketAddr) -> anyhow::Result<Peer> {
     // connect to rps module
     let mut stream = TcpStream::connect(rps_addr).await?;
@@ -49,6 +52,9 @@ async fn rps_get_peer(rps_addr: SocketAddr) -> anyhow::Result<Peer> {
     }
 }
 
+/**
+ * Sample one peer via the RPS module, which is not blocked at the DTLS layer
+ */
 pub async fn rps_get_peer_filtered(
     rps_addr: SocketAddr,
     blocklist: Arc<RwLock<Blocklist>>,
