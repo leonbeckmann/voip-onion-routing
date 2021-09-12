@@ -101,6 +101,10 @@ impl OnionTunnel {
         matches!(self.tunnel_type, TunnelType::Initiator(_))
     }
 
+    pub fn is_downgraded(&self) -> bool {
+        matches!(self.status, TunnelStatus::Downgraded)
+    }
+
     pub fn set_connected(&mut self) {
         // set status
         self.status = TunnelStatus::Connected;
@@ -590,7 +594,12 @@ impl OnionTunnel {
     }
 
     pub(crate) async fn send_cover(&self, data: Vec<u8>) -> Result<(), P2pError> {
-        self.forward_event(FsmEvent::Cover(data)).await
+        // specification requires that cover traffic must only be sent via cover-traffic-only tunnels
+        if self.is_downgraded() {
+            self.forward_event(FsmEvent::Cover(data)).await
+        } else {
+            Err(P2pError::CoverFailure)
+        }
     }
 
     pub(crate) async fn forward_event(&self, e: FsmEvent) -> Result<(), P2pError> {

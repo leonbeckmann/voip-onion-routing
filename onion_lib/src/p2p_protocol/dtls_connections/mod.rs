@@ -278,7 +278,7 @@ impl DtlsSocketLayer {
 
         match ssl_stream {
             Ok(ssl_stream) => {
-                log::info!(
+                log::debug!(
                     "Accepted DTLS channel from {} to {} successful",
                     &remote_addr,
                     socket.local_addr().unwrap(),
@@ -290,7 +290,7 @@ impl DtlsSocketLayer {
                 connection_socket.ssl_stream = Some(ssl_stream);
             }
             Err(e) => {
-                log::info!(
+                log::warn!(
                     "DTLS: Accept connection from {} to {} failed, error during Handshake: {}",
                     &remote_addr,
                     socket.local_addr().unwrap(),
@@ -370,7 +370,7 @@ impl DtlsSocketLayer {
 
         let unexpected_message_error = match ssl_stream {
             Ok(ssl_stream) => {
-                log::info!(
+                log::debug!(
                     "DTLS: Connected channel from {} to {} successful",
                     socket.local_addr().unwrap(),
                     &remote_addr
@@ -382,7 +382,7 @@ impl DtlsSocketLayer {
                 false
             }
             Err(e) => {
-                log::info!(
+                log::warn!(
                     "DTLS: Connect connection from {} to {} failed, error during Handshake: {}",
                     socket.local_addr().unwrap(),
                     &remote_addr,
@@ -544,7 +544,7 @@ impl DtlsSocketLayer {
                 }
             }
         }
-        log::info!(
+        log::trace!(
             // coverage-unreachable
             "Stopped incoming socket forwarding worker at {}", // coverage-unreachable
             socket.local_addr().unwrap()                       // coverage-unreachable
@@ -684,7 +684,7 @@ impl DtlsSocketLayer {
             socket.local_addr().unwrap()                             // coverage-unreachable
         ); // coverage-unreachable
 
-        log::info!(
+        log::trace!(
             // coverage-unreachable
             "DTLS: Stopped outgoing socket forwarding worker at {}", // coverage-unreachable
             socket.local_addr().unwrap()                             // coverage-unreachable
