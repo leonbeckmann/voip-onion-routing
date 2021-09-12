@@ -206,4 +206,15 @@ mod tests {
         let peer2 = Box::<RpsPeer>::try_from(peer.to_be_vec()).unwrap();
         assert_eq!(Box::new(peer), peer2);
     }
+
+    #[test]
+    fn unit_test_rps_invalid() {
+        Box::<RpsPeer>::try_from(vec![]).unwrap_err();
+        // Invalid port map size
+        Box::<RpsPeer>::try_from(vec![0, 0, 1, 0]).unwrap_err();
+        // Invalid IPv4 length
+        Box::<RpsPeer>::try_from(vec![0, 0, 0, 0]).unwrap_err();
+        // Invalid IPv6 length
+        Box::<RpsPeer>::try_from(vec![0, 0, 0, 1]).unwrap_err();
+    }
 }
