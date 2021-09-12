@@ -434,7 +434,7 @@ impl P2pInterface {
                                             log::warn!(
                                                 "Received unexpected frame id at {}, drop the frame and blocking peer", my_addr
                                             );
-                                            self.blocklist.write().await.block(addr);
+                                            self.blocklist.write().await.block(addr).await;
                                             continue;
                                         }
                                         Some((tunnel_id, d)) => {
@@ -475,7 +475,7 @@ impl P2pInterface {
                                     addr,
                                     my_addr
                                 );
-                                self.blocklist.write().await.block(addr);
+                                self.blocklist.write().await.block(addr).await;
                             }
                         };
                     } else {
@@ -484,7 +484,7 @@ impl P2pInterface {
                             addr,
                             my_addr
                         );
-                        self.blocklist.write().await.block(addr);
+                        self.blocklist.write().await.block(addr).await;
                     }
                 }
                 Err(e) => {

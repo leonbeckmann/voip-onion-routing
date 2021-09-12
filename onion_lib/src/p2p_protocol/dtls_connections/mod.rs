@@ -11,7 +11,7 @@ use openssl::x509::{X509StoreContext, X509VerifyResult, X509};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -27,6 +27,7 @@ pub struct DtlsConfig {
     pub blocklist_time: Duration,
     connect_timeout: Duration,
     send_message_timeout: Duration,
+    tunnel_timeout: Duration,
 }
 
 impl DtlsConfig {
@@ -37,6 +38,7 @@ impl DtlsConfig {
         private_host_key: Rsa<Private>,
         connect_timeout: Duration,
         send_message_timeout: Duration,
+        tunnel_timeout: Duration,
     ) -> Self {
         assert_eq!(
             pki_root_cert.issued(&local_peer_identity_cert),
@@ -69,6 +71,7 @@ impl DtlsConfig {
             blocklist_time,
             connect_timeout,
             send_message_timeout,
+            tunnel_timeout,
         }
     }
 }
@@ -78,6 +81,8 @@ pub struct Blocklist {
     block_duration: Duration,
     list: HashMap<SocketAddr, SystemTime>,
     unblock_queue: BTreeMap<SystemTime, Vec<SocketAddr>>,
+    #[allow(clippy::type_complexity)]
+    connection_sockets_list: Vec<Weak<Mutex<HashMap<SocketAddr, (Instant, UdpChannel)>>>>,
 }
 
 impl Blocklist {
@@ -86,6 +91,7 @@ impl Blocklist {
             block_duration,
             list: HashMap::new(),
             unblock_queue: BTreeMap::new(),
+            connection_sockets_list: vec![],
         }
     }
 
@@ -116,7 +122,7 @@ impl Blocklist {
     }
 
     /// Block a peer
-    pub fn block(&mut self, peer: SocketAddr) {
+    pub async fn block(&mut self, peer: SocketAddr) {
         self.cleanup();
         let now = std::time::SystemTime::now();
         self.list.insert(peer, now);
@@ -125,6 +131,20 @@ impl Blocklist {
             entry.push(peer); // coverage-unreachable
         } else {
             self.unblock_queue.insert(now, vec![peer]);
+        }
+
+        // Remove all elements form self.connection_sockets_list
+        let mut connection_sockets_list = vec![];
+        connection_sockets_list.append(&mut self.connection_sockets_list);
+
+        for connection_sockets in connection_sockets_list {
+            if let Some(connection_sockets) = connection_sockets.upgrade() {
+                connection_sockets.lock().await.remove(&peer);
+
+                // Add upgradable references into self.connection_sockets_list again
+                self.connection_sockets_list
+                    .push(Arc::downgrade(&connection_sockets));
+            }
         }
     }
 }
@@ -206,7 +226,7 @@ pub struct DtlsSocketLayer {
     socket: Arc<UdpSocket>,
     dtls_config: Arc<DtlsConfig>,
     blocklist: Arc<RwLock<Blocklist>>,
-    connection_sockets: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
+    connection_sockets: Arc<Mutex<HashMap<SocketAddr, (Instant, UdpChannel)>>>,
     incoming_forwarding_worker: JoinHandle<()>,
     outgoing_forwarding_worker: JoinHandle<()>,
     outgoing_channel: Sender<(Instant, SocketAddr, Vec<u8>)>,
@@ -215,7 +235,7 @@ pub struct DtlsSocketLayer {
 
 impl DtlsSocketLayer {
     async fn accept_channel(
-        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
+        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, (Instant, UdpChannel)>>>,
         socket: Arc<UdpSocket>,
         dtls_config: Arc<DtlsConfig>,
         remote_addr: SocketAddr,
@@ -287,7 +307,7 @@ impl DtlsSocketLayer {
                 let mut connection_sockets = connection_sockets_mutex.lock().await;
                 // Safe unwrap after insert
                 let connection_socket = connection_sockets.get_mut(&remote_addr).unwrap();
-                connection_socket.ssl_stream = Some(ssl_stream);
+                connection_socket.1.ssl_stream = Some(ssl_stream);
             }
             Err(e) => {
                 log::warn!(
@@ -306,7 +326,7 @@ impl DtlsSocketLayer {
     /// peers are connector, but none is in acceptor mode. In that case, the handshake fails with "unexpected message".
     /// This function returns true if it is likely that the connection failed due to this race condition.
     async fn connect_channel(
-        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
+        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, (Instant, UdpChannel)>>>,
         socket: Arc<UdpSocket>,
         dtls_config: Arc<DtlsConfig>,
         remote_addr: SocketAddr,
@@ -378,7 +398,7 @@ impl DtlsSocketLayer {
                 let mut connection_sockets = connection_sockets_mutex.lock().await;
                 // Safe unwrap after insert
                 let udp_channel = connection_sockets.get_mut(&remote_addr).unwrap();
-                udp_channel.ssl_stream = Some(ssl_stream);
+                udp_channel.1.ssl_stream = Some(ssl_stream);
                 false
             }
             Err(e) => {
@@ -405,6 +425,12 @@ impl DtlsSocketLayer {
     ) -> DtlsSocketLayer {
         let socket = Arc::new(UdpSocket::bind(address.clone()).await.unwrap());
         let connection_sockets = Arc::new(Mutex::new(HashMap::new()));
+
+        blocklist
+            .write()
+            .await
+            .connection_sockets_list
+            .push(Arc::downgrade(&connection_sockets));
 
         let socket_clone = socket.clone();
         let connection_sockets_clone = connection_sockets.clone();
@@ -456,7 +482,7 @@ impl DtlsSocketLayer {
 
     async fn forward_incoming_frames(
         socket: Arc<UdpSocket>,
-        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
+        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, (Instant, UdpChannel)>>>,
         dtls_config: Arc<DtlsConfig>,
         blocklist: Arc<RwLock<Blocklist>>,
     ) {
@@ -485,6 +511,7 @@ impl DtlsSocketLayer {
                             &size
                         );
                         connection_socket
+                            .1
                             .raw_incoming
                             .send(buf[..size].to_vec())
                             .unwrap();
@@ -516,7 +543,7 @@ impl DtlsSocketLayer {
                         };
 
                         // Insert forwarding channel into the connection mapping for incoming frames (first handshake and then payload)
-                        connection_sockets.insert(sender, udp_channel);
+                        connection_sockets.insert(sender, (std::time::Instant::now(), udp_channel));
                         drop(connection_sockets);
 
                         // Connection establishment must be executed concurrently to the task, that is forwarding incoming frames
@@ -555,7 +582,7 @@ impl DtlsSocketLayer {
         socket: Arc<UdpSocket>,
         frame_channel_tx: Sender<(Instant, SocketAddr, Vec<u8>)>,
         mut frame_channel_rx: Receiver<(Instant, SocketAddr, Vec<u8>)>,
-        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, UdpChannel>>>,
+        connection_sockets_mutex: Arc<Mutex<HashMap<SocketAddr, (Instant, UdpChannel)>>>,
         dtls_config: Arc<DtlsConfig>,
         blocklist: Arc<RwLock<Blocklist>>,
     ) {
@@ -582,7 +609,7 @@ impl DtlsSocketLayer {
             }
 
             let mut connection_sockets = connection_sockets_mutex.lock().await;
-            if let Some(udp_channel) = connection_sockets.get_mut(&remote_addr) {
+            if let Some((_, udp_channel)) = connection_sockets.get_mut(&remote_addr) {
                 if let Some(s) = &mut udp_channel.ssl_stream {
                     let res = s.write(&frame);
                     if res.is_err() {
@@ -641,7 +668,7 @@ impl DtlsSocketLayer {
                 };
 
                 // Insert forwarding channel into the connection mapping for incoming frames (first handshake and then payload)
-                connection_sockets.insert(remote_addr, udp_channel);
+                connection_sockets.insert(remote_addr, (std::time::Instant::now(), udp_channel));
                 drop(connection_sockets);
 
                 let dtls_config = dtls_config.clone();
@@ -710,10 +737,26 @@ impl DtlsSocketLayer {
             }
 
             let mut connection_sockets = self.connection_sockets.lock().await;
-            for (address, udp_channel) in connection_sockets.iter_mut() {
+
+            // Remove all dead connection sockets using a timeout
+            let mut dead_sockets = vec![];
+            let now = std::time::Instant::now();
+            for (address, (last_usage, _)) in connection_sockets.iter() {
+                if now - last_usage.to_owned() > self.dtls_config.tunnel_timeout {
+                    dead_sockets.push(*address);
+                }
+            }
+            for address in dead_sockets {
+                connection_sockets.remove(&address);
+            }
+
+            for (address, (last_usage, udp_channel)) in connection_sockets.iter_mut() {
                 if let Some(udp_channel) = udp_channel.ssl_stream.as_mut() {
                     match udp_channel.ssl_read(buf) {
-                        Ok(n) => return Ok((n, address.to_owned())),
+                        Ok(n) => {
+                            *last_usage = std::time::Instant::now();
+                            return Ok((n, address.to_owned()));
+                        }
                         Err(ref e) if e.code() == ErrorCode::ZERO_RETURN => {
                             log::debug!("DTLS: recv_from: SSL session closed");
                             // return Ok((0, address.to_owned()))
@@ -768,6 +811,10 @@ impl DtlsSocketLayer {
         if self.blocklist.read().await.is_blocked(&remote_addr) {
             log::warn!("DTLS: Not sending frame to blocked peer {}", &remote_addr);
             return Err(Error::from(ErrorKind::ConnectionRefused));
+        }
+
+        if let Some((last_usage, _)) = self.connection_sockets.lock().await.get_mut(&remote_addr) {
+            *last_usage = std::time::Instant::now();
         }
 
         self.outgoing_channel
@@ -843,6 +890,7 @@ mod tests {
             cert,
             Duration::from_secs(60 * 60 * 24 * 365),
             key_local,
+            Duration::from_secs(10),
             Duration::from_secs(10),
             Duration::from_secs(10),
         );
@@ -995,60 +1043,66 @@ mod tests {
 
     #[test]
     fn unit_blocklist_single_block() {
-        let block_duration = Duration::from_millis(100);
-        let mut blocklist = Blocklist::new(block_duration);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let block_duration = Duration::from_millis(100);
+            let mut blocklist = Blocklist::new(block_duration);
 
-        let addr: SocketAddr = "127.0.0.1:10000".parse().unwrap();
-        assert!(!blocklist.is_blocked(&addr));
-        blocklist.block(addr);
-        assert!(blocklist.is_blocked(&addr));
+            let addr: SocketAddr = "127.0.0.1:10000".parse().unwrap();
+            assert!(!blocklist.is_blocked(&addr));
+            blocklist.block(addr).await;
+            assert!(blocklist.is_blocked(&addr));
 
-        std::thread::sleep(block_duration);
+            std::thread::sleep(block_duration);
 
-        assert!(!blocklist.is_blocked(&addr));
+            assert!(!blocklist.is_blocked(&addr));
+        });
     }
 
     #[test]
     fn unit_blocklist_multi_blocks() {
-        let block_duration = Duration::from_millis(100);
-        let mut blocklist = Blocklist::new(block_duration);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let block_duration = Duration::from_millis(100);
+            let mut blocklist = Blocklist::new(block_duration);
 
-        let addr_1: SocketAddr = "127.0.0.1:10000".parse().unwrap();
-        let addr_2: SocketAddr = "127.0.0.1:10001".parse().unwrap();
+            let addr_1: SocketAddr = "127.0.0.1:10000".parse().unwrap();
+            let addr_2: SocketAddr = "127.0.0.1:10001".parse().unwrap();
 
-        assert!(!blocklist.is_blocked(&addr_1));
-        assert!(!blocklist.is_blocked(&addr_2));
+            assert!(!blocklist.is_blocked(&addr_1));
+            assert!(!blocklist.is_blocked(&addr_2));
 
-        blocklist.block(addr_1);
+            blocklist.block(addr_1).await;
 
-        assert!(blocklist.is_blocked(&addr_1));
-        assert!(!blocklist.is_blocked(&addr_2));
+            assert!(blocklist.is_blocked(&addr_1));
+            assert!(!blocklist.is_blocked(&addr_2));
 
-        std::thread::sleep(block_duration);
+            std::thread::sleep(block_duration);
 
-        assert!(!blocklist.is_blocked(&addr_1));
-        assert!(!blocklist.is_blocked(&addr_2));
+            assert!(!blocklist.is_blocked(&addr_1));
+            assert!(!blocklist.is_blocked(&addr_2));
 
-        blocklist.block(addr_2);
+            blocklist.block(addr_2).await;
 
-        assert!(!blocklist.is_blocked(&addr_1));
-        assert!(blocklist.is_blocked(&addr_2));
+            assert!(!blocklist.is_blocked(&addr_1));
+            assert!(blocklist.is_blocked(&addr_2));
 
-        std::thread::sleep(block_duration);
+            std::thread::sleep(block_duration);
 
-        assert!(!blocklist.is_blocked(&addr_1));
-        assert!(!blocklist.is_blocked(&addr_2));
+            assert!(!blocklist.is_blocked(&addr_1));
+            assert!(!blocklist.is_blocked(&addr_2));
 
-        blocklist.block(addr_1);
+            blocklist.block(addr_1).await;
 
-        assert!(blocklist.is_blocked(&addr_1));
-        assert!(!blocklist.is_blocked(&addr_2));
+            assert!(blocklist.is_blocked(&addr_1));
+            assert!(!blocklist.is_blocked(&addr_2));
 
-        blocklist.block(addr_1);
-        blocklist.block(addr_2);
+            blocklist.block(addr_1).await;
+            blocklist.block(addr_2).await;
 
-        assert!(blocklist.is_blocked(&addr_1));
-        assert!(blocklist.is_blocked(&addr_2));
+            assert!(blocklist.is_blocked(&addr_1));
+            assert!(blocklist.is_blocked(&addr_2));
+        });
     }
 
     #[test]
@@ -1073,6 +1127,7 @@ mod tests {
                 peer.local_peer_identity_cert.clone(),
                 Duration::from_millis(100),
                 peer.private_host_key.clone(),
+                Duration::from_secs(10),
                 Duration::from_secs(10),
                 Duration::from_secs(10),
             );
@@ -1107,7 +1162,8 @@ mod tests {
             blocklist_2
                 .write()
                 .await
-                .block("127.0.0.1:10001".parse().unwrap());
+                .block("127.0.0.1:10001".parse().unwrap())
+                .await;
             socket_1
                 .send_to(&[0, 8, 3], "127.0.0.1:10002")
                 .await
@@ -1117,7 +1173,8 @@ mod tests {
             blocklist_2
                 .write()
                 .await
-                .block("127.0.0.1:10001".parse().unwrap());
+                .block("127.0.0.1:10001".parse().unwrap())
+                .await;
             assert_eq!(
                 socket_2
                     .send_to(&[0, 8, 3], "127.0.0.1:10001")

@@ -344,6 +344,7 @@ impl OnionConfiguration {
                 private_host_key,
                 connect_timeout,
                 send_message_timeout,
+                timeout,
             )),
             timeout,
         })
