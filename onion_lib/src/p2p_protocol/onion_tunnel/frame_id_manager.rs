@@ -117,6 +117,13 @@ mod tests {
         let id_5 = manager.new_frame_id(2, Direction::Backward);
         let id_6 = manager.new_frame_id(2, Direction::Forward);
 
+        FrameIdManager::verify_frame_id(id_1).unwrap();
+        FrameIdManager::verify_frame_id(id_2).unwrap();
+        FrameIdManager::verify_frame_id(id_3).unwrap();
+        FrameIdManager::verify_frame_id(id_4).unwrap();
+        FrameIdManager::verify_frame_id(id_5).unwrap();
+        FrameIdManager::verify_frame_id(id_6).unwrap();
+
         assert_eq!(
             manager.get_tunnel_id(&id_1).unwrap(),
             (1, Direction::Forward)

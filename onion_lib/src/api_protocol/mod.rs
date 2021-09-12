@@ -275,7 +275,7 @@ impl ApiInterface {
                     });
                 }
                 Err(e) => {
-                    // TODO when is this error happening? Do we always have to quit here?
+                    // here either registration at mio failed or cannot construct new stream
                     log::error!("Error occurred during accepting new TCP client: {}", e);
                     return Err(anyhow::Error::from(e));
                 }

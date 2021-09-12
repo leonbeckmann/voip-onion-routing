@@ -82,8 +82,8 @@ pub(crate) enum TunnelStatus {
     Downgraded,
 }
 
-// TODO: Add Test: Downgraded Tunnels must not have any listeners anymore
-// TODO: Add Test: TunnelStatus == Downgrade <=> FSM.state == Downgraded
+// TODO: Add Test for assertion: Downgraded Tunnels must not have any listeners anymore
+// TODO: Add Test for assertion: TunnelStatus == Downgrade <=> FSM.state == Downgraded
 pub(crate) struct OnionTunnel {
     listeners: Arc<(Mutex<bool>, Listeners, Notify)>, // all the api connection listeners
     tunnel_id: TunnelId,                              // unique tunnel id
@@ -438,7 +438,7 @@ impl OnionTunnel {
         blocklist: Arc<RwLock<Blocklist>>,
     ) -> Result<TunnelId, ProtocolError> {
         // select intermediate hops via rps module and hop count
-        // TODO robustness isAlive checks during tunnel establishment, maybe add some more backup peers
+        // TODO Future Work: robustness isAlive checks during tunnel establishment, maybe add some more backup peers
         let mut hops: Vec<Peer> = vec![];
         for i in 0..hop_count {
             let peer = match rps_get_peer_filtered(rps_api_address, blocklist.clone()).await {

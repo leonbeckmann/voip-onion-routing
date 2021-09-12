@@ -128,7 +128,7 @@ impl TunnelManager {
             );
             // only remove link if it points to the tunnel_id, otherwise we are removing a tunnel that
             // has been rebuilt but we dont want to remove the link for the new tunnel
-            let remove_link = if let Some(link_v) = self.reverse_links.get(&old_id) {
+            let remove_link = if let Some(link_v) = self.links.get(&old_id) {
                 link_v == tunnel_id
             } else {
                 false
@@ -181,5 +181,46 @@ impl TunnelManager {
                 tunnel.shutdown_tunnel().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::p2p_protocol::onion_tunnel::tunnel_manager::TunnelManager;
+
+    #[test]
+    fn unit_tunnel_manager_links() {
+        let mut manager = TunnelManager::new();
+        // add link 1 -> 2 and reverse_link 2 -> 1
+        manager.add_redirection_link(1, 2);
+        assert_eq!(manager.resolve_tunnel_id(1), 2);
+        assert_eq!(manager.resolve_reverse_tunnel_id(2), 1);
+        // update link 1 -> 3 and add reverse_link 3 -> 1
+        manager.add_redirection_link(2, 3);
+        assert_eq!(manager.resolve_tunnel_id(1), 3);
+        assert_eq!(manager.resolve_reverse_tunnel_id(3), 1);
+        assert_eq!(manager.resolve_reverse_tunnel_id(2), 1);
+        // remove old reverse_link 2 -> 1
+        manager.remove_redirection_link(&2);
+        assert_eq!(manager.resolve_tunnel_id(1), 3);
+        assert_eq!(manager.resolve_reverse_tunnel_id(3), 1);
+        assert_eq!(manager.resolve_reverse_tunnel_id(2), 2);
+        // remove link 1 -> 3 and reverse_link 3 -> 1
+        manager.remove_redirection_link(&3);
+        assert_eq!(manager.resolve_tunnel_id(1), 1);
+        assert_eq!(manager.resolve_reverse_tunnel_id(3), 3);
+        assert_eq!(manager.resolve_reverse_tunnel_id(2), 2);
+        // add link 1 -> 2 and reverse_link 2 -> 1
+        manager.add_redirection_link(1, 2);
+        // update to 1 -> 3 and 3 -> 1
+        manager.add_redirection_link(2, 3);
+        manager.remove_redirection_link(&2);
+        // update to 1 -> 4 and 4 -> 1
+        manager.add_redirection_link(3, 4);
+        manager.remove_redirection_link(&3);
+        assert_eq!(manager.resolve_tunnel_id(1), 4);
+        assert_eq!(manager.resolve_reverse_tunnel_id(2), 2);
+        assert_eq!(manager.resolve_reverse_tunnel_id(3), 3);
+        assert_eq!(manager.resolve_reverse_tunnel_id(4), 1);
     }
 }

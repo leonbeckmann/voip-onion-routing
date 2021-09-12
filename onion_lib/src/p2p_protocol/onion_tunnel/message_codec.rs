@@ -313,7 +313,6 @@ impl P2pCodec for InitiatorEndpoint {
                 // layered encryption via iv and keys using the crypto contexts
                 let mut iv: Option<Vec<u8>> = None;
                 for (i, cc) in self.crypto_contexts.iter_mut().rev().enumerate() {
-                    // TODO makes this end-to-end AES-GCM for integrity protection
                     let (iv_, data_) = cc.encrypt(iv.as_deref(), &data, i == 0)?;
                     iv = Some(iv_);
                     data = data_;
@@ -973,7 +972,7 @@ impl P2pCodec for IntermediateHopCodec {
             Direction::Backward => {
                 // encrypt using iv and key
                 log::debug!("Tunnel={:?}: Hop receives a backward message, encrypt the payload and pass it to the prev hop {:?}", self.tunnel_id, self.prev_hop);
-                // TODO intermediate hop should never use end-to-end, no integrity protection required
+                // only use AES-GCM once, which is that the next hop sends its server_hello back
                 let (iv, encrypted_data) =
                     self.crypto_context
                         .encrypt(Some(&iv), &data, !self.server_hello_forwarded)?;

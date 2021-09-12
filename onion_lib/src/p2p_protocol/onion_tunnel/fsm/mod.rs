@@ -403,7 +403,7 @@ pub(super) trait FiniteStateMachine {
                         Err(ProtocolError::UnexpectedMessageType)
                     }
                     FsmEvent::Close => {
-                        // TODO is this always avoided?
+                        // this should never be called since closing is part of downgrading, which is only called on connected tunnels
                         log::warn!(
                             "Tunnel={:?}: Received close event for non-connected FSM.",
                             self.tunnel_id()
