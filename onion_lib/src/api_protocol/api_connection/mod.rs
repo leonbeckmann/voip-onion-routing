@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // FIXME on MacOS line 205 unwrap failed
+    #[cfg_attr(not(target_os = "linux"), ignore)] // FIXME on MacOS line 205 unwrap failed
     fn unit_api_connection() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
