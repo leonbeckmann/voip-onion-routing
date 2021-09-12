@@ -249,7 +249,7 @@ impl DtlsSocketLayer {
         acceptor_builder
             .set_certificate(&dtls_config.local_peer_identity_cert)
             .unwrap();
-        // TODO PKI future work: Support multi layer certificate chains
+        // PKI future work: Support multi layer certificate chains
         acceptor_builder
             .add_extra_chain_cert(dtls_config.pki_root_cert.clone())
             .unwrap();
@@ -340,7 +340,7 @@ impl DtlsSocketLayer {
         connector_builder
             .set_certificate(&dtls_config.local_peer_identity_cert)
             .unwrap();
-        // TODO PKI future work: Support multi layer certificate chains
+        // PKI future work: Support multi layer certificate chains
         connector_builder
             .add_extra_chain_cert(dtls_config.pki_root_cert.clone())
             .unwrap();

@@ -141,7 +141,7 @@ impl OnionConfiguration {
             },
         };
 
-        // TODO PKI future work: Use stack_from_pem to read certificate chains with more than two layers
+        // PKI future work: Use stack_from_pem to read certificate chains with more than two layers
         let peer_cert = match X509::from_pem(&peer_cert_pem) {
             Ok(cert) => cert,
             Err(e) => {
