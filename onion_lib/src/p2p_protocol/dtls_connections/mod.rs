@@ -861,7 +861,7 @@ mod tests {
         cert_pki: X509,
         pki_name: &X509NameRef,
         pkey_pki: &PKeyRef<Private>,
-    ) -> Arc<DtlsConfig> {
+    ) -> DtlsConfig {
         let socketaddr: SocketAddr = peer_addr.parse().unwrap();
         let hostname = sha256(format!("{}::{}", socketaddr.ip(), socketaddr.port()).as_bytes())
             .encode_hex::<String>();
@@ -885,7 +885,7 @@ mod tests {
         cert.sign(pkey_pki, MessageDigest::sha256()).unwrap();
         let cert = cert.build();
 
-        let config = DtlsConfig::new(
+        DtlsConfig::new(
             cert_pki,
             cert,
             Duration::from_secs(60 * 60 * 24 * 365),
@@ -893,8 +893,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(10),
             Duration::from_secs(10),
-        );
-        Arc::new(config)
+        )
     }
 
     fn pki_instance() -> (X509, X509Name, PKey<Private>) {
@@ -935,7 +934,7 @@ mod tests {
 
         (
             blocklist.clone(),
-            DtlsSocketLayer::new(addr, config, blocklist).await,
+            DtlsSocketLayer::new(addr, Arc::new(config), blocklist).await,
         )
     }
 
@@ -956,8 +955,9 @@ mod tests {
 
         rt.block_on(async {
             let blocklist = Arc::new(RwLock::new(Blocklist::new(Duration::from_secs(60))));
-            let socket_1 = DtlsSocketLayer::new(addr_1, config_1, blocklist.clone()).await;
-            let socket_2 = DtlsSocketLayer::new(addr_2, config_2, blocklist).await;
+            let socket_1 =
+                DtlsSocketLayer::new(addr_1, Arc::new(config_1), blocklist.clone()).await;
+            let socket_2 = DtlsSocketLayer::new(addr_2, Arc::new(config_2), blocklist).await;
 
             tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1000,6 +1000,44 @@ mod tests {
     }
 
     #[test]
+    fn unit_dtls_timeout() {
+        let addr_1 = "127.0.0.1:8011";
+        let addr_2 = "127.0.0.1:8012";
+
+        let (cert_pki, pki_name, pkey_pki) = pki_instance();
+
+        let mut config_1 = peer_instance(addr_1, cert_pki.clone(), &pki_name, &pkey_pki);
+        let mut config_2 = peer_instance(addr_2, cert_pki, &pki_name, &pkey_pki);
+
+        config_1.tunnel_timeout = Duration::from_millis(500);
+        config_2.tunnel_timeout = Duration::from_millis(500);
+
+        let mut buf = vec![0; 1400];
+        rand::thread_rng().fill_bytes(&mut buf);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let blocklist = Arc::new(RwLock::new(Blocklist::new(Duration::from_secs(60))));
+            let socket_1 =
+                DtlsSocketLayer::new(addr_1, Arc::new(config_1), blocklist.clone()).await;
+            let socket_2 = DtlsSocketLayer::new(addr_2, Arc::new(config_2), blocklist).await;
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            socket_1.send_to(&[2, 3], addr_2).await.unwrap();
+
+            // Sleep tunnel timeout duration
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+
+            let mut buf_in = vec![0; 1024];
+            timeout(Duration::from_millis(500), socket_2.recv_from(&mut buf_in))
+                .await
+                .unwrap_err();
+        });
+    }
+
+    #[test]
     fn unit_dtls_loopback() {
         let addr = "127.0.0.1:8005";
 
@@ -1014,7 +1052,7 @@ mod tests {
 
         rt.block_on(async {
             let blocklist = Arc::new(RwLock::new(Blocklist::new(Duration::from_secs(60))));
-            let socket = DtlsSocketLayer::new(addr, config, blocklist).await;
+            let socket = DtlsSocketLayer::new(addr, Arc::new(config), blocklist).await;
 
             tokio::time::sleep(Duration::from_secs(1)).await;
 
