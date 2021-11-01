@@ -1,20 +1,10 @@
+![Tests](https://github.com/leonbeckmann/voip-onion-routing/actions/workflows/ci.yml/badge.svg?branch=master)
+
 # VoidPhone Project - Onion Module
 
-Onion Module of the VoidPhone Project is responsible for providing a layer for constructing anonymous onion tunnels within a peer-to-peer network.
+The Onion Module of the VoidPhone Project at TUM is responsible for providing a layer for constructing anonymous onion tunnels within a peer-to-peer network.
 
-Tested on Linux and MacOsX.
-
-#### Master Branch Status
-
-[![pipeline status](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/master/pipeline.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/master)
-
-[![coverage report](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/master/coverage.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/master)
-
-#### Develop Branch Status
-
-[![pipeline status](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/develop/pipeline.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/develop)
-
-[![coverage report](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/badges/develop/coverage.svg)](https://gitlab.lrz.de/netintum/teaching/p2psec_projects_2021/Onion-1/-/commits/develop)
+Tested on Linux and macOS.
 
 ## Building
 
