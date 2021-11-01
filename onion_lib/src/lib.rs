@@ -111,13 +111,13 @@ mod tests {
         x509::{X509Builder, X509Name},
     };
     use pin_utils::pin_mut;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     use crate::{config_parser::create_config_file, run_peer, run_peer_async};
 
     #[test]
     fn unit_invalid_config() {
-        let dir = TempDir::new("onion-test").unwrap();
+        let dir = TempDir::new().unwrap();
         let invalid_config_file = dir.path().join("invalid.ini");
 
         let mut config = Ini::new();
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn unit_valid_config() {
         // create tmp dir that will be automatically dropped afterwards
-        let dir = TempDir::new("onion-test").unwrap();
+        let dir = TempDir::new().unwrap();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn unit_multiple_with_same_p2p_port() {
-        let dir = TempDir::new("onion-test").unwrap();
+        let dir = TempDir::new().unwrap();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn unit_multiple_with_same_api_port() {
-        let dir = TempDir::new("onion-test").unwrap();
+        let dir = TempDir::new().unwrap();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {

@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread::sleep;
 use std::time::Duration;
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 use onion_lib::api_protocol::messages::{
     OnionCover, OnionError, OnionMessageHeader, OnionTunnelBuild, OnionTunnelData,
@@ -180,7 +180,7 @@ fn integration_test() {
     log::info!("Starting integration test");
 
     // run alice and bob and hop1
-    let dir = TempDir::new("onion-test").unwrap();
+    let dir = TempDir::new().unwrap();
 
     let config_file_alice = dir.path().join("alice.config");
     let config_file_bob = dir.path().join("bob.config");

@@ -492,7 +492,7 @@ pub(crate) fn create_config_file<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
 
-    extern crate tempdir;
+    extern crate tempfile;
     use super::ParsingError;
     use crate::config_parser::{create_config_file, OnionConfiguration};
     use openssl::asn1::Asn1Time;
@@ -504,12 +504,12 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use std::time::Duration;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     #[test]
     fn unit_config_parser() {
         // create tmp dir that will be automatically dropped afterwards
-        let dir = TempDir::new("onion-test").unwrap();
+        let dir = TempDir::new().unwrap();
 
         // create paths for host-key and config files
         let host_key_file = dir.path().join("hostkey");
