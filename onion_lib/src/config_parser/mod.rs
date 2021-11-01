@@ -81,7 +81,7 @@ impl OnionConfiguration {
                 Err(e) => {
                     return Err(ParsingError::from_string(format!(
                         "Cannot access hostkey file: {}",
-                        e.to_string()
+                        e
                     )));
                 }
             },
@@ -92,7 +92,7 @@ impl OnionConfiguration {
             Err(e) => {
                 return Err(ParsingError::from_string(format!(
                     "Cannot parse hostkey from pem: {}",
-                    e.to_string()
+                    e
                 )))
             }
         };
@@ -109,7 +109,7 @@ impl OnionConfiguration {
                 Err(e) => {
                     return Err(ParsingError::from_string(format!(
                         "Cannot access private_hostkey file: {}",
-                        e.to_string()
+                        e
                     )));
                 }
             },
@@ -120,7 +120,7 @@ impl OnionConfiguration {
             Err(e) => {
                 return Err(ParsingError::from_string(format!(
                     "Cannot parse private_hostkey from pem: {}",
-                    e.to_string()
+                    e
                 )))
             }
         };
@@ -135,7 +135,7 @@ impl OnionConfiguration {
                 Err(e) => {
                     return Err(ParsingError::from_string(format!(
                         "Cannot access hostkey_cert file: {}",
-                        e.to_string()
+                        e
                     )));
                 }
             },
@@ -147,7 +147,7 @@ impl OnionConfiguration {
             Err(e) => {
                 return Err(ParsingError::from_string(format!(
                     "Cannot parse hostkey_cert to X509 certificate: {}",
-                    e.to_string()
+                    e
                 )));
             }
         };
@@ -162,7 +162,7 @@ impl OnionConfiguration {
                 Err(e) => {
                     return Err(ParsingError::from_string(format!(
                         "Cannot access pki_root_cert file: {}",
-                        e.to_string()
+                        e
                     )));
                 }
             },
@@ -173,7 +173,7 @@ impl OnionConfiguration {
             Err(e) => {
                 return Err(ParsingError::from_string(format!(
                     "Cannot parse pki_root_cert to X509 certificate: {}",
-                    e.to_string()
+                    e
                 )));
             }
         };
@@ -213,7 +213,7 @@ impl OnionConfiguration {
                 Err(e) => {
                     return Err(ParsingError::from_string(format!(
                         "Cannot parse onion's api_address: {}",
-                        e.to_string()
+                        e
                     )))
                 }
             },
@@ -239,7 +239,7 @@ impl OnionConfiguration {
                 Err(e) => {
                     return Err(ParsingError::from_string(format!(
                         "Cannot parse rps's api_address: {}",
-                        e.to_string()
+                        e
                     )))
                 }
             },
