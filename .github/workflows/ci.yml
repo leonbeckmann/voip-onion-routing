@@ -22,7 +22,7 @@ jobs:
           - stable
           - nightly
           - beta
-          - 1.49.0 # Minimum supported rust version
+          # - 1.49.0 # Minimum supported rust version
     steps:
       - uses: actions/checkout@v2
 
