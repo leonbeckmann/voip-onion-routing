@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    - cron: '0 0 1 * *' # trigger monthly
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  Build_and_Test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # Run on latest ubuntu and macos using latest stable and nightly toolchain
+        os: [ubuntu-latest, macos-latest]
+        rust:
+          - stable
+          - nightly
+          - beta
+          - 1.49.0 # Minimum supported rust version
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install Linux Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update -yq && sudo apt-get install -y protobuf-compiler && protoc --version
+
+      - name: Install macOS Dependencies
+        if: matrix.os == 'macos-latest'
+        run: brew update && brew install protobuf && protoc --version
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          override: true
+          components: clippy, rustfmt
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --all-features --verbose
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all-features --verbose
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets --all-features -- -D warnings
