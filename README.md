@@ -1,5 +1,5 @@
 ![Tests](https://github.com/leonbeckmann/voip-onion-routing/actions/workflows/ci.yml/badge.svg?branch=master)
-
+[![Coverage Status](https://coveralls.io/repos/github/leonbeckmann/voip-onion-routing/badge.svg)](https://coveralls.io/github/leonbeckmann/voip-onion-routing)
 # VoidPhone Project - Onion Module
 
 The Onion Module of the VoidPhone Project at TUM is responsible for providing a layer for constructing anonymous onion tunnels within a peer-to-peer network.

@@ -13,30 +13,26 @@ jobs:
           profile: minimal
           toolchain: nightly
           override: true
+          components: llvm-tools-preview
 
       - name: Install Linux Dependencies
         run: sudo apt-get update -yq && sudo apt-get install -y protobuf-compiler && protoc --version
 
+      - name: Install grcov
+        run: cargo install grcov
+
       - name: Run Tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --all-features --no-fail-fast
-        env:
-          CARGO_INCREMENTAL: '0'
-          RUSTFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=abort -Zpanic_abort_tests'
-          RUSTDOCFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=abort -Zpanic_abort_tests'
+        run: RUSTFLAGS='-Zinstrument-coverage --cfg coverage' LLVM_PROFILE_FILE='coverage-%p-%m.profraw' cargo test
 
       - name: Gather Coverage Data
-        id: coverage
-        uses: actions-rs/grcov@v0.1
+        run: grcov . -s . --binary-path ./target/debug/ -t html --branch --ignore-not-existing --ignore 'onion_lib/build.rs' --ignore 'onion_lib/src/p2p_protocol/messages/*' --ignore '*.cargo/*' --ignore 'onion_bin/*' --ignore --ignore 'onion_tests/*' -o coverage/ --excl-line coverage-unreachable & grcov . -s . --binary-path ./target/debug/ -t lcov --branch --ignore-not-existing --ignore 'onion_lib/build.rs' --ignore '*.cargo/*' --ignore 'onion_lib/src/p2p_protocol/messages/*' --ignore 'onion_bin/*' --ignore --ignore 'onion_tests/*' -o coverage/lcov.info --excl-line coverage-unreachable
 
       - name: Coveralls Upload
         uses: coverallsapp/github-action@master
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel: true
-          path-to-lcov: lcov.info
+          path-to-lcov: coverage/lcov.info
 
   grcov_finalize:
     runs-on: ubuntu-latest
