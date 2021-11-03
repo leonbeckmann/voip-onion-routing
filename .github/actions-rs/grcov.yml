@@ -2,5 +2,6 @@ ignore-not-existing: true
 llvm: true
 output-type: lcov
 output-path: ./lcov.info
+source-dir: ./onionn_lib/src
 ignore-dir:
 ignore:

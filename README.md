@@ -4,9 +4,8 @@
 
 The Onion Module of the VoidPhone Project at TUM is responsible for providing a layer for constructing anonymous onion tunnels within a peer-to-peer network.
 
-[TUM Project Specification](./docs/voidphone_spec.pdf)
-
-[Project Documentation](./docs/Final_Report.pdf)
+Checkout the [TUM Project Specification](./docs/voidphone_spec.pdf) for more information on the project requirements and 
+the [Project Documentation](./docs/Final_Report.pdf) for the architecture and a security analysis of the actual implementation.
 
 Tested on Linux and macOS.
 
