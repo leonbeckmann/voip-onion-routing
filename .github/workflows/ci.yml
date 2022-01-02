@@ -32,7 +32,7 @@ jobs:
 
       - name: Install macOS Dependencies
         if: matrix.os == 'macos-latest'
-        run: brew update && brew install protobuf && protoc --version
+        run: brew update && brew upgrade && brew install protobuf && protoc --version
 
       - uses: actions-rs/toolchain@v1
         with:
